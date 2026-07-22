@@ -1,0 +1,25 @@
+[Unit]
+Description=OTLens OT/ICS Network Monitoring Sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otlens
+Group=otlens
+WorkingDirectory=/opt/otlens
+ExecStart=/opt/otlens/otlens
+Restart=on-failure
+RestartSec=5s
+
+# Packet capture on Linux normally needs these capabilities.
+# Keep the process non-root.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+
+# Keep persistent state and configuration in the application directories.
+ReadWritePaths=/opt/otlens /var/lib/otlens /var/log/otlens
+
+[Install]
+WantedBy=multi-user.target

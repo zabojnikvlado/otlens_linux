@@ -1,0 +1,5 @@
+CVE-2024-1234,Siemens,SIMATIC S7-1200,high,SIMATIC S7-1200 Improper Access Control,2024-04-02,https://www.cisa.gov/news-events/ics-advisories/icsa-24-093-01
+CVE-2023-5678,Siemens,SIMATIC S7-1500,critical,SIMATIC S7-1500 Denial of Service,2023-11-15,https://www.cisa.gov/news-events/ics-advisories/icsa-23-319-01
+CVE-2024-8765,Schneider Electric,Modicon M580,high,Modicon Controllers Authentication Bypass,2024-06-20,https://www.cisa.gov/news-events/ics-advisories/icsa-24-172-04
+CVE-2023-9012,Rockwell Automation,ControlLogix,medium,ControlLogix Improper Input Validation,2023-08-10,https://www.cisa.gov/news-events/ics-advisories/icsa-23-222-01
+CVE-2024-3456,ABB,AC500 PLC,low,AC500 Information Disclosure,2024-02-28,https://www.cisa.gov/news-events/ics-advisories/icsa-24-059-02

@@ -1,0 +1,24 @@
+# Go binaries
+*.exe
+*.dll
+*.so
+
+# Build output
+/bin/
+/build/
+
+# IDE
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime-generated (not source)
+/tmp-uploads/
+otlens.db
+otlens.crt
+otlens.key

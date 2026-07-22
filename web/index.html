@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OTLens — Network Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">OT</span><span class="brand-name">LENS</span>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="topology">Topology</button>
+    <button class="tab" data-tab="assets">Assets</button>
+    <button class="tab" data-tab="flows">Flows</button>
+    <button class="tab" data-tab="tags">OT Tags</button>
+    <button class="tab" data-tab="alerts">Alerts<span class="tab-badge" id="alert-badge" hidden>0</span></button>
+    <button class="tab" data-tab="rules">Rules</button>
+    <button class="tab" data-tab="admin">Admin</button>
+  </nav>
+
+  <div class="status-cluster">
+    <div class="baseline-badge" id="baseline-badge">
+      <span class="dot" id="baseline-dot"></span>
+      <span id="baseline-text">—</span>
+    </div>
+    <div class="conn-badge" id="conn-badge">
+      <span class="dot" id="conn-dot"></span>
+      <span id="conn-text">connecting…</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <section class="view active" id="view-topology">
+    <div class="topology-search">
+      <input type="text" id="topology-search-input" placeholder="Search by IP or MAC address...">
+      <button id="topology-search-clear" class="ack-btn" hidden>✕</button>
+      <span id="topology-search-status"></span>
+    </div>
+    <div class="topology-vlan-filter" id="topology-vlan-filter" hidden></div>
+    <div class="panel graph-panel">
+      <div id="graph"></div>
+      <div class="legend">
+        <div class="legend-item"><span class="swatch ot"></span>OT device</div>
+        <div class="legend-item"><span class="swatch it"></span>IT device</div>
+        <div class="legend-item"><span class="swatch unconfirmed"></span>Unconfirmed (new)</div>
+        <div class="legend-item"><span class="swatch honeypot"></span>Honeypot (decoy)</div>
+        <div class="legend-item"><span class="edge-swatch ot"></span>OT link</div>
+        <div class="legend-item"><span class="edge-swatch it"></span>IT link</div>
+        <div class="legend-item"><span class="edge-swatch honeypot"></span>From honeypot (lateral movement)</div>
+        <div class="legend-item"><span class="edge-swatch cross-vlan"></span>Cross-VLAN traffic</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="view-assets">
+    <div class="bulk-bar" id="assets-bulk-bar" hidden>
+      <span id="assets-bulk-count">0 selected</span>
+      <button class="ack-btn confirm-btn" id="bulk-delete-assets-btn">Delete selected</button>
+    </div>
+    <div class="flows-toolbar">
+      <label for="assets-page-size">Rows per page:</label>
+      <select id="assets-page-size">
+        <option value="10">10</option>
+        <option value="20">20</option>
+        <option value="50">50</option>
+        <option value="all">All</option>
+      </select>
+    </div>
+    <div class="panel scrollable">
+      <table class="data-table" id="table-assets">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="assets-select-all"></th>
+            <th data-sort="ip">IP</th><th data-sort="mac">MAC</th><th data-sort="vendor">Vendor</th><th data-sort="hostname">Hostname</th><th data-sort="class">Class</th><th>Protocols</th>
+            <th data-sort="score">Score</th>
+            <th data-sort="packets">Packets</th><th data-sort="first">First seen</th><th data-sort="last">Last seen</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" hidden>No assets discovered yet. Capture is running — devices appear here as traffic is observed.</p>
+      <div class="pagination" id="assets-pagination"></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-flows">
+    <div class="flows-toolbar">
+      <label for="flows-page-size">Rows per page:</label>
+      <select id="flows-page-size">
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="all">All</option>
+      </select>
+    </div>
+    <div class="panel scrollable">
+      <table class="data-table" id="table-flows">
+        <thead>
+          <tr>
+            <th data-sort="src">Source</th><th data-sort="dst">Destination</th><th data-sort="protocol">Protocol</th>
+            <th data-sort="packets">Packets</th><th data-sort="bytes">Bytes</th><th data-sort="first">First seen</th><th data-sort="last">Last seen</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" hidden>No flows tracked yet.</p>
+    </div>
+    <div class="pagination" id="flows-pagination"></div>
+  </section>
+
+  <section class="view" id="view-tags">
+    <p class="tab-hint">Click a row to see its full value/control history.</p>
+    <div class="panel scrollable">
+      <table class="data-table" id="table-tags">
+        <thead>
+          <tr>
+            <th data-sort="device">Device</th><th data-sort="protocol">Protocol</th><th data-sort="address">Address</th><th data-sort="op">Op</th>
+            <th data-sort="value">Value</th><th>Previous</th><th data-sort="changed">Changed</th><th data-sort="polls">Polls</th><th data-sort="changes">Changes</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" hidden>No OT variables observed yet. This fills in once Modbus/S7comm traffic is seen.</p>
+    </div>
+  </section>
+
+  <section class="view" id="view-alerts">
+    <div class="bulk-bar" id="alerts-bulk-bar" hidden>
+      <span id="alerts-bulk-count">0 selected</span>
+      <button class="ack-btn" id="bulk-approve-btn">Approve selected</button>
+      <button class="ack-btn confirm-btn" id="bulk-confirm-btn">Confirm selected</button>
+    </div>
+    <div class="panel scrollable">
+      <table class="data-table" id="table-alerts">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="alerts-select-all"></th>
+            <th data-sort="severity">Severity</th><th data-sort="status">Status</th><th data-sort="type">Type</th><th data-sort="message">Message</th><th data-sort="count">Count</th>
+            <th data-sort="first">First seen</th><th data-sort="last">Last seen</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" hidden>No alerts. Clean bill of health.</p>
+    </div>
+  </section>
+
+  <section class="view" id="view-rules">
+    <div class="flows-toolbar">
+      <button class="ack-btn" id="add-rule-btn">+ Add rule</button>
+    </div>
+    <div class="panel scrollable">
+      <table class="data-table" id="table-rules">
+        <thead>
+          <tr>
+            <th>On/Off</th>
+            <th>Name</th><th>Kind</th><th>Condition</th><th>Severity</th>
+            <th>Hits</th><th>Last hit</th><th>Last station</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" hidden>No rules configured.</p>
+    </div>
+  </section>
+
+  <section class="view" id="view-admin">
+
+    <div class="admin-column">
+
+      <div class="admin-section">
+        <h3>Capture control</h3>
+        <div class="panel capture-control-panel">
+          <div class="capture-status-row">
+            <span class="capture-status-badge" id="capture-status-badge">
+              <span class="dot" id="capture-status-dot"></span>
+              <span id="capture-status-text">checking…</span>
+            </span>
+            <button class="ack-btn" id="capture-stop-btn">Stop capture</button>
+            <button class="ack-btn" id="capture-start-btn">Start capture</button>
+          </div>
+          <p class="admin-note" id="capture-mode-note"></p>
+        </div>
+      </div>
+
+      <div class="admin-section">
+        <h3>Analyze a saved capture</h3>
+        <div class="panel capture-control-panel">
+          <div class="capture-upload-row">
+            <input type="file" id="capture-file-input" accept=".pcap,.pcapng">
+            <button class="ack-btn confirm-btn" id="capture-analyze-btn">Analyze file</button>
+            <span id="capture-analyze-status"></span>
+          </div>
+          <p class="admin-note">Capture must be stopped first. Timestamps in the analyzed data come from the file itself, not from when it was processed.</p>
+        </div>
+      </div>
+
+      <div class="admin-section">
+        <h3 class="danger-heading">Danger zone</h3>
+        <div class="panel danger-panel">
+          <div class="capture-status-row">
+            <span>Permanently erase all assets, flows, OT tags, and alerts from memory and disk.</span>
+            <button class="ack-btn confirm-btn" id="wipe-database-btn">Wipe database</button>
+          </div>
+          <p class="admin-note">Capture must be stopped first. This cannot be undone — new data starts accumulating again as soon as capture resumes.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<div class="modal-backdrop" id="tag-history-backdrop" hidden>
+  <div class="modal" id="tag-history-modal">
+    <div class="modal-header">
+      <h3 id="tag-history-title">Tag history</h3>
+      <button class="modal-close" id="tag-history-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tag-history-summary" id="tag-history-summary"></div>
+      <div class="tag-history-chart-wrap" id="tag-history-chart-wrap" hidden>
+        <canvas id="tag-history-chart"></canvas>
+      </div>
+      <p class="empty-state" id="tag-history-chart-empty" hidden></p>
+      <h4 class="modal-subheading">Value changes</h4>
+      <table class="data-table" id="tag-history-changes-table">
+        <thead><tr><th>Changed</th><th>Previous value</th><th>New value</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" id="tag-history-changes-empty" hidden>No value changes recorded yet.</p>
+      <h4 class="modal-subheading">Control events</h4>
+      <table class="data-table" id="tag-history-events-table">
+        <thead><tr><th>Time</th><th>Function</th><th>Source</th><th>Security relevant</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" id="tag-history-events-empty" hidden>No control events recorded yet.</p>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="asset-vuln-backdrop" hidden>
+  <div class="modal" id="asset-vuln-modal">
+    <div class="modal-header">
+      <h3 id="asset-vuln-title">Known vulnerabilities</h3>
+      <button class="modal-close" id="asset-vuln-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tag-history-summary" id="asset-vuln-summary"></div>
+      <table class="data-table" id="asset-vuln-table">
+        <thead><tr><th>CVE</th><th>Severity</th><th>Title</th><th>Published</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-state" id="asset-vuln-empty" hidden></p>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="add-rule-backdrop" hidden>
+  <div class="modal" id="add-rule-modal">
+    <div class="modal-header">
+      <h3>Add rule</h3>
+      <button class="modal-close" id="add-rule-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <form id="add-rule-form">
+        <label class="form-field">Name (optional)
+          <input type="text" id="add-rule-name" placeholder="e.g. Watch decommissioned server">
+        </label>
+        <label class="form-field">Field
+          <select id="add-rule-field">
+            <option value="src_ip">Source IP</option>
+            <option value="dst_ip">Destination IP</option>
+            <option value="either_ip">Either IP (source or destination)</option>
+            <option value="protocol">Protocol (TCP/UDP)</option>
+            <option value="port">Port</option>
+          </select>
+        </label>
+        <label class="form-field">Value
+          <input type="text" id="add-rule-value" placeholder="e.g. 192.168.1.99" required>
+        </label>
+        <label class="form-field">Severity
+          <select id="add-rule-severity">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </label>
+        <div class="form-actions">
+          <button type="submit" class="ack-btn confirm-btn">Create rule</button>
+        </div>
+        <p class="empty-state" id="add-rule-error" hidden></p>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
