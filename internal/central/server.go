@@ -37,7 +37,7 @@ func (s *Server) Router() *gin.Engine {
     r := gin.Default()
     r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/ui/") })
     r.Static("/ui", centralWebDir())
-    r.GET("/ui/", func(c *gin.Context) { c.File(filepath.Join(centralWebDir(), "index.html")) })
+
     r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
     api := r.Group("/v1", s.auth)
     api.POST("/sensors/register", s.register)
