@@ -346,7 +346,7 @@ type CentralConfig struct {
 			MinVersion   string   `mapstructure:"minversion"`
 			CipherSuites []string `mapstructure:"ciphersuites"`
 		} `mapstructure:"tls"`
-	}
+	} `mapstructure:"web"`
 	SensorAPI struct {
 		Host string `mapstructure:"host"`
 		Port int    `mapstructure:"port"`
@@ -357,7 +357,7 @@ type CentralConfig struct {
 			MinVersion   string   `mapstructure:"minversion"`
 			CipherSuites []string `mapstructure:"ciphersuites"`
 		} `mapstructure:"tls"`
-	}
+	} `mapstructure:"sensor_api"`
 	Database struct {
 		Host     string `mapstructure:"host"`
 		Port     int    `mapstructure:"port"`
@@ -365,11 +365,11 @@ type CentralConfig struct {
 		User     string `mapstructure:"user"`
 		Password string `mapstructure:"password"`
 		SSLMode  string `mapstructure:"sslmode"`
-	}
+	} `mapstructure:"database"`
 	Auth struct {
 		ManagementToken string `mapstructure:"management_token"`
 		SensorToken     string `mapstructure:"sensor_token"`
-	}
+	} `mapstructure:"auth"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -408,6 +408,22 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	var cfg CentralConfig
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("central config parse failed: %w", err)
+	}
+	// Defensive defaults after Unmarshal. These protect startup even when an
+	// older configuration omits a listener section. In particular, port 0
+	// would make Go bind an arbitrary ephemeral port and leave sensors unable
+	// to find the Central API.
+	if cfg.Web.Host == "" {
+		cfg.Web.Host = "0.0.0.0"
+	}
+	if cfg.Web.Port == 0 {
+		cfg.Web.Port = 8443
+	}
+	if cfg.SensorAPI.Host == "" {
+		cfg.SensorAPI.Host = "0.0.0.0"
+	}
+	if cfg.SensorAPI.Port == 0 {
+		cfg.SensorAPI.Port = 9443
 	}
 	if cfg.Database.Host == "" || cfg.Database.Name == "" || cfg.Database.User == "" {
 		return nil, fmt.Errorf("central database host, name and user must be configured")
