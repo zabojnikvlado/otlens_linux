@@ -1,4 +1,4 @@
-// Package config loads and validates configs/config.yaml (via
+// Package config loads and validates configs/sensor.config.example.yaml (via
 // viper) into a single Config struct that internal/app then threads
 // out to every engine's constructor. This is the one place default
 // values are defined — see Load's viper.SetDefault calls — so a
@@ -316,6 +316,56 @@ type Config struct {
 		// console output. Rotated using Logging.Rotation's settings.
 		Path string
 	}
+}
+
+// CentralConfig contains configuration specific to the OTLens Central Management Server.
+// It is intentionally separate from Config, which is the Linux sensor configuration.
+type CentralConfig struct {
+	Server struct {
+		Host string `mapstructure:"host"`
+		Port int    `mapstructure:"port"`
+	}
+	Database struct {
+		Host     string `mapstructure:"host"`
+		Port     int    `mapstructure:"port"`
+		Name     string `mapstructure:"name"`
+		User     string `mapstructure:"user"`
+		Password string `mapstructure:"password"`
+		SSLMode  string `mapstructure:"sslmode"`
+	}
+	Auth struct {
+		Token string `mapstructure:"token"`
+	}
+}
+
+func LoadCentral(path string) (*CentralConfig, error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetEnvPrefix("OTLENS_CENTRAL")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	v.SetDefault("server.host", "0.0.0.0")
+	v.SetDefault("server.port", 9090)
+	v.SetDefault("database.host", "127.0.0.1")
+	v.SetDefault("database.port", 5432)
+	v.SetDefault("database.name", "otlens")
+	v.SetDefault("database.user", "otlens")
+	v.SetDefault("database.password", "change-me")
+	v.SetDefault("database.sslmode", "disable")
+	v.SetDefault("auth.token", "")
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("central config load failed: %w", err)
+	}
+	var cfg CentralConfig
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("central config parse failed: %w", err)
+	}
+	if cfg.Database.Host == "" || cfg.Database.Name == "" || cfg.Database.User == "" {
+		return nil, fmt.Errorf("central database host, name and user must be configured")
+	}
+	return &cfg, nil
 }
 
 func Load(path string) (*Config, error) {

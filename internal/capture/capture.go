@@ -155,7 +155,7 @@ func collapseBackslashes(s string) string {
 
 // formatDeviceList renders devices as "Name — Description" lines, one
 // per device, so a failed lookup tells the user exactly what values
-// are valid for configs/config.yaml's capture.interface — or can be
+// are valid for configs/sensor.config.example.yaml's capture.interface — or can be
 // obtained by running cmd/tools/interfaces.
 func formatDeviceList(devices []pcap.Interface) string {
 

@@ -1,10 +1,11 @@
-// Command otlens is OTLens's main entry point: loads configs/config.yaml,
+// Command otlens is OTLens's main entry point: loads the Linux sensor config file,
 // wires up every engine via internal/app, and runs until interrupted
 // (Ctrl+C / SIGTERM), flushing persisted state cleanly on the way
 // out. See README.md for configuration and the API surface.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,11 +19,13 @@ import (
 )
 
 func main() {
+	configPath := flag.String("config", "/etc/otlens/config.yaml", "path to the Linux sensor configuration file")
+	flag.Parse()
 
 	// Config has to load before the logger can be initialized (its
 	// level comes from cfg.Logging.Level), so a config failure here
 	// is the one place in the program that can't log through zap.
-	cfg, err := config.Load("configs/config.yaml")
+	cfg, err := config.Load(*configPath)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "configuration loading failed: %v\n", err)

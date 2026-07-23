@@ -229,7 +229,7 @@ func (s *Server) Start() {
 	// GET /assets already means "asset list JSON", not a static
 	// file). Visit http://<host>:<port>/ui/ for the dashboard.
 	// Relative to the process's working directory, same convention
-	// as configs/config.yaml and persist.path.
+	// as configs/sensor.config.example.yaml and persist.path.
 	r.Static("/ui", "./web")
 
 	s.registerAdminRoutes(r)

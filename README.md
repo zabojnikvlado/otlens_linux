@@ -18,7 +18,7 @@ Dashboard: http://localhost:8080/ui/ (once running).
 
 ## Build targets
 
-OTLens is built as two separate Linux binaries from the same Go module:
+OTLens is built as two separate binaries from the same Go module:
 
 - `cmd/otlens` — Linux OT sensor
 - `cmd/otlens-central` — central management/ingestion server
@@ -63,3 +63,14 @@ The recommended production topology is Windows Central + local PostgreSQL + Linu
 
 Build a Linux sensor: `make build-linux-sensor`.
 Build a Windows Central binary: `make build-windows-central`.
+
+## Runtime configuration
+
+The sensor and Central use separate configuration files.
+
+- Linux sensor template: `configs/sensor.config.example.yaml`
+- Linux sensor default: `/etc/otlens/config.yaml`
+- Central template: `configs/central.config.example.yaml`
+- Windows Central default: `C:\ProgramData\OTLens\config.yaml`
+
+Override either path with the `--config` command-line option.
