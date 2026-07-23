@@ -16,6 +16,7 @@ type Config struct {
 	BaseURL, Token, SensorID, Name, SiteID, Version, Hostname string
 	InsecureSkipVerify                                        bool
 	Interval                                                  time.Duration
+	Timeout                                                   time.Duration
 }
 type Client struct {
 	cfg          Config
@@ -27,7 +28,10 @@ func New(cfg Config) *Client {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}}}}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 15 * time.Second
+	}
+	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}}}}
 }
 func (c *Client) headers(r *http.Request) {
 	if c.cfg.Token != "" {
@@ -97,6 +101,27 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 			return e
 		}
 		c.rulesVersion = out.RulesVersion
+	}
+	return nil
+}
+
+func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) error {
+	b, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/telemetry", strings.NewReader(string(b)))
+	if err != nil {
+		return err
+	}
+	c.headers(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("telemetry upload failed: %s", resp.Status)
 	}
 	return nil
 }

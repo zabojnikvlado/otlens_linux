@@ -1,1 +1,30 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OTLens Central</title><link rel="stylesheet" href="/ui/style.css"></head><body><header><div><b>OTLens Central</b><span class="muted"> Operations Console</span></div><nav><button data-view="dashboard">Dashboard</button><button data-view="sensors">Sensors</button><button data-view="rules">Rules</button><button data-view="settings">Settings</button></nav></header><main><section id="dashboard" class="view"><h1>Dashboard</h1><div class="cards"><div><span>Online</span><strong id="online">—</strong></div><div><span>Offline</span><strong id="offline">—</strong></div><div><span>Total sensors</span><strong id="total">—</strong></div></div><div class="panel"><h2>Sensor status</h2><table><thead><tr><th>ID</th><th>Name</th><th>Site</th><th>Status</th><th>Version</th><th>Last seen</th></tr></thead><tbody id="sensorRows"></tbody></table></div></section><section id="sensors" class="view hidden"><h1>Sensors</h1><div class="panel"><table><thead><tr><th>ID</th><th>Name</th><th>Site</th><th>Status</th><th>Hostname</th><th>Last seen</th></tr></thead><tbody id="sensorRows2"></tbody></table></div></section><section id="rules" class="view hidden"><h1>Rules</h1><div class="panel"><p>Rule-set management API is available. A dedicated editor can be added here without changing the sensor API.</p><code>POST /v1/rulesets</code><br><code>PUT /v1/sensors/&lt;id&gt;/ruleset/&lt;ruleset&gt;</code></div></section><section id="settings" class="view hidden"><h1>Settings</h1><div class="panel"><p>Central configuration is managed in <code>C:\ProgramData\OTLens\config.yaml</code>.</p><p>Web UI: configured web listener. Sensor API: configured sensor_api listener.</p></div></section></main><script src="/ui/app.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OTLens Central — Network Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark">OT</span><span class="brand-name">LENS</span><span class="central-label">CENTRAL</span></div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="topology">Topology</button>
+    <button class="tab" data-tab="assets">Assets</button>
+    <button class="tab" data-tab="tags">OT Tags</button>
+    <button class="tab" data-tab="sensors">Sensors</button>
+  </nav>
+  <div class="status-cluster"><button class="ack-btn" id="token-btn">Token</button><div class="conn-badge"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span></div></div>
+</header>
+<main>
+<section class="view active" id="view-topology">
+  <div class="topology-search"><input id="topology-search-input" placeholder="Search by IP, MAC, hostname or sensor..."><button id="topology-search-clear" class="ack-btn" hidden>✕</button><span id="topology-search-status"></span></div>
+  <div class="panel graph-panel"><div id="graph"></div><div class="legend"><div class="legend-item"><span class="swatch ot"></span>OT device</div><div class="legend-item"><span class="swatch it"></span>IT device</div><div class="legend-item"><span class="swatch unconfirmed"></span>Unconfirmed</div><div class="legend-item"><span class="swatch honeypot"></span>Honeypot</div></div></div>
+</section>
+<section class="view" id="view-assets"><div class="flows-toolbar"><input id="assets-filter" placeholder="Filter assets..."><span id="assets-count"></span></div><div class="panel scrollable"><table class="data-table" id="table-assets"><thead><tr><th>Sensor</th><th>IP</th><th>MAC</th><th>Vendor</th><th>Hostname</th><th>Class</th><th>Protocols</th><th>VLAN</th><th>Packets</th><th>Last seen</th></tr></thead><tbody></tbody></table><p class="empty-state" hidden>No assets uploaded by sensors yet.</p></div></section>
+<section class="view" id="view-tags"><div class="flows-toolbar"><input id="tags-filter" placeholder="Filter OT tags..."><span id="tags-count"></span></div><div class="panel scrollable"><table class="data-table" id="table-tags"><thead><tr><th>Sensor</th><th>Device</th><th>Protocol</th><th>Address</th><th>Op</th><th>Value</th><th>Previous</th><th>Changed</th><th>Polls</th><th>Changes</th></tr></thead><tbody></tbody></table><p class="empty-state" hidden>No OT tags uploaded by sensors yet.</p></div></section>
+<section class="view" id="view-sensors"><div class="panel scrollable"><table class="data-table" id="table-sensors"><thead><tr><th>ID</th><th>Name</th><th>Site</th><th>Status</th><th>Hostname</th><th>Version</th><th>Last seen</th></tr></thead><tbody></tbody></table><p class="empty-state" hidden>No registered sensors.</p></div></section>
+</main>
+<script src="app.js"></script></body></html>

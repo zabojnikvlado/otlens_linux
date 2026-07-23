@@ -25,4 +25,13 @@ C:\Program Files\OTLens\
 
 ## Authentication note
 
-The current bearer-token middleware protects `/v1/*`. If `auth.token` is enabled, the browser UI does not yet have a login/session flow and `/v1/sensors` will return 401. For initial internal deployments either leave the token empty and restrict the web listener with Windows Firewall/VPN, or add an admin login/session layer before exposing the UI broadly.
+The Web UI uses `auth.management_token`; after a 401 response it prompts for the token and stores it in browser local storage. Sensor endpoints use the separate `auth.sensor_token`.
+
+## Authentication fix (Phase 3.5.1)
+
+Central now uses separate credentials:
+
+- `auth.management_token` for the Web UI and management API on port 8443.
+- `auth.sensor_token` for Linux sensor registration, heartbeat, and rule synchronization on port 9443.
+
+The Web UI prompts for the management token after an HTTP 401 response and stores it in browser local storage. The Linux sensor must have `central.enabled: true` and a token matching `auth.sensor_token`; it then registers itself and sends heartbeat records to PostgreSQL through the Central Sensor API. Sensors never connect directly to PostgreSQL.

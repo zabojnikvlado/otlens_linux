@@ -1,6 +1,9 @@
 package management
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Sensor struct {
 	ID                     string    `json:"id"`
@@ -66,4 +69,14 @@ type SyncResponse struct {
 	ConfigVersion int64    `json:"config_version"`
 	RulesVersion  int64    `json:"rules_version"`
 	RuleSet       *RuleSet `json:"rule_set,omitempty"`
+}
+
+// TelemetrySnapshot is the periodically uploaded sensor view used by the
+// Central Topology, Assets and OT Tags tabs. Sensors remain the source of
+// truth for passive discovery; Central only aggregates and persists it.
+type TelemetrySnapshot struct {
+	SensorID   string          `json:"sensor_id"`
+	CapturedAt time.Time       `json:"captured_at"`
+	Topology   json.RawMessage `json:"topology"`
+	Tags       json.RawMessage `json:"tags"`
 }

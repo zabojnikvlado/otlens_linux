@@ -8,11 +8,12 @@ import (
 )
 
 type Worker struct {
-	Client  *Client
-	Detect  *detect.Engine
-	Uptime  func() int64
-	Health  func() map[string]string
-	Metrics func() map[string]interface{}
+	Client   *Client
+	Detect   *detect.Engine
+	Uptime   func() int64
+	Health   func() map[string]string
+	Metrics  func() map[string]interface{}
+	Snapshot func() (management.TelemetrySnapshot, error)
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -42,4 +43,13 @@ func (w *Worker) sync(ctx context.Context) {
 		h.Metrics = w.Metrics()
 	}
 	_ = w.Client.Heartbeat(ctx, h)
+	if w.Snapshot != nil {
+		if snapshot, err := w.Snapshot(); err == nil {
+			snapshot.SensorID = w.Client.cfg.SensorID
+			if snapshot.CapturedAt.IsZero() {
+				snapshot.CapturedAt = time.Now().UTC()
+			}
+			_ = w.Client.PushTelemetry(ctx, snapshot)
+		}
+	}
 }

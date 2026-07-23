@@ -267,11 +267,20 @@ audit:
 
 # Central Management connection for this Linux sensor.
 central:
-  # Central sensor API URL. Default deployment uses HTTPS on TCP 9443.
-  url: https://central-server:9443
-  # Sensor identity used during registration/heartbeat.
+  # Enable registration, heartbeat, and rule synchronization with Central.
+  enabled: true
+  # Central sensor API URL. Use http:// while TLS is disabled on Central,
+  # or https:// when sensor_api.tls.enabled is true.
+  url: http://192.168.10.10:9443
+  # Unique stable identity of this sensor.
   sensor_id: sensor-001
-  # Bearer token must match central.auth.token when Central authentication is enabled.
-  token: "CHANGE_ME"
-  # HTTP request timeout.
-  timeout: 10s
+  # Human-readable labels shown in the Central Web UI.
+  name: "Production Line 1"
+  site_id: "plant-bratislava"
+  # Must match central auth.sensor_token.
+  token: "CHANGE_SENSOR_TOKEN"
+  # Registration/heartbeat/rule polling frequency and HTTP timeout.
+  interval: 30s
+  timeout: 15s
+  # Development only for self-signed HTTPS certificates.
+  insecure_skip_verify: false

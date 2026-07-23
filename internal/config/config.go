@@ -64,6 +64,18 @@ type Config struct {
 		Timeout time.Duration
 	}
 
+	Central struct {
+		Enabled            bool          `mapstructure:"enabled"`
+		URL                string        `mapstructure:"url"`
+		SensorID           string        `mapstructure:"sensor_id"`
+		Name               string        `mapstructure:"name"`
+		SiteID             string        `mapstructure:"site_id"`
+		Token              string        `mapstructure:"token"`
+		Interval           time.Duration `mapstructure:"interval"`
+		Timeout            time.Duration `mapstructure:"timeout"`
+		InsecureSkipVerify bool          `mapstructure:"insecure_skip_verify"`
+	}
+
 	Capture struct {
 		// Mode selects the traffic data source: "pcap" (default —
 		// live packet capture via Npcap/libpcap, needs admin/root and
@@ -355,7 +367,8 @@ type CentralConfig struct {
 		SSLMode  string `mapstructure:"sslmode"`
 	}
 	Auth struct {
-		Token string `mapstructure:"token"`
+		ManagementToken string `mapstructure:"management_token"`
+		SensorToken     string `mapstructure:"sensor_token"`
 	}
 }
 
@@ -386,7 +399,8 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("database.user", "otlens")
 	v.SetDefault("database.password", "change-me")
 	v.SetDefault("database.sslmode", "disable")
-	v.SetDefault("auth.token", "")
+	v.SetDefault("auth.management_token", "")
+	v.SetDefault("auth.sensor_token", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)
@@ -418,6 +432,16 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("debug.enabled", false)
 	viper.SetDefault("export.enabled", false)
 	viper.SetDefault("export.timeout", 10*time.Second)
+	viper.SetDefault("central.enabled", false)
+	viper.SetDefault("central.url", "")
+	viper.SetDefault("central.sensor_id", "")
+	viper.SetDefault("central.name", "")
+	viper.SetDefault("central.site_id", "")
+	viper.SetDefault("central.token", "")
+	viper.SetDefault("central.interval", 30*time.Second)
+	viper.SetDefault("central.timeout", 15*time.Second)
+	viper.SetDefault("central.insecure_skip_verify", false)
+
 	viper.SetDefault("capture.mode", "pcap")
 	viper.SetDefault("capture.snaplen", 1600)
 	viper.SetDefault("capture.promiscuous", true)

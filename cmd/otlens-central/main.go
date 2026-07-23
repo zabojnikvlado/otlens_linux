@@ -38,7 +38,7 @@ func main() {
 	}
 	defer repo.Close()
 
-	srv := &central.Server{Repo: repo, Token: cfg.Auth.Token}
+	srv := &central.Server{Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken}
 	webAddr := fmt.Sprintf("%s:%d", cfg.Web.Host, cfg.Web.Port)
 	sensorAddr := fmt.Sprintf("%s:%d", cfg.SensorAPI.Host, cfg.SensorAPI.Port)
 	log.Printf("OTLens Central web/API listener: %s", webAddr)
@@ -46,8 +46,12 @@ func main() {
 	log.Printf("PostgreSQL: %s:%d database=%s user=%s", cfg.Database.Host, cfg.Database.Port, cfg.Database.Name, cfg.Database.User)
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- srv.StartWeb(webAddr, cfg.Web.TLS.Enabled, cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile, 0, nil) }()
-	go func() { errCh <- srv.StartSensorAPI(sensorAddr, cfg.SensorAPI.TLS.Enabled, cfg.SensorAPI.TLS.CertFile, cfg.SensorAPI.TLS.KeyFile, 0, nil) }()
+	go func() {
+		errCh <- srv.StartWeb(webAddr, cfg.Web.TLS.Enabled, cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile, 0, nil)
+	}()
+	go func() {
+		errCh <- srv.StartSensorAPI(sensorAddr, cfg.SensorAPI.TLS.Enabled, cfg.SensorAPI.TLS.CertFile, cfg.SensorAPI.TLS.KeyFile, 0, nil)
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

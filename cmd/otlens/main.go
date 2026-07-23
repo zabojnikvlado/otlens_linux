@@ -5,16 +5,23 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"time"
+
+	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"github.com/zabojnikvlado/otlens_linux/internal/topology"
 	"syscall"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/app"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
+	"github.com/zabojnikvlado/otlens_linux/internal/syncagent"
 	"go.uber.org/zap"
 )
 
@@ -99,11 +106,36 @@ func main() {
 
 	application.Start()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	if cfg.Central.Enabled {
+		hostname, _ := os.Hostname()
+		client := syncagent.New(syncagent.Config{
+			BaseURL: cfg.Central.URL, Token: cfg.Central.Token, SensorID: cfg.Central.SensorID,
+			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname,
+			Interval: cfg.Central.Interval, Timeout: cfg.Central.Timeout, InsecureSkipVerify: cfg.Central.InsecureSkipVerify,
+		})
+		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, Snapshot: func() (management.TelemetrySnapshot, error) {
+			graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetAll(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
+			graphJSON, err := json.Marshal(graph)
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			tagsJSON, err := json.Marshal(application.StoreEngine.GetTags())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON}, nil
+		}}
+		go worker.Run(ctx)
+		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))
+	}
+
 	// Run until interrupted (Ctrl+C, or a service manager stopping
 	// the process) instead of exiting after a fixed sleep.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	cancel()
 
 	application.Shutdown()
 
