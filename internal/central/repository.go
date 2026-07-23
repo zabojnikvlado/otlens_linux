@@ -96,7 +96,7 @@ func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) erro
 	return err
 }
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,name,site_id,status,version,hostname,last_seen,COALESCE(certificate_fingerprint,'') FROM sensors ORDER BY name,id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,'') FROM sensors ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}

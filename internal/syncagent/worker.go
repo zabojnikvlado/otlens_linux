@@ -2,9 +2,11 @@ package syncagent
 
 import (
 	"context"
+	"log"
+	"time"
+
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
-	"time"
 )
 
 type Worker struct {
@@ -17,9 +19,12 @@ type Worker struct {
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	_ = w.Client.Register(ctx)
+	// Registration is retried on every synchronization cycle. This makes the
+	// sensor recover automatically when Central or PostgreSQL was unavailable
+	// during the first startup attempt.
 	ticker := time.NewTicker(w.Client.cfg.Interval)
 	defer ticker.Stop()
+
 	w.sync(ctx)
 	for {
 		select {
@@ -30,8 +35,17 @@ func (w *Worker) Run(ctx context.Context) {
 		}
 	}
 }
+
 func (w *Worker) sync(ctx context.Context) {
-	_ = w.Client.PullRules(ctx, w.Detect.ReplaceManagedRules)
+	if err := w.Client.Register(ctx); err != nil {
+		log.Printf("OTLens Central registration failed: %v", err)
+		return
+	}
+
+	if err := w.Client.PullRules(ctx, w.Detect.ReplaceManagedRules); err != nil {
+		log.Printf("OTLens Central rule synchronization failed: %v", err)
+	}
+
 	h := management.Heartbeat{SensorID: w.Client.cfg.SensorID, Version: w.Client.cfg.Version, Hostname: w.Client.cfg.Hostname}
 	if w.Uptime != nil {
 		h.Uptime = w.Uptime()
@@ -42,14 +56,22 @@ func (w *Worker) sync(ctx context.Context) {
 	if w.Metrics != nil {
 		h.Metrics = w.Metrics()
 	}
-	_ = w.Client.Heartbeat(ctx, h)
+	if err := w.Client.Heartbeat(ctx, h); err != nil {
+		log.Printf("OTLens Central heartbeat failed: %v", err)
+	}
+
 	if w.Snapshot != nil {
-		if snapshot, err := w.Snapshot(); err == nil {
-			snapshot.SensorID = w.Client.cfg.SensorID
-			if snapshot.CapturedAt.IsZero() {
-				snapshot.CapturedAt = time.Now().UTC()
-			}
-			_ = w.Client.PushTelemetry(ctx, snapshot)
+		snapshot, err := w.Snapshot()
+		if err != nil {
+			log.Printf("OTLens telemetry snapshot failed: %v", err)
+			return
+		}
+		snapshot.SensorID = w.Client.cfg.SensorID
+		if snapshot.CapturedAt.IsZero() {
+			snapshot.CapturedAt = time.Now().UTC()
+		}
+		if err := w.Client.PushTelemetry(ctx, snapshot); err != nil {
+			log.Printf("OTLens telemetry upload failed: %v", err)
 		}
 	}
 }

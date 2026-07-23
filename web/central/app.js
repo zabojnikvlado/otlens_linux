@@ -12,4 +12,14 @@ function node(n){const honey=(n.Score||1)>=(graph.HoneypotThreshold||10);const b
 function renderTopology(){const ns=(graph.Nodes||[]).map(node);const ipMap=new Map((graph.Nodes||[]).map(n=>[n.SensorID+'::'+n.IP,n.ID]));const es=(graph.Edges||[]).map(e=>({id:e.ID,from:ipMap.get(e.SensorID+'::'+e.SrcIP),to:ipMap.get(e.SensorID+'::'+e.DstIP),label:e.IsOT?e.Protocol:'',color:{color:e.FromHoneypot?'#e85d4c':e.IsOT?'#3fbfb0':'#64748b'},width:e.FromHoneypot?4:e.IsOT?2:1})).filter(e=>e.from&&e.to);if(!network){nodesDS=new vis.DataSet(ns);edgesDS=new vis.DataSet(es);network=new vis.Network(document.getElementById('graph'),{nodes:nodesDS,edges:edgesDS},{nodes:{shape:'dot',borderWidth:2},edges:{smooth:false},physics:{solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:-120,springLength:160,avoidOverlap:1},stabilization:{iterations:250}},interaction:{hover:true,tooltipDelay:100}})}else{nodesDS.clear();edgesDS.clear();nodesDS.add(ns);edgesDS.add(es)}applySearch()}
 function applySearch(){if(!network)return;const q=document.getElementById('topology-search-input').value.trim().toLowerCase();document.getElementById('topology-search-clear').hidden=!q;if(!q){network.unselectAll();document.getElementById('topology-search-status').textContent='';return}const ids=nodesDS.get().filter(n=>n._search.includes(q)).map(n=>n.id);network.selectNodes(ids);document.getElementById('topology-search-status').textContent=ids.length+' match(es)';if(ids.length===1)network.focus(ids[0],{scale:1.2,animation:true})}
 document.getElementById('assets-filter').oninput=renderAssets;document.getElementById('tags-filter').oninput=renderTags;document.getElementById('topology-search-input').oninput=applySearch;document.getElementById('topology-search-clear').onclick=()=>{document.getElementById('topology-search-input').value='';applySearch()};
-async function refreshAll(){try{[graph,assets,tags,sensors]=await Promise.all([api('/topology'),api('/assets'),api('/tags'),api('/sensors')]);renderTopology();renderAssets();renderTags();renderSensors();setConn(true)}catch(e){console.error(e)}}refreshAll();setInterval(refreshAll,POLL);
+async function refreshAll(){
+  setConn(false,'connecting');
+  const results=await Promise.allSettled([api('/topology'),api('/assets'),api('/tags'),api('/sensors')]);
+  const errors=[];
+  if(results[0].status==='fulfilled'){graph=results[0].value;renderTopology()}else errors.push('topology: '+results[0].reason.message);
+  if(results[1].status==='fulfilled'){assets=results[1].value;renderAssets()}else errors.push('assets: '+results[1].reason.message);
+  if(results[2].status==='fulfilled'){tags=results[2].value;renderTags()}else errors.push('tags: '+results[2].reason.message);
+  if(results[3].status==='fulfilled'){sensors=results[3].value||[];renderSensors()}else errors.push('sensors: '+results[3].reason.message);
+  if(errors.length){console.error(errors.join('; '));setConn(false,errors.join(' | '))}else setConn(true,'live');
+}
+refreshAll();setInterval(refreshAll,POLL);
