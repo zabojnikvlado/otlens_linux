@@ -1,106 +1,23 @@
-# OTLens Central on Windows + PostgreSQL
+# OTLens Central on Windows
 
-This deployment runs the Central Management server and PostgreSQL on the same Windows server. Linux machines run the OTLens sensors.
+## Ports
 
-## Topology
+- Web/management listener: TCP 8443 (default)
+- Sensor API listener: TCP 9443 (default)
+- PostgreSQL: TCP 5432 on localhost only (default)
 
-```text
-Windows Server
-├── OTLens Central :9090 (or HTTPS reverse proxy :443)
-└── PostgreSQL 127.0.0.1:5432
+## Configuration
 
-Linux OT Sensors
-└── outbound HTTPS/HTTP to Central
-```
+Copy `configs/central.config.example.yaml` to:
 
-PostgreSQL should bind to `127.0.0.1` so it is not directly reachable from sensor networks.
+`C:\ProgramData\OTLens\config.yaml`
 
-## 1. PostgreSQL
+The Central process reads it with:
 
-Create a PostgreSQL database and user:
+`otlens-central.exe --config C:\ProgramData\OTLens\config.yaml`
 
-```sql
-CREATE USER otlens WITH PASSWORD 'change-me';
-CREATE DATABASE otlens OWNER otlens;
-```
+The web listener is intended for administrator/browser access. The sensor API
+listener is intended for Linux sensor registration, heartbeat and rule sync.
 
-Initialize the schema:
-
-```powershell
-.\init-postgres.ps1 -Password 'change-me'
-```
-
-For a production environment, use a secret-management solution instead of putting passwords in shell history.
-
-## 2. Build Central
-
-From the repository root:
-
-```powershell
-.\deploy\windows\build-central.ps1
-```
-
-Copy `bin\otlens-central.exe` to:
-
-```text
-C:\Program Files\OTLens\
-```
-
-## 3. Configure and install the Windows service
-
-Example:
-
-```powershell
-.\install-service.ps1 `
-  -PostgresDsn "postgres://otlens:change-me@127.0.0.1:5432/otlens?sslmode=disable" `
-  -CentralToken "replace-with-a-long-random-token"
-```
-
-The service listens on `:9090` by default.
-
-For a real deployment, place a TLS reverse proxy in front of the Go API and expose only HTTPS to sensors. Do not expose PostgreSQL to the sensor network.
-
-## 4. Firewall
-
-Allow inbound TCP 9090 only from the sensor management networks, or expose HTTPS 443 through a reverse proxy.
-
-Do not open TCP 5432 to OT networks.
-
-## 5. Linux sensors
-
-Build:
-
-```bash
-make build-linux-sensor
-```
-
-Install the resulting `bin/otlens-linux-amd64` on each Linux sensor and run it using the systemd unit in `deploy/systemd/otlens.service`.
-
-Configure the sensor's central URL/token according to the sensor sync configuration in `sensor.config.example.yaml`.
-
-## 6. Service operations
-
-```powershell
-Get-Service OTLensCentral
-Start-Service OTLensCentral
-Stop-Service OTLensCentral
-Restart-Service OTLensCentral
-```
-
-Remove:
-
-```powershell
-.\uninstall-service.ps1
-```
-
-## Security notes
-
-- Use a long random central token for bootstrap/simple deployments.
-- Prefer per-sensor mTLS before production rollout.
-- Put Central behind HTTPS; the current Go server is HTTP and is intended to sit behind a TLS terminator/reverse proxy.
-- Keep PostgreSQL bound to localhost.
-- Back up the PostgreSQL database.
-- Restrict Windows service account privileges.
-
-
-Central runtime configuration is stored in `C:\ProgramData\OTLens\config.yaml`. The executable accepts `--config` to override this path. PostgreSQL is a separate Windows service, normally listening on `127.0.0.1:5432`.
+For production, enable TLS on both listeners and use trusted certificates.
+Keep PostgreSQL bound to `127.0.0.1` so it is not reachable from the OT network.

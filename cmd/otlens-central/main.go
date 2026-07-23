@@ -39,12 +39,15 @@ func main() {
 	defer repo.Close()
 
 	srv := &central.Server{Repo: repo, Token: cfg.Auth.Token}
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Printf("OTLens Central listening on %s", addr)
+	webAddr := fmt.Sprintf("%s:%d", cfg.Web.Host, cfg.Web.Port)
+	sensorAddr := fmt.Sprintf("%s:%d", cfg.SensorAPI.Host, cfg.SensorAPI.Port)
+	log.Printf("OTLens Central web/API listener: %s", webAddr)
+	log.Printf("OTLens Central sensor API listener: %s", sensorAddr)
 	log.Printf("PostgreSQL: %s:%d database=%s user=%s", cfg.Database.Host, cfg.Database.Port, cfg.Database.Name, cfg.Database.User)
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Start(addr) }()
+	errCh := make(chan error, 2)
+	go func() { errCh <- srv.StartWeb(webAddr, cfg.Web.TLS.Enabled, cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile, 0, nil) }()
+	go func() { errCh <- srv.StartSensorAPI(sensorAddr, cfg.SensorAPI.TLS.Enabled, cfg.SensorAPI.TLS.CertFile, cfg.SensorAPI.TLS.KeyFile, 0, nil) }()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

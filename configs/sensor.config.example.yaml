@@ -264,3 +264,14 @@ logging:
 audit:
   enabled: false
   path: audit.log   # rotated using logging.rotation above
+
+# Central Management connection for this Linux sensor.
+central:
+  # Central sensor API URL. Default deployment uses HTTPS on TCP 9443.
+  url: https://central-server:9443
+  # Sensor identity used during registration/heartbeat.
+  sensor_id: sensor-001
+  # Bearer token must match central.auth.token when Central authentication is enabled.
+  token: "CHANGE_ME"
+  # HTTP request timeout.
+  timeout: 10s

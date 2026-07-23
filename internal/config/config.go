@@ -321,9 +321,30 @@ type Config struct {
 // CentralConfig contains configuration specific to the OTLens Central Management Server.
 // It is intentionally separate from Config, which is the Linux sensor configuration.
 type CentralConfig struct {
-	Server struct {
+	// Web is the management/dashboard listener. The current Central build
+	// exposes the Central API router here; a dedicated dashboard can use this
+	// listener without sharing the sensor-facing port.
+	Web struct {
 		Host string `mapstructure:"host"`
 		Port int    `mapstructure:"port"`
+		TLS  struct {
+			Enabled      bool     `mapstructure:"enabled"`
+			CertFile     string   `mapstructure:"certfile"`
+			KeyFile      string   `mapstructure:"keyfile"`
+			MinVersion   string   `mapstructure:"minversion"`
+			CipherSuites []string `mapstructure:"ciphersuites"`
+		} `mapstructure:"tls"`
+	}
+	SensorAPI struct {
+		Host string `mapstructure:"host"`
+		Port int    `mapstructure:"port"`
+		TLS  struct {
+			Enabled      bool     `mapstructure:"enabled"`
+			CertFile     string   `mapstructure:"certfile"`
+			KeyFile      string   `mapstructure:"keyfile"`
+			MinVersion   string   `mapstructure:"minversion"`
+			CipherSuites []string `mapstructure:"ciphersuites"`
+		} `mapstructure:"tls"`
 	}
 	Database struct {
 		Host     string `mapstructure:"host"`
@@ -345,8 +366,20 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
-	v.SetDefault("server.host", "0.0.0.0")
-	v.SetDefault("server.port", 9090)
+	v.SetDefault("web.host", "0.0.0.0")
+	v.SetDefault("web.port", 8443)
+	v.SetDefault("web.tls.enabled", false)
+	v.SetDefault("web.tls.certfile", "central-web.crt")
+	v.SetDefault("web.tls.keyfile", "central-web.key")
+	v.SetDefault("web.tls.minversion", "1.2")
+	v.SetDefault("web.tls.ciphersuites", []string{})
+	v.SetDefault("sensor_api.host", "0.0.0.0")
+	v.SetDefault("sensor_api.port", 9443)
+	v.SetDefault("sensor_api.tls.enabled", false)
+	v.SetDefault("sensor_api.tls.certfile", "central-sensor-api.crt")
+	v.SetDefault("sensor_api.tls.keyfile", "central-sensor-api.key")
+	v.SetDefault("sensor_api.tls.minversion", "1.2")
+	v.SetDefault("sensor_api.tls.ciphersuites", []string{})
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)
 	v.SetDefault("database.name", "otlens")
