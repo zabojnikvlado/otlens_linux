@@ -42,7 +42,10 @@ func (w *Worker) sync(ctx context.Context) {
 		return
 	}
 
-	if err := w.Client.PullRules(ctx, w.Detect.ReplaceManagedRules); err != nil {
+	if err := w.Client.PullRules(ctx, func(rules []*detect.Rule) error {
+		w.Detect.ReplaceManagedRules(rules)
+		return nil
+	}); err != nil {
 		log.Printf("OTLens Central rule synchronization failed: %v", err)
 	}
 
