@@ -31,7 +31,10 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 func (w *Worker) sync(ctx context.Context) {
-	_ = w.Client.PullRules(ctx, w.Detect.ReplaceManagedRules)
+	_ = w.Client.PullRules(ctx, func(rules []*detect.Rule) error {
+		w.Detect.ReplaceManagedRules(rules)
+		return nil
+	})
 	h := management.Heartbeat{SensorID: w.Client.cfg.SensorID, Version: w.Client.cfg.Version, Hostname: w.Client.cfg.Hostname}
 	if w.Uptime != nil {
 		h.Uptime = w.Uptime()
