@@ -8,7 +8,7 @@ Type=simple
 User=otlens
 Group=otlens
 WorkingDirectory=/opt/otlens
-ExecStart=/opt/otlens/otlens
+ExecStart=/opt/otlens/otlens --config /etc/otlens/config.yaml
 Restart=on-failure
 RestartSec=5s
 

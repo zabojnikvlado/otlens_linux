@@ -76,7 +76,7 @@ make build-linux-sensor
 
 Install the resulting `bin/otlens-linux-amd64` on each Linux sensor and run it using the systemd unit in `deploy/systemd/otlens.service`.
 
-Configure the sensor's central URL/token according to the sensor sync configuration in `configs/config.yaml`.
+Configure the sensor's central URL/token according to the sensor sync configuration in `sensor.config.example.yaml`.
 
 ## 6. Service operations
 
@@ -101,3 +101,6 @@ Remove:
 - Keep PostgreSQL bound to localhost.
 - Back up the PostgreSQL database.
 - Restrict Windows service account privileges.
+
+
+Central runtime configuration is stored in `C:\ProgramData\OTLens\config.yaml`. The executable accepts `--config` to override this path. PostgreSQL is a separate Windows service, normally listening on `127.0.0.1:5432`.

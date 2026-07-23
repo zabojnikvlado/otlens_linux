@@ -51,7 +51,7 @@ go run ./cmd/tools/interfaces
 
 Vypíše zoznam všetkých zachytávateľných sieťových zariadení (`Name` +
 `Description`). Skopíruj presný `Name` (napr.
-`\Device\NPF_{GUID}` na Windows) do `configs/config.yaml` →
+`\Device\NPF_{GUID}` na Windows) do `configs/sensor.config.example.yaml` →
 `capture.interface`, ak sa appka nevie sama trafiť podľa friendly
 mena.
 
@@ -534,7 +534,7 @@ pre audit.
 
 ---
 
-## 6. Konfigurácia (`configs/config.yaml`)
+## 6. Konfigurácia (`configs/sensor.config.example.yaml`)
 
 Všetky nastavenia, ktoré appka potrebuje, sú v tomto jedinom súbore.
 Nič podstatné nie je natvrdo zapísané v kóde. Sekcie:

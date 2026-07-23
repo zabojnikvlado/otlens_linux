@@ -1,3 +1,5 @@
+# OTLens build targets. Sensor and Central use separate runtime config files.
+
 BINDIR := bin
 SENSOR_BIN := $(BINDIR)/otlens
 CENTRAL_BIN := $(BINDIR)/otlens-central

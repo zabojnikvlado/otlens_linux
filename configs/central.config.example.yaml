@@ -1,0 +1,19 @@
+# OTLens Central Management configuration
+# Windows default deployment path: C:\ProgramData\OTLens\config.yaml
+
+server:
+  host: 0.0.0.0
+  port: 9090
+
+database:
+  # PostgreSQL is expected to run on the same Windows server as Central.
+  host: 127.0.0.1
+  port: 5432
+  name: otlens
+  user: otlens
+  password: "CHANGE_ME"
+  sslmode: disable
+
+auth:
+  # Optional Bearer token required by sensor management API.
+  token: "CHANGE_ME"

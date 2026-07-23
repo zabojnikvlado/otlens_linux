@@ -141,7 +141,7 @@ func (s *Server) registerAdminRoutes(r *gin.Engine) {
 			}
 
 			// A project-relative directory (same convention as
-			// persist.path/configs/config.yaml) rather than
+			// persist.path/configs/sensor.config.example.yaml) rather than
 			// os.TempDir() — more predictable permissions across
 			// different Windows setups (some restrict the system
 			// temp directory in ways that silently break
