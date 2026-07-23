@@ -38,7 +38,36 @@ document.getElementById('rule-form').onsubmit=async e=>{e.preventDefault();const
 document.querySelector('#table-rules tbody').onclick=async e=>{const toggle=e.target.closest('.rule-toggle'),edit=e.target.closest('.rule-edit'),del=e.target.closest('.rule-delete');if(edit){openRuleModal(rules.find(r=>r.SensorID===edit.dataset.sensor&&r.ID===edit.dataset.id));return}if(toggle){const enabled=toggle.dataset.enabled!=='true';toggle.disabled=true;await api(`/sensors/${encodeURIComponent(toggle.dataset.sensor)}/rules/${encodeURIComponent(toggle.dataset.id)}`,{method:'PATCH',body:JSON.stringify({enabled})});setTimeout(refreshAll,1000)}else if(del&&confirm('Delete this custom rule?')){del.disabled=true;await api(`/sensors/${encodeURIComponent(del.dataset.sensor)}/rules/${encodeURIComponent(del.dataset.id)}`,{method:'DELETE'});setTimeout(refreshAll,1000)}};
 document.getElementById('rule-export').onclick=async()=>{const data=await api('/rules/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='otlens-rules.json';a.click();URL.revokeObjectURL(a.href)};
 document.getElementById('rule-import-open').onclick=()=>document.getElementById('rule-import-file').click();document.getElementById('rule-import-file').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const data=JSON.parse(await f.text()),sensor=prompt('Target sensor ID',sensors[0]?.id||'');if(!sensor)return;const imported=(data.rules||[]).filter(r=>String(r.Kind||r.kind).toLowerCase()==='custom').map(r=>{const x={...r};delete x.SensorID;return x});await api('/rules/import',{method:'POST',body:JSON.stringify({sensor_id:sensor,rules:imported})});setTimeout(refreshAll,1000)}catch(err){alert('Import failed: '+err.message)}finally{e.target.value=''}};
-function renderSensors(){populateRuleSensors();document.querySelector('#table-sensors tbody').innerHTML=sensors.map(s=>`<tr><td>${esc(s.id)}</td><td>${esc(s.name)}</td><td>${esc(s.site_id)}</td><td>${esc(s.status)}</td><td>${esc(s.hostname)}</td><td>${esc(s.version)}</td><td>${time(s.last_seen)}</td></tr>`).join('')}
+function renderSensors(){sensors=Array.isArray(sensors)?sensors:[];populateRuleSensors();document.querySelector('#table-sensors tbody').innerHTML=sensors.map(s=>`<tr><td>${esc(s.id??s.ID)}</td><td>${esc(s.name??s.Name)}</td><td>${esc(s.site_id??s.SiteID)}</td><td>${esc(s.status??s.Status)}</td><td>${esc(s.hostname??s.Hostname)}</td><td>${esc(s.version??s.Version)}</td><td>${time(s.last_seen??s.LastSeen)}</td></tr>`).join('')}
 function renderBaseline(){const learning=baselines.filter(b=>b.mode==='learning'),d=document.getElementById('baseline-dot'),t=document.getElementById('baseline-text');if(learning.length){d.className='dot learning';const ends=learning.map(x=>new Date(x.learning_ends_at)).filter(x=>!isNaN(x)).sort((a,b)=>a-b)[0];t.textContent=`Learning ${learning.length}/${baselines.length}${ends?' · until '+ends.toLocaleTimeString():''} · alerts suppressed`}else{d.className='dot monitoring';t.textContent=baselines.length?'Monitoring':'No baseline data'}}
-async function refreshAll(){setConn(false,'connecting');const paths=['/topology','/assets','/tags','/sensors','/alerts','/rules','/baseline','/tags/changes','/tags/events'];const r=await Promise.allSettled(paths.map(api));if(r[0].status==='fulfilled')graph=r[0].value;if(r[1].status==='fulfilled')assets=r[1].value;if(r[2].status==='fulfilled')tags=r[2].value;if(r[3].status==='fulfilled')sensors=r[3].value;if(r[4].status==='fulfilled')alerts=r[4].value;if(r[5].status==='fulfilled')rules=r[5].value.map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));if(r[6].status==='fulfilled')baselines=r[6].value;if(r[7].status==='fulfilled')changes=r[7].value;if(r[8].status==='fulfilled')events=r[8].value;if(r[0].status==='fulfilled')renderTopology();if(r[1].status==='fulfilled')renderAssets();if(r[2].status==='fulfilled')renderTags();if(r[3].status==='fulfilled')renderSensors();if(r[4].status==='fulfilled')renderAlerts();if(r[5].status==='fulfilled')renderRules();if(r[6].status==='fulfilled')renderBaseline();setConn(r.every(x=>x.status==='fulfilled'),r.every(x=>x.status==='fulfilled')?'live':'partial/error')}
+async function refreshAll(){
+  setConn(false,'connecting');
+  const paths=['/topology','/assets','/tags','/sensors','/alerts','/rules','/baseline','/tags/changes','/tags/events'];
+  const r=await Promise.allSettled(paths.map(api));
+  const list=(i)=>r[i].status==='fulfilled'&&Array.isArray(r[i].value)?r[i].value:[];
+  if(r[0].status==='fulfilled'&&r[0].value)graph=r[0].value;
+  if(r[1].status==='fulfilled')assets=list(1);
+  if(r[2].status==='fulfilled')tags=list(2);
+  if(r[3].status==='fulfilled')sensors=list(3);
+  if(r[4].status==='fulfilled')alerts=list(4);
+  if(r[5].status==='fulfilled')rules=list(5).map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));
+  if(r[6].status==='fulfilled')baselines=list(6);
+  if(r[7].status==='fulfilled')changes=list(7);
+  if(r[8].status==='fulfilled')events=list(8);
+  try{if(r[0].status==='fulfilled')renderTopology()}catch(e){console.error('render topology',e)}
+  try{if(r[1].status==='fulfilled')renderAssets()}catch(e){console.error('render assets',e)}
+  try{if(r[2].status==='fulfilled')renderTags()}catch(e){console.error('render tags',e)}
+  try{if(r[3].status==='fulfilled')renderSensors()}catch(e){console.error('render sensors',e)}
+  try{if(r[4].status==='fulfilled')renderAlerts()}catch(e){console.error('render alerts',e)}
+  try{if(r[5].status==='fulfilled')renderRules()}catch(e){console.error('render rules',e)}
+  try{if(r[6].status==='fulfilled')renderBaseline()}catch(e){console.error('render baseline',e)}
+  const failed=r.map((x,i)=>x.status==='rejected'?paths[i]:null).filter(Boolean);
+  if(!failed.length)setConn(true,'live');
+  else{
+    console.error('Central API refresh failures:',failed,r.filter(x=>x.status==='rejected').map(x=>x.reason));
+    const text=failed.length===paths.length?'backend unreachable':`partial: ${failed.join(', ')}`;
+    setConn(false,text);
+    document.getElementById('conn-text').title='Failed endpoints: '+failed.join(', ');
+  }
+}
 refreshAll();setInterval(refreshAll,POLL);
