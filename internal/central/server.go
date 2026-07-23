@@ -5,6 +5,8 @@ import (
     "crypto/tls"
     "net/http"
     "strings"
+    "os"
+    "path/filepath"
     "time"
 
     "github.com/gin-gonic/gin"
@@ -33,6 +35,9 @@ func (s *Server) auth(c *gin.Context) {
 
 func (s *Server) Router() *gin.Engine {
     r := gin.Default()
+    r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/ui/") })
+    r.Static("/ui", centralWebDir())
+    r.GET("/ui/", func(c *gin.Context) { c.File(filepath.Join(centralWebDir(), "index.html")) })
     r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
     api := r.Group("/v1", s.auth)
     api.POST("/sensors/register", s.register)
@@ -143,4 +148,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
         if err := s.sensorAPI.Shutdown(ctx); err != nil && first == nil { first = err }
     }
     return first
+}
+
+func centralWebDir() string {
+	if p := os.Getenv("OTLENS_CENTRAL_WEB_DIR"); p != "" { return p }
+	if exe, err := os.Executable(); err == nil { return filepath.Join(filepath.Dir(exe), "web", "central") }
+	return filepath.Join("web", "central")
 }
