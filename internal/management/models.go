@@ -30,15 +30,45 @@ type RuleSet struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type RuleCondition struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+}
+
+type RuleGroup struct {
+	Operator   string          `json:"operator"`
+	Conditions []RuleCondition `json:"conditions"`
+}
+
+type RuleAction struct {
+	Type string `json:"type"`
+}
+
+type RuleSuppression struct {
+	Mode            string `json:"mode"`
+	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+}
+
 type Rule struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Enabled   bool   `json:"enabled"`
-	Field     string `json:"field,omitempty"`
-	Value     string `json:"value,omitempty"`
-	Severity  string `json:"severity,omitempty"`
-	AlertType string `json:"alert_type,omitempty"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description,omitempty"`
+	Category      string          `json:"category,omitempty"`
+	Kind          string          `json:"kind"`
+	Enabled       bool            `json:"enabled"`
+	Severity      string          `json:"severity,omitempty"`
+	Priority      int             `json:"priority,omitempty"`
+	Simulation    bool            `json:"simulation,omitempty"`
+	Version       int             `json:"version,omitempty"`
+	Groups        []RuleGroup     `json:"groups,omitempty"`
+	GroupOperator string          `json:"group_operator,omitempty"`
+	Actions       []RuleAction    `json:"actions,omitempty"`
+	Suppression   RuleSuppression `json:"suppression,omitempty"`
+	Schedule      string          `json:"schedule,omitempty"`
+	Field         string          `json:"field,omitempty"`
+	Value         string          `json:"value,omitempty"`
+	AlertType     string          `json:"alert_type,omitempty"`
 }
 
 type SensorRegistration struct {
@@ -65,10 +95,17 @@ type SyncState struct {
 	RulesVersion  int64  `json:"rules_version"`
 }
 
+type Command struct {
+	ID     int64  `json:"id"`
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
 type SyncResponse struct {
-	ConfigVersion int64    `json:"config_version"`
-	RulesVersion  int64    `json:"rules_version"`
-	RuleSet       *RuleSet `json:"rule_set,omitempty"`
+	ConfigVersion int64     `json:"config_version"`
+	RulesVersion  int64     `json:"rules_version"`
+	RuleSet       *RuleSet  `json:"rule_set,omitempty"`
+	Commands      []Command `json:"commands,omitempty"`
 }
 
 // TelemetrySnapshot is the periodically uploaded sensor view used by the
@@ -79,4 +116,9 @@ type TelemetrySnapshot struct {
 	CapturedAt time.Time       `json:"captured_at"`
 	Topology   json.RawMessage `json:"topology"`
 	Tags       json.RawMessage `json:"tags"`
+	TagChanges json.RawMessage `json:"tag_changes,omitempty"`
+	TagEvents  json.RawMessage `json:"tag_events,omitempty"`
+	Alerts     json.RawMessage `json:"alerts,omitempty"`
+	Baseline   json.RawMessage `json:"baseline,omitempty"`
+	Rules      json.RawMessage `json:"rules,omitempty"`
 }

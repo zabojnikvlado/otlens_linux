@@ -74,23 +74,23 @@ func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	}
 	return nil
 }
-func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error) error {
+func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error) ([]management.Command, error) {
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/sync", nil)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	c.headers(req)
 	resp, e := c.http.Do(req)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("sync failed: %s", resp.Status)
+		return nil, fmt.Errorf("sync failed: %s", resp.Status)
 	}
 	var out management.SyncResponse
 	if e := json.NewDecoder(resp.Body).Decode(&out); e != nil {
-		return e
+		return nil, e
 	}
 	if out.RuleSet != nil && out.RulesVersion > c.rulesVersion {
 		rules := make([]*detect.Rule, 0, len(out.RuleSet.Rules))
@@ -98,11 +98,11 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Field: detect.RuleField(r.Field), Value: r.Value, Severity: r.Severity, AlertType: detect.AlertType(r.AlertType)})
 		}
 		if e := apply(rules); e != nil {
-			return e
+			return nil, e
 		}
 		c.rulesVersion = out.RulesVersion
 	}
-	return nil
+	return out.Commands, nil
 }
 
 func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) error {

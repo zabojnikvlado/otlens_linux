@@ -74,3 +74,7 @@ The sensor and Central use separate configuration files.
 - Windows Central default: `C:\ProgramData\OTLens\config.yaml`
 
 Override either path with the `--config` command-line option.
+
+## Phase 3.6 Policy & Detection Engine
+
+OTLens now supports multi-condition custom detection rules with AND/OR groups, packet-field operators, severity, priority, simulation mode, suppression, enable/disable, editing, deletion and JSON import/export. See [PHASE3_6_POLICY_ENGINE.md](PHASE3_6_POLICY_ENGINE.md).

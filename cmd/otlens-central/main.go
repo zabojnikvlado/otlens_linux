@@ -12,6 +12,7 @@ import (
 
 	"github.com/zabojnikvlado/otlens_linux/internal/central"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
+	"github.com/zabojnikvlado/otlens_linux/internal/siem"
 )
 
 func main() {
@@ -37,8 +38,26 @@ func main() {
 		log.Fatalf("postgres connection failed: %v", err)
 	}
 	defer repo.Close()
+	repo.ConfigureSIEM(cfg.SIEM.Enabled && cfg.SIEM.ExportAlerts)
 
-	srv := &central.Server{Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken}
+	srv := &central.Server{
+		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
+		SIEMSource: cfg.SIEM.Source, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
+	}
+	exporter, err := siem.New(siem.Config{
+		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,
+		ExportAudit: cfg.SIEM.ExportAudit, BearerToken: cfg.SIEM.BearerToken, Headers: cfg.SIEM.Headers,
+		Timeout: cfg.SIEM.Timeout, RetryInterval: cfg.SIEM.RetryInterval, BatchSize: cfg.SIEM.BatchSize,
+		MaxAttempts: cfg.SIEM.MaxAttempts, Source: cfg.SIEM.Source, InsecureSkipVerify: cfg.SIEM.TLS.InsecureSkipVerify,
+		CACertFile: cfg.SIEM.TLS.CACertFile, ClientCertFile: cfg.SIEM.TLS.ClientCertFile,
+		ClientKeyFile: cfg.SIEM.TLS.ClientKeyFile, ServerName: cfg.SIEM.TLS.ServerName,
+	}, repo)
+	if err != nil {
+		log.Fatalf("SIEM exporter initialization failed: %v", err)
+	}
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	go exporter.Run(workerCtx)
 	webAddr := fmt.Sprintf("%s:%d", cfg.Web.Host, cfg.Web.Port)
 	sensorAddr := fmt.Sprintf("%s:%d", cfg.SensorAPI.Host, cfg.SensorAPI.Port)
 	log.Printf("OTLens Central web/API listener: %s", webAddr)
@@ -63,6 +82,7 @@ func main() {
 		}
 	case <-stop:
 		log.Println("OTLens Central shutting down")
+		workerCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {

@@ -370,6 +370,26 @@ type CentralConfig struct {
 		ManagementToken string `mapstructure:"management_token"`
 		SensorToken     string `mapstructure:"sensor_token"`
 	} `mapstructure:"auth"`
+	SIEM struct {
+		Enabled       bool              `mapstructure:"enabled"`
+		URL           string            `mapstructure:"url"`
+		ExportAlerts  bool              `mapstructure:"export_alerts"`
+		ExportAudit   bool              `mapstructure:"export_audit"`
+		Source        string            `mapstructure:"source"`
+		BearerToken   string            `mapstructure:"bearer_token"`
+		Timeout       time.Duration     `mapstructure:"timeout"`
+		RetryInterval time.Duration     `mapstructure:"retry_interval"`
+		BatchSize     int               `mapstructure:"batch_size"`
+		MaxAttempts   int               `mapstructure:"max_attempts"`
+		Headers       map[string]string `mapstructure:"headers"`
+		TLS           struct {
+			InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+			CACertFile         string `mapstructure:"ca_cert_file"`
+			ClientCertFile     string `mapstructure:"client_cert_file"`
+			ClientKeyFile      string `mapstructure:"client_key_file"`
+			ServerName         string `mapstructure:"server_name"`
+		} `mapstructure:"tls"`
+	} `mapstructure:"siem"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -401,6 +421,22 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("database.sslmode", "disable")
 	v.SetDefault("auth.management_token", "")
 	v.SetDefault("auth.sensor_token", "")
+	v.SetDefault("siem.enabled", false)
+	v.SetDefault("siem.url", "")
+	v.SetDefault("siem.export_alerts", true)
+	v.SetDefault("siem.export_audit", true)
+	v.SetDefault("siem.source", "otlens-central")
+	v.SetDefault("siem.bearer_token", "")
+	v.SetDefault("siem.timeout", 10*time.Second)
+	v.SetDefault("siem.retry_interval", 15*time.Second)
+	v.SetDefault("siem.batch_size", 100)
+	v.SetDefault("siem.max_attempts", 0)
+	v.SetDefault("siem.headers", map[string]string{})
+	v.SetDefault("siem.tls.insecure_skip_verify", false)
+	v.SetDefault("siem.tls.ca_cert_file", "")
+	v.SetDefault("siem.tls.client_cert_file", "")
+	v.SetDefault("siem.tls.client_key_file", "")
+	v.SetDefault("siem.tls.server_name", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)
@@ -409,24 +445,20 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("central config parse failed: %w", err)
 	}
-	// Defensive defaults after Unmarshal. These protect startup even when an
-	// older configuration omits a listener section. In particular, port 0
-	// would make Go bind an arbitrary ephemeral port and leave sensors unable
-	// to find the Central API.
-	if cfg.Web.Host == "" {
-		cfg.Web.Host = "0.0.0.0"
-	}
-	if cfg.Web.Port == 0 {
-		cfg.Web.Port = 8443
-	}
-	if cfg.SensorAPI.Host == "" {
-		cfg.SensorAPI.Host = "0.0.0.0"
-	}
-	if cfg.SensorAPI.Port == 0 {
-		cfg.SensorAPI.Port = 9443
-	}
 	if cfg.Database.Host == "" || cfg.Database.Name == "" || cfg.Database.User == "" {
 		return nil, fmt.Errorf("central database host, name and user must be configured")
+	}
+	if cfg.SIEM.Enabled && strings.TrimSpace(cfg.SIEM.URL) == "" {
+		return nil, fmt.Errorf("siem.url must be configured when siem.enabled is true")
+	}
+	if cfg.SIEM.BatchSize <= 0 {
+		cfg.SIEM.BatchSize = 100
+	}
+	if cfg.SIEM.Timeout <= 0 {
+		cfg.SIEM.Timeout = 10 * time.Second
+	}
+	if cfg.SIEM.RetryInterval <= 0 {
+		cfg.SIEM.RetryInterval = 15 * time.Second
 	}
 	return &cfg, nil
 }

@@ -827,3 +827,7 @@ Projekt vznikal iteratívne, vo veľkých fázach:
     stránkovanie a triedenie tabuliek, hromadné akcie
 12. Tag history popup, odstránenie nepoužitého kódu (debug prepínač,
     mŕtve API endpointy)
+
+# Policy & Detection Engine
+
+The Central Rules tab provides a visual builder for multi-condition detection policies. Rules are validated by Central, delivered to the selected Linux sensor through the command queue, evaluated locally on parsed packets and returned to Central with hit statistics. Detailed fields, operators, suppression behaviour, API endpoints and limitations are documented in `PHASE3_6_POLICY_ENGINE.md`.

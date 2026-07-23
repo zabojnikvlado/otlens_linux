@@ -61,3 +61,40 @@ auth:
   # It must match central.token in every sensor config.
   # Environment override: OTLENS_CENTRAL_AUTH_SENSOR_TOKEN
   sensor_token: "CHANGE_SENSOR_TOKEN"
+
+# Optional export of Central alerts and management audit events to a SIEM
+# HTTP collector. Events are stored in PostgreSQL first and retried after
+# temporary SIEM/network failures, so SIEM availability does not affect Central.
+siem:
+  enabled: false
+  # HTTP(S) endpoint accepting one JSON event per POST.
+  url: "https://siem.example.local/api/events"
+  export_alerts: true
+  export_audit: true
+  # Value placed in the top-level JSON source field.
+  source: "otlens-central"
+
+  # Optional HTTP authentication. Prefer environment variable:
+  # OTLENS_CENTRAL_SIEM_BEARER_TOKEN
+  bearer_token: ""
+
+  # Request and retry settings. max_attempts: 0 means retry indefinitely.
+  timeout: 10s
+  retry_interval: 15s
+  batch_size: 100
+  max_attempts: 0
+
+  # Optional static HTTP headers required by the SIEM collector.
+  headers:
+    # X-API-Key: "CHANGE_ME"
+
+  tls:
+    # Only for temporary testing with an untrusted certificate.
+    insecure_skip_verify: false
+    # PEM CA used to validate a SIEM certificate issued by an internal CA.
+    ca_cert_file: ""
+    # Optional mutual TLS client identity. Configure both or neither.
+    client_cert_file: ""
+    client_key_file: ""
+    # Optional TLS SNI/certificate name override.
+    server_name: ""

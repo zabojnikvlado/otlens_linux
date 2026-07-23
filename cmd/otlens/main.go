@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/zabojnikvlado/otlens_linux/internal/app"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
+	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
 	"github.com/zabojnikvlado/otlens_linux/internal/syncagent"
@@ -114,17 +116,75 @@ func main() {
 			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname,
 			Interval: cfg.Central.Interval, Timeout: cfg.Central.Timeout, InsecureSkipVerify: cfg.Central.InsecureSkipVerify,
 		})
-		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, Snapshot: func() (management.TelemetrySnapshot, error) {
+		marshal := func(v interface{}) (json.RawMessage, error) {
+			b, err := json.Marshal(v)
+			return json.RawMessage(b), err
+		}
+		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, ApplyCommand: func(command management.Command) {
+			switch command.Type {
+			case "asset.confirm":
+				application.AssetEngine.Confirm(command.Target)
+			case "asset.delete":
+				application.AssetEngine.Delete(command.Target)
+			case "alert.approve":
+				application.DetectEngine.ApproveAlert(command.Target)
+			case "alert.confirm":
+				application.DetectEngine.ConfirmAlert(command.Target)
+			case "rule.add", "rule.upsert":
+				var rule detect.Rule
+				if err := json.Unmarshal([]byte(command.Target), &rule); err != nil {
+					log.Printf("OTLens invalid %s command: %v", command.Type, err)
+					break
+				}
+				if command.Type == "rule.add" {
+					if _, err := application.DetectEngine.AddPolicyRule(&rule); err != nil {
+						log.Printf("OTLens rule creation failed: %v", err)
+					}
+				} else if err := application.DetectEngine.UpsertPolicyRule(&rule); err != nil {
+					log.Printf("OTLens rule update failed: %v", err)
+				}
+			case "rule.toggle":
+				var request struct {
+					ID      string `json:"id"`
+					Enabled bool   `json:"enabled"`
+				}
+				if err := json.Unmarshal([]byte(command.Target), &request); err == nil {
+					application.DetectEngine.ToggleRule(request.ID, request.Enabled)
+				}
+			case "rule.delete":
+				application.DetectEngine.DeleteRule(command.Target)
+			}
+		}, Snapshot: func() (management.TelemetrySnapshot, error) {
 			graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetAll(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
-			graphJSON, err := json.Marshal(graph)
+			graphJSON, err := marshal(graph)
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}
-			tagsJSON, err := json.Marshal(application.StoreEngine.GetTags())
+			tagsJSON, err := marshal(application.StoreEngine.GetTags())
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}
-			return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON}, nil
+			changesJSON, err := marshal(application.StoreEngine.GetValueChanges())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			eventsJSON, err := marshal(application.StoreEngine.GetControlEvents())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			alertsJSON, err := marshal(application.DetectEngine.GetAlerts())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			baselineJSON, err := marshal(application.DetectEngine.BaselineStatus())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			rulesJSON, err := marshal(application.DetectEngine.GetRules())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON}, nil
 		}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

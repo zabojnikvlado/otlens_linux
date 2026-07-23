@@ -10,12 +10,13 @@ import (
 )
 
 type Worker struct {
-	Client   *Client
-	Detect   *detect.Engine
-	Uptime   func() int64
-	Health   func() map[string]string
-	Metrics  func() map[string]interface{}
-	Snapshot func() (management.TelemetrySnapshot, error)
+	Client       *Client
+	Detect       *detect.Engine
+	Uptime       func() int64
+	Health       func() map[string]string
+	Metrics      func() map[string]interface{}
+	Snapshot     func() (management.TelemetrySnapshot, error)
+	ApplyCommand func(management.Command)
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -42,8 +43,13 @@ func (w *Worker) sync(ctx context.Context) {
 		return
 	}
 
-	if err := w.Client.PullRules(ctx, w.Detect.ReplaceManagedRules); err != nil {
+	commands, err := w.Client.PullRules(ctx, func(rules []*detect.Rule) error { w.Detect.ReplaceManagedRules(rules); return nil })
+	if err != nil {
 		log.Printf("OTLens Central rule synchronization failed: %v", err)
+	} else if w.ApplyCommand != nil {
+		for _, command := range commands {
+			w.ApplyCommand(command)
+		}
 	}
 
 	h := management.Heartbeat{SensorID: w.Client.cfg.SensorID, Version: w.Client.cfg.Version, Hostname: w.Client.cfg.Hostname}

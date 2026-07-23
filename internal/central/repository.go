@@ -11,7 +11,10 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 )
 
-type Repository struct{ db *sql.DB }
+type Repository struct {
+	db                *sql.DB
+	siemAlertsEnabled bool
+}
 
 func OpenPostgres(dsn string) (*Repository, error) {
 	db, err := sql.Open("pgx", dsn)
@@ -57,10 +60,41 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  captured_at TIMESTAMPTZ NOT NULL,
  topology JSONB NOT NULL DEFAULT '{"Nodes":[],"Edges":[],"HoneypotThreshold":10}'::jsonb,
  tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+ tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb,
+ tag_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+ alerts JSONB NOT NULL DEFAULT '[]'::jsonb,
+ baseline JSONB NOT NULL DEFAULT '{}'::jsonb,
+ rules JSONB NOT NULL DEFAULT '[]'::jsonb,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS alerts JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS baseline JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
+CREATE TABLE IF NOT EXISTS sensor_commands (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ command_type TEXT NOT NULL,
+ target TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ delivered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_sensor_commands_pending ON sensor_commands(sensor_id,id) WHERE delivered_at IS NULL;
+CREATE TABLE IF NOT EXISTS siem_outbox (
+ id BIGSERIAL PRIMARY KEY,
+ event_key TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL,
+ payload JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ attempts INTEGER NOT NULL DEFAULT 0,
+ last_error TEXT NOT NULL DEFAULT '',
+ delivered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_siem_outbox_pending ON siem_outbox(next_attempt_at,id) WHERE delivered_at IS NULL;
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -69,6 +103,10 @@ CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(
 	return &Repository{db: db}, nil
 }
 func (r *Repository) Close() error { return r.db.Close() }
+
+func (r *Repository) ConfigureSIEM(alertsEnabled bool) {
+	r.siemAlertsEnabled = alertsEnabled
+}
 
 func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) error {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -148,17 +186,71 @@ func (r *Repository) MarkOffline(ctx context.Context, olderThan time.Duration) e
 	return err
 }
 
-func (r *Repository) PutTelemetry(ctx context.Context, sensorID string, capturedAt time.Time, topologyJSON, tagsJSON []byte) error {
-	if capturedAt.IsZero() {
-		capturedAt = time.Now().UTC()
+func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) error {
+	if x.CapturedAt.IsZero() {
+		x.CapturedAt = time.Now().UTC()
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,updated_at)
-VALUES($1,$2,$3,$4,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,updated_at=NOW()`, sensorID, capturedAt, topologyJSON, tagsJSON)
-	return err
+	defaults := func(v json.RawMessage, fallback string) json.RawMessage {
+		if len(v) == 0 {
+			return json.RawMessage(fallback)
+		}
+		return v
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,updated_at=NOW()`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"))
+	if err != nil {
+		return err
+	}
+	var alerts []map[string]interface{}
+	if r.siemAlertsEnabled && len(x.Alerts) > 0 && json.Unmarshal(x.Alerts, &alerts) == nil {
+		for _, alert := range alerts {
+			id := firstString(alert, "ID", "id")
+			if id == "" {
+				continue
+			}
+			count := fmt.Sprint(firstValue(alert, "Count", "count"))
+			lastSeen := fmt.Sprint(firstValue(alert, "LastSeen", "last_seen"))
+			status := fmt.Sprint(firstValue(alert, "Status", "status"))
+			eventKey := fmt.Sprintf("alert:%s:%s:%s:%s:%s", x.SensorID, id, count, lastSeen, status)
+			envelope := map[string]interface{}{
+				"source":     "otlens-central",
+				"kind":       "alert",
+				"event_time": x.CapturedAt,
+				"sensor_id":  x.SensorID,
+				"alert":      alert,
+			}
+			payload, marshalErr := json.Marshal(envelope)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO siem_outbox(event_key,kind,payload) VALUES($1,'alert',$2) ON CONFLICT(event_key) DO NOTHING`, eventKey, payload); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func firstValue(m map[string]interface{}, keys ...string) interface{} {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstString(m map[string]interface{}, keys ...string) string {
+	return fmt.Sprint(firstValue(m, keys...))
 }
 
 func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags FROM sensor_telemetry ORDER BY sensor_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules FROM sensor_telemetry ORDER BY sensor_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,10 +258,116 @@ func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnaps
 	var out []management.TelemetrySnapshot
 	for rows.Next() {
 		var x management.TelemetrySnapshot
-		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags); err != nil {
+		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) QueueCommands(ctx context.Context, sensorID, typ string, targets []string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, target := range targets {
+		if target == "" {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO sensor_commands(sensor_id,command_type,target) VALUES($1,$2,$3)`, sensorID, typ, target); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]management.Command, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id,command_type,target FROM sensor_commands WHERE sensor_id=$1 AND delivered_at IS NULL ORDER BY id FOR UPDATE`, sensorID)
+	if err != nil {
+		return nil, err
+	}
+	var out []management.Command
+	var ids []int64
+	for rows.Next() {
+		var c management.Command
+		if err = rows.Scan(&c.ID, &c.Type, &c.Target); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, c)
+		ids = append(ids, c.ID)
+	}
+	rows.Close()
+	for _, id := range ids {
+		if _, err = tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE id=$1`, id); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type SIEMOutboxEvent struct {
+	ID       int64
+	Kind     string
+	Payload  json.RawMessage
+	Attempts int
+}
+
+func (r *Repository) EnqueueSIEM(ctx context.Context, eventKey, kind string, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `INSERT INTO siem_outbox(event_key,kind,payload) VALUES($1,$2,$3) ON CONFLICT(event_key) DO NOTHING`, eventKey, kind, data)
+	return err
+}
+
+func (r *Repository) PendingSIEM(ctx context.Context, limit, maxAttempts int) ([]SIEMOutboxEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := `SELECT id,kind,payload,attempts FROM siem_outbox WHERE delivered_at IS NULL AND next_attempt_at <= NOW()`
+	args := []interface{}{}
+	if maxAttempts > 0 {
+		query += ` AND attempts < $1`
+		args = append(args, maxAttempts)
+	}
+	query += ` ORDER BY id LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, limit)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SIEMOutboxEvent
+	for rows.Next() {
+		var e SIEMOutboxEvent
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Payload, &e.Attempts); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) MarkSIEMDelivered(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE siem_outbox SET delivered_at=NOW(),last_error='' WHERE id=$1`, id)
+	return err
+}
+
+func (r *Repository) MarkSIEMFailed(ctx context.Context, id int64, retryAfter time.Duration, message string) error {
+	if retryAfter <= 0 {
+		retryAfter = 15 * time.Second
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE siem_outbox SET attempts=attempts+1,last_error=$2,next_attempt_at=NOW()+($3*INTERVAL '1 second') WHERE id=$1`, id, message, int64(retryAfter/time.Second))
+	return err
 }

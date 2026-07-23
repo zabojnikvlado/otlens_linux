@@ -2,6 +2,8 @@ package detect
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -9,10 +11,6 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
-// RuleKind distinguishes a built-in detection rule (hardcoded logic
-// elsewhere in this package — arpspoof.go, honeypot.go, etc. —
-// toggleable here but never deletable) from a user-created custom
-// rule (a simple field/value match, fully deletable).
 type RuleKind string
 
 const (
@@ -20,444 +18,507 @@ const (
 	RuleKindCustom  RuleKind = "custom"
 )
 
-// RuleField is which packet attribute a custom rule matches against.
-// Deliberately a small, fixed set rather than an open-ended
-// expression language — this covers the common "alert me if this
-// specific IP/port/protocol shows up" need without building a whole
-// rule DSL for a first version of user-defined rules.
 type RuleField string
 
 const (
-	RuleFieldSrcIP    RuleField = "src_ip"
-	RuleFieldDstIP    RuleField = "dst_ip"
-	RuleFieldEitherIP RuleField = "either_ip"
-	RuleFieldProtocol RuleField = "protocol"
-	RuleFieldPort     RuleField = "port"
+	RuleFieldSrcIP      RuleField = "src_ip"
+	RuleFieldDstIP      RuleField = "dst_ip"
+	RuleFieldEitherIP   RuleField = "either_ip"
+	RuleFieldSrcMAC     RuleField = "src_mac"
+	RuleFieldDstMAC     RuleField = "dst_mac"
+	RuleFieldProtocol   RuleField = "protocol"
+	RuleFieldSrcPort    RuleField = "src_port"
+	RuleFieldDstPort    RuleField = "dst_port"
+	RuleFieldPort       RuleField = "port"
+	RuleFieldVLAN       RuleField = "vlan"
+	RuleFieldPacketSize RuleField = "packet_size"
+	RuleFieldTCPFlags   RuleField = "tcp_flags"
 )
 
-// Rule is one configured rule, built-in or custom. For a built-in
-// rule, Field/Value/Severity are unused (the actual match logic
-// lives in that rule's own file — arpspoof.go, honeypot.go, etc.);
-// this struct only carries whether it's toggled on and which
-// AlertType its hits are counted under.
-type Rule struct {
-	ID      string
-	Name    string
-	Kind    RuleKind
-	Enabled bool
-
-	// Custom rules only.
-	Field    RuleField
-	Value    string
-	Severity string
-
-	// AlertType is what a hit from this rule is filed under in
-	// e.alerts — for a built-in rule, one of the existing AlertType
-	// constants; for a custom rule, a synthetic "custom:<id>" type
-	// used by nothing else. GetRules aggregates Count/LastSeen/IP
-	// from e.alerts by matching on this field, rather than this
-	// package tracking hit stats a second, separate way.
-	AlertType AlertType
+type RuleCondition struct {
+	Field    RuleField `json:"field"`
+	Operator string    `json:"operator"`
+	Value    string    `json:"value"`
 }
 
-// RuleView is a Rule plus its current hit stats, as returned by
-// GetRules and the /rules API — never persisted itself (Count/
-// LastHit/LastHitIP are recomputed from e.alerts on every call, not
-// stored state).
+type RuleGroup struct {
+	Operator   string          `json:"operator"` // AND or OR
+	Conditions []RuleCondition `json:"conditions"`
+}
+
+type RuleAction struct {
+	Type string `json:"type"` // alert, audit, siem
+}
+
+type RuleSuppression struct {
+	Mode            string `json:"mode"` // every, once, interval, aggregate
+	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+}
+
+type Rule struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description,omitempty"`
+	Category      string          `json:"category,omitempty"`
+	Kind          RuleKind        `json:"kind"`
+	Enabled       bool            `json:"enabled"`
+	Severity      string          `json:"severity,omitempty"`
+	Priority      int             `json:"priority,omitempty"`
+	Simulation    bool            `json:"simulation,omitempty"`
+	Version       int             `json:"version,omitempty"`
+	Groups        []RuleGroup     `json:"groups,omitempty"`
+	GroupOperator string          `json:"group_operator,omitempty"`
+	Actions       []RuleAction    `json:"actions,omitempty"`
+	Suppression   RuleSuppression `json:"suppression,omitempty"`
+	Schedule      string          `json:"schedule,omitempty"`
+
+	// Legacy compatibility with Phase 3.5 rules.
+	Field     RuleField `json:"field,omitempty"`
+	Value     string    `json:"value,omitempty"`
+	AlertType AlertType `json:"alert_type,omitempty"`
+
+	LastTriggered     time.Time `json:"-"`
+	SimulationHits    uint64    `json:"-"`
+	LastSimulationHit time.Time `json:"-"`
+}
+
 type RuleView struct {
 	Rule
-
-	HitCount  uint64
-	LastHit   time.Time
-	LastHitIP string
+	HitCount          uint64    `json:"HitCount"`
+	LastHit           time.Time `json:"LastHit"`
+	LastHitIP         string    `json:"LastHitIP"`
+	SimulationHits    uint64    `json:"SimulationHits"`
+	LastSimulationHit time.Time `json:"LastSimulationHit"`
 }
 
-// builtinRules seeds the fixed set of hardcoded detection rules —
-// see each rule's own file for the actual matching logic; this is
-// only the toggle/metadata layer over it.
 func builtinRules() map[string]*Rule {
-
 	seed := []*Rule{
-		{ID: string(AlertARPSpoof), Name: "ARP Spoofing", AlertType: AlertARPSpoof},
-		{ID: string(AlertNewCommunication), Name: "New Communication (baseline)", AlertType: AlertNewCommunication},
-		{ID: string(AlertICSCriticalOperation), Name: "Critical ICS Operation", AlertType: AlertICSCriticalOperation},
-		{ID: string(AlertNewAsset), Name: "New Asset (baseline)", AlertType: AlertNewAsset},
-		{ID: string(AlertValueOutOfRange), Name: "Value Out of Range", AlertType: AlertValueOutOfRange},
-		{ID: string(AlertHoneypotProbed), Name: "Honeypot Probed", AlertType: AlertHoneypotProbed},
-		{ID: string(AlertHoneypotLateralMovement), Name: "Honeypot Lateral Movement", AlertType: AlertHoneypotLateralMovement},
+		{ID: string(AlertARPSpoof), Name: "ARP Spoofing", Category: "security", AlertType: AlertARPSpoof},
+		{ID: string(AlertNewCommunication), Name: "New Communication (baseline)", Category: "baseline", AlertType: AlertNewCommunication},
+		{ID: string(AlertICSCriticalOperation), Name: "Critical ICS Operation", Category: "ics", AlertType: AlertICSCriticalOperation},
+		{ID: string(AlertNewAsset), Name: "New Asset (baseline)", Category: "asset", AlertType: AlertNewAsset},
+		{ID: string(AlertValueOutOfRange), Name: "Value Out of Range", Category: "ot_tag", AlertType: AlertValueOutOfRange},
+		{ID: string(AlertHoneypotProbed), Name: "Honeypot Probed", Category: "security", AlertType: AlertHoneypotProbed},
+		{ID: string(AlertHoneypotLateralMovement), Name: "Honeypot Lateral Movement", Category: "security", AlertType: AlertHoneypotLateralMovement},
 	}
-
-	rules := make(map[string]*Rule, len(seed))
-
+	out := map[string]*Rule{}
 	for _, r := range seed {
 		r.Kind = RuleKindBuiltin
 		r.Enabled = true
-		rules[r.ID] = r
+		r.Version = 1
+		r.Priority = 100
+		out[r.ID] = r
 	}
-
-	return rules
+	return out
 }
 
-// isRuleEnabled reports whether the rule with this ID is currently
-// enabled. Defaults to true for an unrecognized ID — a rule handler
-// should never silently stop working because of a typo'd/stale ID
-// rather than an actual, deliberate toggle-off.
-//
-// Only for callers that do NOT already hold e.mutex — see
-// isRuleEnabledLocked for the version used from inside an
-// already-locked section (baseline.go's handleBaseline holds the
-// write lock for its whole body, so calling this lock-acquiring
-// version from partway through it would deadlock against itself).
 func (e *Engine) isRuleEnabled(id string) bool {
-
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
-
 	return e.isRuleEnabledLocked(id)
 }
-
-// isRuleEnabledLocked is isRuleEnabled's logic without acquiring the
-// lock itself — caller must already hold e.mutex (read or write).
 func (e *Engine) isRuleEnabledLocked(id string) bool {
-
-	rule, exists := e.rules[id]
-
-	if !exists {
+	r, ok := e.rules[id]
+	if !ok {
 		return true
 	}
-
-	return rule.Enabled
+	return r.Enabled
 }
 
-// GetRules returns every configured rule (built-in and custom) with
-// current hit stats aggregated from e.alerts — Alert already tracks
-// Count/LastSeen/IP for exactly this purpose, so no separate stats-
-// tracking mechanism exists here, just a grouping pass over what's
-// already there.
 func (e *Engine) GetRules() []RuleView {
-
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
-
 	result := make([]RuleView, 0, len(e.rules))
-
 	for _, rule := range e.rules {
-
-		view := RuleView{Rule: *rule}
-
-		for _, alert := range e.alerts {
-
-			if alert.Type != rule.AlertType {
-				continue
-			}
-
-			view.HitCount += alert.Count
-
-			if alert.LastSeen.After(view.LastHit) {
-				view.LastHit = alert.LastSeen
-				view.LastHitIP = alert.IP
+		view := RuleView{Rule: *rule, SimulationHits: rule.SimulationHits, LastSimulationHit: rule.LastSimulationHit}
+		for _, a := range e.alerts {
+			if a.Type == rule.AlertType {
+				view.HitCount += a.Count
+				if a.LastSeen.After(view.LastHit) {
+					view.LastHit = a.LastSeen
+					view.LastHitIP = a.IP
+				}
 			}
 		}
-
 		result = append(result, view)
 	}
-
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Priority == result[j].Priority {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].Priority < result[j].Priority
+	})
 	return result
 }
-
-// GetRuleConfigs returns the raw, persistable rule configuration
-// (no aggregated stats — those are recomputed live from e.alerts,
-// which is itself already persisted separately, so persisting them
-// again here would be redundant). Used by internal/persist.
 func (e *Engine) GetRuleConfigs() []*Rule {
-
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
-
-	result := make([]*Rule, 0, len(e.rules))
-
-	for _, rule := range e.rules {
-
-		clone := *rule
-
-		result = append(result, &clone)
+	out := make([]*Rule, 0, len(e.rules))
+	for _, r := range e.rules {
+		c := *r
+		out = append(out, &c)
 	}
-
-	return result
+	return out
 }
+func (e *Engine) RestoreRules(rules []*Rule) { e.ReplaceManagedRules(rules) }
 
-// RestoreRules rehydrates rule configuration from disk at startup —
-// built-in rules keep their seeded identity/AlertType but take the
-// persisted Enabled value; custom rules are restored as-is. Also
-// advances the custom-rule ID sequence past every restored custom
-// rule's numeric suffix, so a newly-created rule after a restart
-// can't collide with a restored one's ID.
-func (e *Engine) RestoreRules(rules []*Rule) {
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	for _, r := range rules {
-
-		if r.Kind == RuleKindBuiltin {
-
-			if existing, ok := e.rules[r.ID]; ok {
-				existing.Enabled = r.Enabled
-			}
-
-			continue
-		}
-
-		e.rules[r.ID] = r
-
-		var seq int
-
-		if _, err := fmt.Sscanf(r.ID, "custom-%d", &seq); err == nil && seq > e.customRuleSeq {
-			e.customRuleSeq = seq
-		}
+func normalizeRule(r *Rule) error {
+	if strings.TrimSpace(r.Name) == "" {
+		return fmt.Errorf("name must not be empty")
 	}
-}
-
-// AddCustomRule creates a new custom rule, rejecting an unrecognized
-// field/severity or an empty value outright — better to fail loudly
-// at creation than to silently create a rule that can never match
-// anything.
-func (e *Engine) AddCustomRule(name string, field RuleField, value string, severity string) (*Rule, error) {
-
-	if strings.TrimSpace(value) == "" {
-		return nil, fmt.Errorf("value must not be empty")
+	if r.Severity == "" {
+		r.Severity = "medium"
 	}
-
-	switch field {
-	case RuleFieldSrcIP, RuleFieldDstIP, RuleFieldEitherIP, RuleFieldProtocol, RuleFieldPort:
+	switch r.Severity {
+	case "info", "low", "medium", "high", "critical":
 	default:
-		return nil, fmt.Errorf("unrecognized field %q", field)
+		return fmt.Errorf("unrecognized severity %q", r.Severity)
 	}
-
-	switch severity {
-	case "low", "medium", "high", "critical":
-	default:
-		return nil, fmt.Errorf("unrecognized severity %q", severity)
+	if r.Priority == 0 {
+		r.Priority = 100
 	}
-
-	if field == RuleFieldPort {
-
-		if _, err := strconv.Atoi(value); err != nil {
-			return nil, fmt.Errorf("port value %q is not a number", value)
+	if r.Version == 0 {
+		r.Version = 1
+	}
+	if r.GroupOperator == "" {
+		r.GroupOperator = "AND"
+	}
+	r.GroupOperator = strings.ToUpper(r.GroupOperator)
+	if r.GroupOperator != "AND" && r.GroupOperator != "OR" {
+		return fmt.Errorf("group_operator must be AND or OR")
+	}
+	if len(r.Groups) == 0 && r.Field != "" {
+		r.Groups = []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: r.Field, Operator: "eq", Value: r.Value}}}}
+	}
+	if len(r.Groups) == 0 {
+		return fmt.Errorf("at least one condition is required")
+	}
+	for gi := range r.Groups {
+		g := &r.Groups[gi]
+		g.Operator = strings.ToUpper(g.Operator)
+		if g.Operator == "" {
+			g.Operator = "AND"
 		}
-	}
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	e.customRuleSeq++
-	id := fmt.Sprintf("custom-%d", e.customRuleSeq)
-
-	if strings.TrimSpace(name) == "" {
-		name = fmt.Sprintf("%s = %s", field, value)
-	}
-
-	rule := &Rule{
-		ID:        id,
-		Name:      name,
-		Kind:      RuleKindCustom,
-		Enabled:   true,
-		Field:     field,
-		Value:     value,
-		Severity:  severity,
-		AlertType: AlertType("custom:" + id),
-	}
-
-	e.rules[id] = rule
-
-	clone := *rule
-
-	return &clone, nil
-}
-
-// ToggleRule flips Enabled for the rule with this ID — works for
-// both built-in and custom rules. Returns false if no such rule
-// exists.
-func (e *Engine) ToggleRule(id string, enabled bool) bool {
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	rule, exists := e.rules[id]
-
-	if !exists {
-		return false
-	}
-
-	rule.Enabled = enabled
-
-	return true
-}
-
-// DeleteRule removes a custom rule. Built-in rules can't be deleted,
-// only toggled off (see ToggleRule) — returns false for that case
-// exactly the same as "not found", since from the API's point of
-// view both are equally "nothing was deleted."
-func (e *Engine) DeleteRule(id string) bool {
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	rule, exists := e.rules[id]
-
-	if !exists || rule.Kind == RuleKindBuiltin {
-		return false
-	}
-
-	delete(e.rules, id)
-
-	return true
-}
-
-// startCustomRuleWatch evaluates every enabled custom rule against
-// each parsed packet — same event, same per-packet dispatch pattern
-// as every built-in rule in this package.
-func (e *Engine) startCustomRuleWatch(bus *core.EventBus) {
-
-	ch := bus.Subscribe(core.EventPacketParsed)
-
-	go func() {
-
-		for event := range ch {
-
-			packet, ok := event.Data.(core.Packet)
-
-			if !ok {
-				continue
+		if g.Operator != "AND" && g.Operator != "OR" {
+			return fmt.Errorf("group operator must be AND or OR")
+		}
+		if len(g.Conditions) == 0 {
+			return fmt.Errorf("condition group is empty")
+		}
+		for _, c := range g.Conditions {
+			if strings.TrimSpace(c.Value) == "" {
+				return fmt.Errorf("condition value must not be empty")
 			}
-
-			e.handleCustomRules(packet)
+			if !validField(c.Field) {
+				return fmt.Errorf("unsupported field %q", c.Field)
+			}
+			if !validOperator(c.Operator) {
+				return fmt.Errorf("unsupported operator %q", c.Operator)
+			}
+			if c.Operator == "regex" {
+				if _, err := regexp.Compile(c.Value); err != nil {
+					return fmt.Errorf("invalid regex: %w", err)
+				}
+			}
 		}
-
-	}()
-
+	}
+	if len(r.Actions) == 0 {
+		r.Actions = []RuleAction{{Type: "alert"}}
+	}
+	if r.Suppression.Mode == "" {
+		r.Suppression.Mode = "aggregate"
+	}
+	switch r.Suppression.Mode {
+	case "every", "once", "interval", "aggregate":
+	default:
+		return fmt.Errorf("unsupported suppression mode %q", r.Suppression.Mode)
+	}
+	if r.Suppression.Mode == "interval" && r.Suppression.IntervalSeconds <= 0 {
+		return fmt.Errorf("interval_seconds must be positive")
+	}
+	return nil
 }
-
-func (e *Engine) handleCustomRules(packet core.Packet) {
-
-	e.mutex.RLock()
-
-	matched := make([]*Rule, 0)
-
-	for _, rule := range e.rules {
-
-		if rule.Kind != RuleKindCustom || !rule.Enabled {
-			continue
-		}
-
-		if customRuleMatches(rule, packet) {
-			matched = append(matched, rule)
-		}
+func validField(f RuleField) bool {
+	switch f {
+	case RuleFieldSrcIP, RuleFieldDstIP, RuleFieldEitherIP, RuleFieldSrcMAC, RuleFieldDstMAC, RuleFieldProtocol, RuleFieldSrcPort, RuleFieldDstPort, RuleFieldPort, RuleFieldVLAN, RuleFieldPacketSize, RuleFieldTCPFlags:
+		return true
 	}
-
-	e.mutex.RUnlock()
-
-	for _, rule := range matched {
-
-		key := fmt.Sprintf("%s|%s|%s", rule.ID, packet.SrcIP, packet.DstIP)
-
-		message := fmt.Sprintf(
-			"Custom rule %q matched (%s = %s): %s -> %s",
-			rule.Name, rule.Field, rule.Value, packet.SrcIP, packet.DstIP,
-		)
-
-		e.raiseCustomRuleAlert(rule, key, message, packet.SrcIP)
-	}
+	return false
 }
-
-func customRuleMatches(rule *Rule, packet core.Packet) bool {
-
-	switch rule.Field {
-
-	case RuleFieldSrcIP:
-		return packet.SrcIP != "" && packet.SrcIP == rule.Value
-
-	case RuleFieldDstIP:
-		return packet.DstIP != "" && packet.DstIP == rule.Value
-
-	case RuleFieldEitherIP:
-		return (packet.SrcIP != "" && packet.SrcIP == rule.Value) ||
-			(packet.DstIP != "" && packet.DstIP == rule.Value)
-
-	case RuleFieldProtocol:
-		return packet.L4Protocol != "" && strings.EqualFold(packet.L4Protocol, rule.Value)
-
-	case RuleFieldPort:
-
-		port, err := strconv.Atoi(rule.Value)
-
-		if err != nil {
-			return false
-		}
-
-		return int(packet.SrcPort) == port || int(packet.DstPort) == port
+func validOperator(o string) bool {
+	switch strings.ToLower(o) {
+	case "eq", "neq", "gt", "gte", "lt", "lte", "contains", "starts_with", "ends_with", "in", "not_in", "regex", "between":
+		return true
 	}
-
 	return false
 }
 
-// raiseCustomRuleAlert follows the exact same dedup/logNewAlert
-// pattern as every built-in rule's raise* function in this package.
-func (e *Engine) raiseCustomRuleAlert(rule *Rule, key, message, ip string) {
-
-	now := time.Now()
-
+func (e *Engine) AddCustomRule(name string, field RuleField, value, severity string) (*Rule, error) {
+	return e.AddPolicyRule(&Rule{Name: name, Kind: RuleKindCustom, Enabled: true, Field: field, Value: value, Severity: severity})
+}
+func (e *Engine) AddPolicyRule(rule *Rule) (*Rule, error) {
+	if rule == nil {
+		return nil, fmt.Errorf("rule is nil")
+	}
+	clone := *rule
+	clone.Kind = RuleKindCustom
+	if err := normalizeRule(&clone); err != nil {
+		return nil, err
+	}
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if !exists {
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     rule.AlertType,
-			Severity: rule.Severity,
-			Message:  message,
-
-			IP: ip,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
+	e.customRuleSeq++
+	if clone.ID == "" {
+		clone.ID = fmt.Sprintf("custom-%d", e.customRuleSeq)
 	}
-
-	alert.LastSeen = now
-	alert.Count++
+	clone.AlertType = AlertType("custom:" + clone.ID)
+	e.rules[clone.ID] = &clone
+	c := clone
+	return &c, nil
+}
+func (e *Engine) UpsertPolicyRule(rule *Rule) error {
+	if rule == nil || rule.ID == "" {
+		return fmt.Errorf("rule id required")
+	}
+	clone := *rule
+	if clone.Kind == "" {
+		clone.Kind = RuleKindCustom
+	}
+	if clone.Kind == RuleKindCustom {
+		if err := normalizeRule(&clone); err != nil {
+			return err
+		}
+		clone.AlertType = AlertType("custom:" + clone.ID)
+	}
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	if old, ok := e.rules[clone.ID]; ok && clone.Version <= old.Version {
+		clone.Version = old.Version + 1
+	}
+	e.rules[clone.ID] = &clone
+	return nil
+}
+func (e *Engine) ToggleRule(id string, enabled bool) bool {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	r, ok := e.rules[id]
+	if !ok {
+		return false
+	}
+	r.Enabled = enabled
+	r.Version++
+	return true
+}
+func (e *Engine) DeleteRule(id string) bool {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	r, ok := e.rules[id]
+	if !ok || r.Kind == RuleKindBuiltin {
+		return false
+	}
+	delete(e.rules, id)
+	return true
 }
 
-// ReplaceManagedRules applies a centrally managed rule set while preserving
-// the built-in rule identities. Custom rules not present in the central set
-// are removed, making the central rule set authoritative for the sensor.
+func (e *Engine) startCustomRuleWatch(bus *core.EventBus) {
+	ch := bus.Subscribe(core.EventPacketParsed)
+	go func() {
+		for ev := range ch {
+			p, ok := ev.Data.(core.Packet)
+			if ok {
+				e.handleCustomRules(p)
+			}
+		}
+	}()
+}
+func (e *Engine) handleCustomRules(packet core.Packet) {
+	e.mutex.RLock()
+	rules := make([]*Rule, 0)
+	for _, r := range e.rules {
+		if r.Kind == RuleKindCustom && r.Enabled && ruleMatches(r, packet) {
+			c := *r
+			rules = append(rules, &c)
+		}
+	}
+	e.mutex.RUnlock()
+	now := time.Now()
+	for _, r := range rules {
+		if r.Simulation {
+			e.mutex.Lock()
+			if live := e.rules[r.ID]; live != nil {
+				live.SimulationHits++
+				live.LastSimulationHit = now
+			}
+			e.mutex.Unlock()
+			continue
+		}
+		if r.Suppression.Mode == "once" && !r.LastTriggered.IsZero() {
+			continue
+		}
+		if r.Suppression.Mode == "interval" && !r.LastTriggered.IsZero() && now.Sub(r.LastTriggered) < time.Duration(r.Suppression.IntervalSeconds)*time.Second {
+			continue
+		}
+		key := fmt.Sprintf("%s|%s|%s", r.ID, packet.SrcIP, packet.DstIP)
+		if r.Suppression.Mode == "every" {
+			key = fmt.Sprintf("%s|%d", key, now.UnixNano())
+		}
+		msg := fmt.Sprintf("Policy rule %q matched: %s -> %s", r.Name, packet.SrcIP, packet.DstIP)
+		e.raiseCustomRuleAlert(r, key, msg, packet.SrcIP)
+		e.mutex.Lock()
+		if live := e.rules[r.ID]; live != nil {
+			live.LastTriggered = now
+		}
+		e.mutex.Unlock()
+	}
+}
+func ruleMatches(r *Rule, p core.Packet) bool {
+	results := make([]bool, 0, len(r.Groups))
+	for _, g := range r.Groups {
+		m := g.Operator == "AND"
+		for i, c := range g.Conditions {
+			v := conditionMatches(c, p)
+			if i == 0 {
+				m = v
+			} else if g.Operator == "AND" {
+				m = m && v
+			} else {
+				m = m || v
+			}
+		}
+		results = append(results, m)
+	}
+	out := r.GroupOperator == "AND"
+	for i, v := range results {
+		if i == 0 {
+			out = v
+		} else if r.GroupOperator == "AND" {
+			out = out && v
+		} else {
+			out = out || v
+		}
+	}
+	return out
+}
+func conditionMatches(c RuleCondition, p core.Packet) bool {
+	var actual string
+	switch c.Field {
+	case RuleFieldSrcIP:
+		actual = p.SrcIP
+	case RuleFieldDstIP:
+		actual = p.DstIP
+	case RuleFieldEitherIP:
+		return compare(p.SrcIP, c.Operator, c.Value) || compare(p.DstIP, c.Operator, c.Value)
+	case RuleFieldSrcMAC:
+		actual = p.SrcMAC
+	case RuleFieldDstMAC:
+		actual = p.DstMAC
+	case RuleFieldProtocol:
+		actual = p.L4Protocol
+	case RuleFieldSrcPort:
+		actual = strconv.Itoa(int(p.SrcPort))
+	case RuleFieldDstPort:
+		actual = strconv.Itoa(int(p.DstPort))
+	case RuleFieldPort:
+		return compare(strconv.Itoa(int(p.SrcPort)), c.Operator, c.Value) || compare(strconv.Itoa(int(p.DstPort)), c.Operator, c.Value)
+	case RuleFieldVLAN:
+		actual = strconv.Itoa(int(p.VLANID))
+	case RuleFieldPacketSize:
+		actual = strconv.Itoa(p.Length)
+	case RuleFieldTCPFlags:
+		actual = p.TCPFlags
+	}
+	return compare(actual, c.Operator, c.Value)
+}
+func compare(actual, op, want string) bool {
+	switch strings.ToLower(op) {
+	case "eq":
+		return strings.EqualFold(actual, want)
+	case "neq":
+		return !strings.EqualFold(actual, want)
+	case "contains":
+		return strings.Contains(strings.ToLower(actual), strings.ToLower(want))
+	case "starts_with":
+		return strings.HasPrefix(strings.ToLower(actual), strings.ToLower(want))
+	case "ends_with":
+		return strings.HasSuffix(strings.ToLower(actual), strings.ToLower(want))
+	case "in", "not_in":
+		found := false
+		for _, x := range strings.Split(want, ",") {
+			if strings.EqualFold(strings.TrimSpace(x), actual) {
+				found = true
+			}
+		}
+		if op == "not_in" {
+			return !found
+		}
+		return found
+	case "regex":
+		ok, _ := regexp.MatchString(want, actual)
+		return ok
+	case "between":
+		parts := strings.Split(want, ",")
+		if len(parts) != 2 {
+			return false
+		}
+		a, e1 := strconv.ParseFloat(actual, 64)
+		lo, e2 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+		hi, e3 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		return e1 == nil && e2 == nil && e3 == nil && a >= lo && a <= hi
+	case "gt", "gte", "lt", "lte":
+		a, e1 := strconv.ParseFloat(actual, 64)
+		b, e2 := strconv.ParseFloat(want, 64)
+		if e1 != nil || e2 != nil {
+			return false
+		}
+		switch op {
+		case "gt":
+			return a > b
+		case "gte":
+			return a >= b
+		case "lt":
+			return a < b
+		default:
+			return a <= b
+		}
+	}
+	return false
+}
+func (e *Engine) raiseCustomRuleAlert(rule *Rule, key, message, ip string) {
+	now := time.Now()
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	a, ok := e.alerts[key]
+	if !ok {
+		a = &Alert{ID: key, Type: rule.AlertType, Severity: rule.Severity, Message: message, IP: ip, FirstSeen: now, Status: AlertStatusNew}
+		e.alerts[key] = a
+		e.logNewAlert(a)
+	}
+	a.LastSeen = now
+	a.Count++
+}
 func (e *Engine) ReplaceManagedRules(rules []*Rule) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
-	for id, existing := range e.rules {
-		if existing.Kind == RuleKindCustom {
+	for id, r := range e.rules {
+		if r.Kind == RuleKindCustom {
 			delete(e.rules, id)
 		}
 	}
-	for _, incoming := range rules {
-		if incoming == nil {
+	for _, r := range rules {
+		if r == nil {
 			continue
 		}
-		if incoming.Kind == RuleKindBuiltin {
-			if existing, ok := e.rules[incoming.ID]; ok {
-				existing.Enabled = incoming.Enabled
+		clone := *r
+		if clone.Kind == RuleKindBuiltin {
+			if x := e.rules[clone.ID]; x != nil {
+				x.Enabled = clone.Enabled
+				x.Version = clone.Version
 			}
 			continue
 		}
-		clone := *incoming
-		e.rules[clone.ID] = &clone
+		if normalizeRule(&clone) == nil {
+			clone.AlertType = AlertType("custom:" + clone.ID)
+			e.rules[clone.ID] = &clone
+		}
 	}
 }
