@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // modbusFunctionNames maps Modbus function codes to readable names.

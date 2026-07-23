@@ -1,8 +1,8 @@
 package parser
 
 import (
-	"github.com/zabojnikvlado/otlens/internal/core"
-	"github.com/zabojnikvlado/otlens/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 )
 
 type Engine struct {

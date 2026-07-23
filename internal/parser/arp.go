@@ -7,7 +7,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // parseARP extracts ARP layer fields into packet, including the

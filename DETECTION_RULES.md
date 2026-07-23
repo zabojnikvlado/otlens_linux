@@ -55,7 +55,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/ics"
+	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 )
 
 func (e *Engine) handleICS(msg ics.Message) {
@@ -170,7 +170,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 func (e *Engine) startTrafficVolumeWatch(bus *core.EventBus) {

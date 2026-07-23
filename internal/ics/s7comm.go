@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // S7comm rides on top of ISO-on-TCP (RFC 1006): TPKT header, then a
@@ -13,11 +13,11 @@ import (
 // by the Wireshark/snap7 projects; there is no official public spec.
 
 const (
-	cotpPDUTypeData             uint8 = 0xF0 // DT (Data) TPDU — carries the S7 payload
-	cotpPDUTypeConnectRequest   uint8 = 0xE0
-	cotpPDUTypeConnectConfirm   uint8 = 0xD0
-	cotpPDUTypeDisconnectReq    uint8 = 0x80
-	s7ProtocolID                uint8 = 0x32 // fixed magic byte identifying S7comm
+	cotpPDUTypeData           uint8 = 0xF0 // DT (Data) TPDU — carries the S7 payload
+	cotpPDUTypeConnectRequest uint8 = 0xE0
+	cotpPDUTypeConnectConfirm uint8 = 0xD0
+	cotpPDUTypeDisconnectReq  uint8 = 0x80
+	s7ProtocolID              uint8 = 0x32 // fixed magic byte identifying S7comm
 )
 
 // s7ROSCTRNames maps the S7 "ROSCTR" (Remote Operation Service

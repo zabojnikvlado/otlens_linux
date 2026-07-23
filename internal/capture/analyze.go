@@ -9,7 +9,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcapgo"
 
-	"github.com/zabojnikvlado/otlens/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"go.uber.org/zap"
 )
 

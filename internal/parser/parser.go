@@ -11,7 +11,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // Parse decodes a raw Ethernet frame into a core.Packet, filling in
@@ -28,7 +28,7 @@ func Parse(frame core.RawFrame) core.Packet {
 	)
 
 	packet := core.Packet{
-		Length:    len(frame.Data),
+		Length:       len(frame.Data),
 		Timestamp:    frame.Timestamp,
 		FromAnalysis: frame.FromAnalysis,
 	}

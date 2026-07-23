@@ -26,11 +26,11 @@ package ipfix
 // reference other IEs too; unrecognized ones are skipped using their
 // declared length rather than causing a decode failure.
 const (
-	ieOctetDeltaCount        uint16 = 1
-	iePacketDeltaCount       uint16 = 2
-	ieProtocolIdentifier     uint16 = 4
-	ieSourceTransportPort    uint16 = 7
-	ieSourceIPv4Address      uint16 = 8
+	ieOctetDeltaCount          uint16 = 1
+	iePacketDeltaCount         uint16 = 2
+	ieProtocolIdentifier       uint16 = 4
+	ieSourceTransportPort      uint16 = 7
+	ieSourceIPv4Address        uint16 = 8
 	ieDestinationTransportPort uint16 = 11
 	ieDestinationIPv4Address   uint16 = 12
 	ieSourceIPv6Address        uint16 = 27
@@ -44,7 +44,7 @@ const enterpriseBit uint16 = 0x8000
 
 // Set ID ranges, per RFC 7011 §3.3.2.
 const (
-	setIDTemplate       uint16 = 2
+	setIDTemplate        uint16 = 2
 	setIDOptionsTemplate uint16 = 3
 	// Set IDs >= 256 are Data Sets, referencing a previously received
 	// Template (or Options Template) by that same ID.

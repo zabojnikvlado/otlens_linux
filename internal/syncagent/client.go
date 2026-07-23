@@ -1,0 +1,102 @@
+package syncagent
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"github.com/zabojnikvlado/otlens_linux/internal/detect"
+	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	BaseURL, Token, SensorID, Name, SiteID, Version, Hostname string
+	InsecureSkipVerify                                        bool
+	Interval                                                  time.Duration
+}
+type Client struct {
+	cfg          Config
+	http         *http.Client
+	rulesVersion int64
+}
+
+func New(cfg Config) *Client {
+	if cfg.Interval <= 0 {
+		cfg.Interval = 30 * time.Second
+	}
+	return &Client{cfg: cfg, http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}}}}
+}
+func (c *Client) headers(r *http.Request) {
+	if c.cfg.Token != "" {
+		r.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	}
+	r.Header.Set("X-OTLens-Sensor-ID", c.cfg.SensorID)
+	r.Header.Set("Content-Type", "application/json")
+}
+func (c *Client) Register(ctx context.Context) error {
+	b, _ := json.Marshal(management.SensorRegistration{ID: c.cfg.SensorID, Name: c.cfg.Name, SiteID: c.cfg.SiteID, Version: c.cfg.Version, Hostname: c.cfg.Hostname})
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/register", strings.NewReader(string(b)))
+	if e != nil {
+		return e
+	}
+	c.headers(req)
+	resp, e := c.http.Do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("registration failed: %s", resp.Status)
+	}
+	return nil
+}
+func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
+	b, _ := json.Marshal(h)
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/heartbeat", strings.NewReader(string(b)))
+	if e != nil {
+		return e
+	}
+	c.headers(req)
+	resp, e := c.http.Do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("heartbeat failed: %s", resp.Status)
+	}
+	return nil
+}
+func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error) error {
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/sync", nil)
+	if e != nil {
+		return e
+	}
+	c.headers(req)
+	resp, e := c.http.Do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("sync failed: %s", resp.Status)
+	}
+	var out management.SyncResponse
+	if e := json.NewDecoder(resp.Body).Decode(&out); e != nil {
+		return e
+	}
+	if out.RuleSet != nil && out.RulesVersion > c.rulesVersion {
+		rules := make([]*detect.Rule, 0, len(out.RuleSet.Rules))
+		for _, r := range out.RuleSet.Rules {
+			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Field: detect.RuleField(r.Field), Value: r.Value, Severity: r.Severity, AlertType: detect.AlertType(r.AlertType)})
+		}
+		if e := apply(rules); e != nil {
+			return e
+		}
+		c.rulesVersion = out.RulesVersion
+	}
+	return nil
+}

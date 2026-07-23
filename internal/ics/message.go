@@ -3,7 +3,7 @@ package ics
 import (
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // Message is a normalized, decoded OT/ICS application-layer message.

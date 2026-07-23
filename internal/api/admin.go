@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/zabojnikvlado/otlens/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"go.uber.org/zap"
 )
 

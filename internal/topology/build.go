@@ -8,10 +8,10 @@
 package topology
 
 import (
-	"github.com/zabojnikvlado/otlens/internal/asset"
-	"github.com/zabojnikvlado/otlens/internal/flow"
-	"github.com/zabojnikvlado/otlens/internal/oui"
-	"github.com/zabojnikvlado/otlens/internal/store"
+	"github.com/zabojnikvlado/otlens_linux/internal/asset"
+	"github.com/zabojnikvlado/otlens_linux/internal/flow"
+	"github.com/zabojnikvlado/otlens_linux/internal/oui"
+	"github.com/zabojnikvlado/otlens_linux/internal/store"
 )
 
 // Build combines the independently-tracked asset/flow/tag data into
@@ -100,7 +100,7 @@ func Build(
 				// ever send anything on this pair." See
 				// flow.Flow.HoneypotInitiated's doc comment.
 				FromHoneypot: f.HoneypotInitiated,
-				VLANID:      f.VLANID,
+				VLANID:       f.VLANID,
 
 				Packets: f.Packets,
 				Bytes:   f.Bytes,

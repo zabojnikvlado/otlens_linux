@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // handleARP implements ARP spoofing detection: track the last

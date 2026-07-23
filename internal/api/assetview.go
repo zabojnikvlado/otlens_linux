@@ -1,6 +1,6 @@
 package api
 
-import "github.com/zabojnikvlado/otlens/internal/asset"
+import "github.com/zabojnikvlado/otlens_linux/internal/asset"
 
 // AssetView adds cross-cutting enrichment onto an asset for API
 // responses — the OT/IT classification (derived from store.Tag data

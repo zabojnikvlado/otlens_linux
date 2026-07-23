@@ -1,10 +1,11 @@
-module github.com/zabojnikvlado/otlens
+module github.com/zabojnikvlado/otlens_linux
 
 go 1.25.0
 
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/gopacket v1.1.19
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/spf13/viper v1.21.0
 	go.etcd.io/bbolt v1.5.0
 	modernc.org/sqlite v1.39.1

@@ -10,11 +10,11 @@ package persist
 import (
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/asset"
-	"github.com/zabojnikvlado/otlens/internal/detect"
-	"github.com/zabojnikvlado/otlens/internal/flow"
-	"github.com/zabojnikvlado/otlens/internal/logger"
-	"github.com/zabojnikvlado/otlens/internal/store"
+	"github.com/zabojnikvlado/otlens_linux/internal/asset"
+	"github.com/zabojnikvlado/otlens_linux/internal/detect"
+	"github.com/zabojnikvlado/otlens_linux/internal/flow"
+	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/store"
 	"go.uber.org/zap"
 )
 

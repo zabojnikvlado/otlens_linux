@@ -10,10 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/zabojnikvlado/otlens/internal/app"
-	"github.com/zabojnikvlado/otlens/internal/config"
-	"github.com/zabojnikvlado/otlens/internal/logger"
-	"github.com/zabojnikvlado/otlens/internal/oui"
+	"github.com/zabojnikvlado/otlens_linux/internal/app"
+	"github.com/zabojnikvlado/otlens_linux/internal/config"
+	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/oui"
 	"go.uber.org/zap"
 )
 

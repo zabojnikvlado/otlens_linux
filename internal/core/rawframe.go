@@ -33,4 +33,3 @@ type RawFrame struct {
 	// deliberately-reviewed historical snapshot".
 	FromAnalysis bool
 }
-

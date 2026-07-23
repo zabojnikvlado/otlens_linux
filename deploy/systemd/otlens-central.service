@@ -1,0 +1,22 @@
+[Unit]
+Description=OTLens Central Management Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otlens
+Group=otlens
+WorkingDirectory=/opt/otlens-central
+ExecStart=/opt/otlens-central/otlens-central
+Environment=OTLENS_CENTRAL_ADDR=:9090
+EnvironmentFile=-/etc/otlens-central/environment
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

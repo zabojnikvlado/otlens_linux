@@ -10,8 +10,8 @@ package debug
 import (
 	"fmt"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
-	"github.com/zabojnikvlado/otlens/internal/ics"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 )
 
 type Engine struct {

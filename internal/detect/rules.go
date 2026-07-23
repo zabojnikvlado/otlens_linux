@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
 // RuleKind distinguishes a built-in detection rule (hardcoded logic
@@ -434,4 +434,30 @@ func (e *Engine) raiseCustomRuleAlert(rule *Rule, key, message, ip string) {
 
 	alert.LastSeen = now
 	alert.Count++
+}
+
+// ReplaceManagedRules applies a centrally managed rule set while preserving
+// the built-in rule identities. Custom rules not present in the central set
+// are removed, making the central rule set authoritative for the sensor.
+func (e *Engine) ReplaceManagedRules(rules []*Rule) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	for id, existing := range e.rules {
+		if existing.Kind == RuleKindCustom {
+			delete(e.rules, id)
+		}
+	}
+	for _, incoming := range rules {
+		if incoming == nil {
+			continue
+		}
+		if incoming.Kind == RuleKindBuiltin {
+			if existing, ok := e.rules[incoming.ID]; ok {
+				existing.Enabled = incoming.Enabled
+			}
+			continue
+		}
+		clone := *incoming
+		e.rules[clone.ID] = &clone
+	}
 }

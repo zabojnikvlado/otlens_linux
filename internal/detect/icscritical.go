@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zabojnikvlado/otlens/internal/ics"
+	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 )
 
 // handleICS promotes ics parser findings already flagged
