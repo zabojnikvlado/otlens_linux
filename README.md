@@ -55,3 +55,11 @@ The Go module path is:
 ```text
 github.com/zabojnikvlado/otlens_linux
 ```
+
+
+## Deployment targets
+
+The recommended production topology is Windows Central + local PostgreSQL + Linux sensors. See `DEPLOYMENT_WINDOWS_CENTRAL.md` and `deploy/windows/README.md`.
+
+Build a Linux sensor: `make build-linux-sensor`.
+Build a Windows Central binary: `make build-windows-central`.

@@ -1,16 +1,19 @@
 package central
 
 import (
-	"github.com/gin-gonic/gin"
-	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"context"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/zabojnikvlado/otlens_linux/internal/management"
 )
 
 type Server struct {
 	Repo  *Repository
 	Token string
+	http  *http.Server
 }
 
 func (s *Server) auth(c *gin.Context) {
@@ -102,6 +105,18 @@ func (s *Server) assign(c *gin.Context) {
 	}
 	c.Status(204)
 }
-func (s *Server) Start(addr string) error { return s.Router().Run(addr) }
+func (s *Server) Start(addr string) error {
+	s.http = &http.Server{
+		Addr:              addr,
+		Handler:           s.Router(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return s.http.ListenAndServe()
+}
 
-var _ = time.Second
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.http == nil {
+		return nil
+	}
+	return s.http.Shutdown(ctx)
+}
