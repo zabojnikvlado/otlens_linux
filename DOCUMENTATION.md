@@ -64,9 +64,55 @@ Sensor reset and backup commands are delivered through the command queue. A stop
 
 ## UI
 
-The only supported UI is `web/central`. It includes Sensors, Topology, Assets, OT Tags, Alerts, Rules, Analysis and Data Management. Tables support sorting and page sizes 10, 50, 100 and All.
+The only supported UI is `web/central`. It includes Sensors, Topology, Assets, OT Tags, Rules, Alerts, Analysis, Settings and Data Management. Tables support sorting and page sizes 10, 50, 100 and All.
+
+Settings is read-only: it shows the operational values Central loaded from `central.config.yaml` at startup (sensor offline-detection thresholds, whether SIEM export/PCAP analysis/vulnerability lookup are enabled, TLS status on both listeners) via `GET /v1/settings`, plus a field to set the browser's management token. There's no corresponding write endpoint — change `central.config.yaml` and restart Central to actually change any of it.
+
+Clicking an asset row in the Assets tab opens a vulnerability lookup for that device's vendor (`GET /v1/assets/vulnerabilities?vendor=...`), matched against an optional offline CSV snapshot (`vulnerability.csv_path` in Configuration) — see package `internal/vuln`'s doc comment for why this is vendor-only and never a live network call.
 
 The Topology tab draws one edge per asset pair, not one per underlying flow — a sensor's raw graph has a separate flow per protocol/port combination, so a single busy pair (e.g. an HMI polling a PLC over several sessions) could otherwise produce dozens of parallel lines between the same two nodes. Central's `/topology` handler aggregates these server-side (see `aggregateEdges` in `internal/central/server.go`); the aggregated edge's tooltip shows the flow count and combined traffic.
+
+## Authentication and roles
+
+Central users authenticate with a username and password (bcrypt-hashed in
+Postgres, never stored in cleartext) through the Web UI's login screen,
+which gets a session cookie (`otlens_session`, `HttpOnly`, `SameSite=Strict`,
+sent only over TLS when `web.tls.enabled` is true) — not a token the person
+handles directly. Sessions use a sliding expiry (`auth.session_duration`,
+6h by default): every authenticated request pushes the expiry back out, so
+an active user is never logged out mid-session, but an idle one expires
+that long after their last request.
+
+Three built-in roles ship by default — Administrator (full view+action
+access), Analyst (everything except starting/stopping sensors, and no
+access to Settings or Data Management), and View only (Dashboard, Topology,
+and Alerts, read-only). Both the tabs a role can see and the actions it can
+perform are stored in Postgres (`roles.permissions`) and editable from the
+Settings tab (admin only) — including editing the built-in roles'
+permissions, though their ids can't be deleted. Every route is gated
+server-side by the same permission check the UI uses to decide what to
+show (`requireView`/`requireAction` in `internal/central/server.go`) — the
+UI hiding a tab or button is a convenience, not the actual access control.
+
+The very first time Central starts against a database with no users at
+all, it creates an "administrator" account (`auth.bootstrap_username`/
+`bootstrap_password`, default `administrator`/`administrator`) with a
+forced password change on first login. Password validity (in days, or
+never-expiring) is set per user when they're created and can be changed
+later; an expired-but-not-yet-changed password still logs in but is
+immediately forced through the same change-password flow as a brand-new
+account. There's no self-service "forgot password" — that needs an email/
+SMS system this doesn't assume, and OT networks are often air-gapped
+anyway — instead an admin resets a user's password from the Users tab,
+which generates a random temporary password shown exactly once (never
+retrievable again) and forces a real password to be set at next login;
+the reset also signs out any of that user's existing sessions.
+
+`auth.management_token`, the single shared bearer token from earlier
+versions, still works as an emergency/break-glass fallback if the session
+cookie is absent or invalid — it grants full access with no per-user
+identity, so it's meant for operational emergencies, not day-to-day login.
+Leave it empty to disable that fallback entirely.
 
 ## Security boundaries
 

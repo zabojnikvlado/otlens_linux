@@ -25,6 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 	"github.com/zabojnikvlado/otlens_linux/internal/topology"
+	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 )
 
 type Server struct {
@@ -32,12 +33,30 @@ type Server struct {
 	ManagementToken  string
 	SensorToken      string
 	SIEMSource       string
+	SIEMEnabled      bool
 	AuditExport      bool
 	AnalysisEnabled  bool
 	AnalysisDir      string
 	AnalysisMaxBytes int64
-	web              *http.Server
-	sensorAPI        *http.Server
+	// SensorOfflineAfter/SensorCheckInterval and the TLS flags below are
+	// purely for the read-only Settings tab (s.settings) — the actual
+	// offline-sweep ticker and TLS listeners in main.go read the same
+	// config.CentralConfig values directly, this is just so the UI can
+	// show what's actually running without a second config parse.
+	SensorOfflineAfter   time.Duration
+	SensorCheckInterval  time.Duration
+	WebTLSEnabled        bool
+	SensorAPITLSEnabled  bool
+	// SessionDuration is the sliding-expiry window for logged-in Central
+	// UI sessions — see authMiddleware. Defaults to 6h (auth.session_duration).
+	SessionDuration time.Duration
+	// Vuln is looked up by asset vendor only (see package vuln's doc
+	// comment for why that's a real precision limit, not an oversight) —
+	// never nil; main.go always sets it to at least an empty *vuln.Database
+	// so this handler never needs its own "feature disabled" branch.
+	Vuln      *vuln.Database
+	web       *http.Server
+	sensorAPI *http.Server
 
 	// topoCache holds the last built /topology response keyed by a
 	// fingerprint of every sensor's telemetry sequence number. As long as
@@ -104,6 +123,7 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 				"sensor_id":  c.Param("id"),
 				"rule_id":    c.Param("rule"),
 				"ruleset_id": c.Param("ruleset"),
+				"actor":      identityFromContext(c).Username,
 			},
 		}
 		key := fmt.Sprintf("audit:%d:%s:%s:%d", started.UnixNano(), method, c.Request.URL.Path, c.Writer.Status())
@@ -129,36 +149,61 @@ func (s *Server) WebRouter() *gin.Engine {
 		})
 	}
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
-	api := r.Group("/v1", bearerAuth(s.ManagementToken), s.auditMiddleware())
-	api.GET("/sensors", s.sensors)
-	api.POST("/sensors/actions", s.sensorActions)
-	api.GET("/assets", s.assets)
-	api.GET("/topology", s.topology)
-	api.GET("/tags", s.tags)
-	api.GET("/tags/changes", s.tagChanges)
-	api.GET("/tags/events", s.tagEvents)
-	api.GET("/alerts", s.alerts)
-	api.GET("/baseline", s.baseline)
-	api.GET("/rules", s.rules)
-	api.POST("/sensors/:id/rules", s.createRule)
-	api.PUT("/sensors/:id/rules/:rule", s.replaceRule)
-	api.PATCH("/sensors/:id/rules/:rule", s.updateRule)
-	api.DELETE("/sensors/:id/rules/:rule", s.deleteRule)
-	api.POST("/sensors/:id/rules/test", s.testRule)
-	api.POST("/rules/import", s.importRules)
-	api.GET("/rules/export", s.exportRules)
-	api.POST("/sensors/:id/assets/actions", s.assetActions)
-	api.POST("/sensors/:id/alerts/actions", s.alertActions)
-	api.POST("/rulesets", s.putRuleset)
-	api.PUT("/sensors/:id/ruleset/:ruleset", s.assign)
-	api.GET("/analysis/jobs", s.analysisJobs)
-	api.POST("/analysis/jobs", s.createAnalysisJob)
-	api.DELETE("/analysis/jobs/:job", s.deleteAnalysisJob)
-	api.GET("/data/backups", s.listBackups)
-	api.POST("/data/backups", s.createBackup)
-	api.GET("/data/backups/:backup/download", s.downloadBackup)
-	api.DELETE("/data/backups/:backup", s.deleteBackup)
-	api.POST("/data/reset", s.resetData)
+
+	// Login/logout are unauthenticated by definition — everything else in
+	// /v1 goes through authMiddleware (session cookie, falling back to
+	// the legacy management_token bearer as an emergency path).
+	public := r.Group("/v1")
+	public.POST("/login", s.login)
+	public.POST("/logout", s.logout)
+
+	api := r.Group("/v1", s.authMiddleware(), s.auditMiddleware())
+	api.GET("/me", s.me)
+	api.POST("/change-password", s.changePassword)
+
+	api.GET("/sensors", requireView(ViewSensors), s.sensors)
+	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
+	api.GET("/assets", requireView(ViewAssets), s.assets)
+	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
+	api.GET("/settings", requireView(ViewSettings), s.settings)
+	api.GET("/topology", requireView(ViewTopology), s.topology)
+	api.GET("/tags", requireView(ViewTags), s.tags)
+	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
+	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
+	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
+	api.GET("/baseline", requireView(ViewDashboard), s.baseline)
+	api.GET("/rules", requireView(ViewRules), s.rules)
+	api.GET("/rules/export", requireView(ViewRules), s.exportRules)
+	api.POST("/sensors/:id/rules", requireAction(ActionRuleManage), s.createRule)
+	api.PUT("/sensors/:id/rules/:rule", requireAction(ActionRuleManage), s.replaceRule)
+	api.PATCH("/sensors/:id/rules/:rule", requireAction(ActionRuleManage), s.updateRule)
+	api.DELETE("/sensors/:id/rules/:rule", requireAction(ActionRuleManage), s.deleteRule)
+	api.POST("/sensors/:id/rules/test", requireAction(ActionRuleManage), s.testRule)
+	api.POST("/rules/import", requireAction(ActionRuleManage), s.importRules)
+	api.POST("/sensors/:id/assets/actions", requireAction(ActionAssetConfirmDelete), s.assetActions)
+	api.POST("/sensors/:id/alerts/actions", requireAction(ActionAlertConfirmApprove), s.alertActions)
+	api.POST("/rulesets", requireAction(ActionRuleManage), s.putRuleset)
+	api.PUT("/sensors/:id/ruleset/:ruleset", requireAction(ActionRuleManage), s.assign)
+	api.GET("/analysis/jobs", requireView(ViewAnalysis), s.analysisJobs)
+	api.POST("/analysis/jobs", requireAction(ActionAnalysisManage), s.createAnalysisJob)
+	api.DELETE("/analysis/jobs/:job", requireAction(ActionAnalysisManage), s.deleteAnalysisJob)
+	api.GET("/data/backups", requireView(ViewData), s.listBackups)
+	api.POST("/data/backups", requireAction(ActionDataManagement), s.createBackup)
+	api.GET("/data/backups/:backup/download", requireView(ViewData), s.downloadBackup)
+	api.DELETE("/data/backups/:backup", requireAction(ActionDataManagement), s.deleteBackup)
+	api.POST("/data/reset", requireAction(ActionDataManagement), s.resetData)
+
+	// Users & roles management — admin only (requireView(ViewSettings)
+	// gates the whole Settings tab these live on; requireAction gates the
+	// mutations specifically).
+	api.GET("/users", requireView(ViewSettings), s.listUsers)
+	api.POST("/users", requireAction(ActionUsersRolesManage), s.createUser)
+	api.PATCH("/users/:id", requireAction(ActionUsersRolesManage), s.updateUser)
+	api.DELETE("/users/:id", requireAction(ActionUsersRolesManage), s.deleteUser)
+	api.POST("/users/:id/reset-password", requireAction(ActionUsersRolesManage), s.resetUserPassword)
+	api.GET("/roles", requireView(ViewSettings), s.listRoles)
+	api.PUT("/roles", requireAction(ActionUsersRolesManage), s.upsertRole)
+	api.DELETE("/roles/:id", requireAction(ActionUsersRolesManage), s.deleteRole)
 	return r
 }
 
@@ -240,6 +285,48 @@ func (s *Server) assets(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// assetVulnerabilities looks up known advisories for an asset's vendor.
+// Matching is vendor-only — see package vuln's doc comment for why OTLens
+// has no passive way to fingerprint a device's exact product/firmware, so
+// this narrows to "known issues affecting this vendor," not "known issues
+// confirmed on this specific device." The Assets tab calls this on row
+// click with whatever vendor string it already has for that asset.
+func (s *Server) assetVulnerabilities(c *gin.Context) {
+	vendor := strings.TrimSpace(c.Query("vendor"))
+	if vendor == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor query parameter is required"})
+		return
+	}
+	advisories := []vuln.Advisory{}
+	if s.Vuln != nil {
+		advisories = s.Vuln.Lookup(vendor)
+	}
+	c.JSON(http.StatusOK, gin.H{"Vendor": vendor, "Advisories": advisories, "Loaded": s.Vuln != nil && s.Vuln.Count() > 0})
+}
+
+// settings exposes the operational (non-secret) config values the
+// Settings tab shows — never tokens, passwords, or TLS key material. It's
+// read-only: there is no corresponding PUT/PATCH, since these all come
+// from central.config.yaml and take a restart to change; this just lets
+// an operator confirm what's actually running without SSHing in to read
+// the file.
+func (s *Server) settings(c *gin.Context) {
+	vulnCount := 0
+	if s.Vuln != nil {
+		vulnCount = s.Vuln.Count()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"SensorOfflineAfterSeconds":  int64(s.SensorOfflineAfter / time.Second),
+		"SensorCheckIntervalSeconds": int64(s.SensorCheckInterval / time.Second),
+		"SIEMEnabled":                s.SIEMEnabled,
+		"AnalysisEnabled":            s.AnalysisEnabled,
+		"VulnerabilityLoaded":        vulnCount > 0,
+		"VulnerabilityCount":         vulnCount,
+		"WebTLSEnabled":              s.WebTLSEnabled,
+		"SensorAPITLSEnabled":        s.SensorAPITLSEnabled,
+	})
 }
 
 func (s *Server) tags(c *gin.Context) {

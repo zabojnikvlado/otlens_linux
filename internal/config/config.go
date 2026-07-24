@@ -247,6 +247,22 @@ type CentralConfig struct {
 	Auth struct {
 		ManagementToken string `mapstructure:"management_token"`
 		SensorToken     string `mapstructure:"sensor_token"`
+		// SessionDuration is the sliding-expiry window for a logged-in
+		// Central UI session (see internal/central's authMiddleware) —
+		// it resets on every request, so an active user is never logged
+		// out mid-session, but an idle one expires this long after their
+		// last request.
+		SessionDuration time.Duration `mapstructure:"session_duration"`
+		// BootstrapUsername/BootstrapPassword are used exactly once, the
+		// first time Central starts against a database with no users at
+		// all, to create the initial administrator account. That account
+		// is created with must_change_password set, so the default
+		// password only ever works to log in and immediately set a real
+		// one. Change these before first startup if the default
+		// "administrator"/"administrator" isn't acceptable even for that
+		// brief window.
+		BootstrapUsername string `mapstructure:"bootstrap_username"`
+		BootstrapPassword string `mapstructure:"bootstrap_password"`
 	} `mapstructure:"auth"`
 	Analysis struct {
 		Enabled         bool          `mapstructure:"enabled"`
@@ -288,6 +304,15 @@ type CentralConfig struct {
 		// goroutine.
 		CheckInterval time.Duration `mapstructure:"check_interval"`
 	} `mapstructure:"sensors"`
+	// Vulnerability is a purely local, offline lookup — see package vuln's
+	// doc comment for why this deliberately never makes a live network
+	// call. CSVPath is prepared out of band from a public ICS advisory
+	// feed and carried into the (often air-gapped) network like any other
+	// definition update.
+	Vulnerability struct {
+		Enabled bool   `mapstructure:"enabled"`
+		CSVPath string `mapstructure:"csv_path"`
+	} `mapstructure:"vulnerability"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -319,6 +344,9 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("database.sslmode", "disable")
 	v.SetDefault("auth.management_token", "")
 	v.SetDefault("auth.sensor_token", "")
+	v.SetDefault("auth.session_duration", 6*time.Hour)
+	v.SetDefault("auth.bootstrap_username", "administrator")
+	v.SetDefault("auth.bootstrap_password", "administrator")
 	v.SetDefault("analysis.enabled", true)
 	v.SetDefault("analysis.upload_directory", "./data/pcap-uploads")
 	v.SetDefault("analysis.max_upload_size_mb", 2048)
@@ -343,6 +371,8 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("siem.tls.server_name", "")
 	v.SetDefault("sensors.offline_after", 90*time.Second)
 	v.SetDefault("sensors.check_interval", 20*time.Second)
+	v.SetDefault("vulnerability.enabled", false)
+	v.SetDefault("vulnerability.csv_path", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)

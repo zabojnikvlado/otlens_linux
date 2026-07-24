@@ -13,6 +13,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/central"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
 	"github.com/zabojnikvlado/otlens_linux/internal/siem"
+	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 )
 
 func main() {
@@ -40,11 +41,39 @@ func main() {
 	defer repo.Close()
 	repo.ConfigureSIEM(cfg.SIEM.Enabled && cfg.SIEM.ExportAlerts)
 
+	bootstrapHash, err := central.HashPassword(cfg.Auth.BootstrapPassword)
+	if err != nil {
+		log.Fatalf("bootstrap admin password hashing failed: %v", err)
+	}
+	if err := repo.EnsureAuthBootstrap(context.Background(), cfg.Auth.BootstrapUsername, bootstrapHash); err != nil {
+		log.Fatalf("auth bootstrap failed: %v", err)
+	}
+
+	// vuln.New() alone is a working no-op — Lookup just returns an empty
+	// slice — so this is unconditional; LoadCSV only runs when configured,
+	// and a failed/missing snapshot logs a warning rather than crashing
+	// Central over what's a supplementary lookup, not a core function.
+	vulnDB := vuln.New()
+	if cfg.Vulnerability.Enabled && cfg.Vulnerability.CSVPath != "" {
+		count, err := vulnDB.LoadCSV(cfg.Vulnerability.CSVPath)
+		if err != nil {
+			log.Printf("vulnerability snapshot not loaded: %v", err)
+		} else {
+			log.Printf("vulnerability snapshot loaded: %d advisories", count)
+		}
+	}
+
 	srv := &central.Server{
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
-		SIEMSource: cfg.SIEM.Source, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
+		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
 		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,
-		AnalysisMaxBytes: cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
+		AnalysisMaxBytes:     cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
+		Vuln:                 vulnDB,
+		SensorOfflineAfter:   cfg.Sensors.OfflineAfter,
+		SensorCheckInterval:  cfg.Sensors.CheckInterval,
+		WebTLSEnabled:        cfg.Web.TLS.Enabled,
+		SensorAPITLSEnabled:  cfg.SensorAPI.TLS.Enabled,
+		SessionDuration:      cfg.Auth.SessionDuration,
 	}
 	exporter, err := siem.New(siem.Config{
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,

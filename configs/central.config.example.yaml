@@ -52,8 +52,12 @@ database:
   sslmode: disable
 
 auth:
-  # Token used by administrators in the Web UI and management API on port 8443.
-  # The browser asks for this token once and stores it in localStorage.
+  # Emergency/break-glass access only — normal use is username+password
+  # login through the Web UI, which issues a session cookie (see below).
+  # Requests bearing this token as "Authorization: Bearer <token>" get
+  # full access with no per-user identity, so keep it for operational
+  # emergencies (e.g. the users table or Postgres itself is broken) rather
+  # than day-to-day use. Leave empty to disable this fallback entirely.
   # Environment override: OTLENS_CENTRAL_AUTH_MANAGEMENT_TOKEN
   management_token: "CHANGE_MANAGEMENT_TOKEN"
 
@@ -61,6 +65,20 @@ auth:
   # It must match central.token in every sensor config.
   # Environment override: OTLENS_CENTRAL_AUTH_SENSOR_TOKEN
   sensor_token: "CHANGE_SENSOR_TOKEN"
+
+  # Sliding-expiry window for a logged-in Web UI session: it resets on
+  # every request, so an active user is never logged out mid-session, but
+  # an idle one is logged out this long after their last request.
+  session_duration: 6h
+
+  # Used exactly once — the first time Central starts against a database
+  # with no users at all — to create the initial administrator account.
+  # That account is created with must_change_password set, so this
+  # default only ever works to log in and immediately set a real
+  # password. Change these before first startup if even that brief
+  # window is a concern in your environment.
+  bootstrap_username: "administrator"
+  bootstrap_password: "administrator"
 
 # Optional export of Central alerts and management audit events to a SIEM
 # HTTP collector. Events are stored in PostgreSQL first and retried after
@@ -109,6 +127,18 @@ siem:
 sensors:
   offline_after: 90s
   check_interval: 20s
+
+# Offline, vendor-only lookup against a locally-loaded CSV snapshot — never
+# a live network call (OT networks are routinely air-gapped on purpose).
+# Prepare the CSV out of band from a public ICS advisory feed (see
+# ics_advisories.csv.example for the expected columns) and copy it in like
+# any other definition update. Matching is by device vendor only; Central
+# has no passive way to fingerprint exact product/firmware, so results are
+# "known issues affecting this vendor," not confirmed for this specific
+# device. The Assets tab looks this up when you click a row.
+vulnerability:
+  enabled: false
+  csv_path: ""
 
 analysis:
   enabled: true

@@ -168,6 +168,38 @@ CREATE TABLE IF NOT EXISTS system_backups (
  sha256 TEXT NOT NULL DEFAULT '',
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS roles (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ built_in BOOLEAN NOT NULL DEFAULT FALSE,
+ permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY,
+ username TEXT UNIQUE NOT NULL,
+ password_hash TEXT NOT NULL,
+ role_id TEXT NOT NULL REFERENCES roles(id),
+ display_name TEXT NOT NULL DEFAULT '',
+ enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+ password_expires_at TIMESTAMPTZ,
+ password_validity_days INTEGER,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ last_login_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS sessions (
+ id TEXT PRIMARY KEY,
+ user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ expires_at TIMESTAMPTZ NOT NULL,
+ last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ user_agent TEXT NOT NULL DEFAULT '',
+ ip TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
