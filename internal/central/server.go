@@ -16,12 +16,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"github.com/zabojnikvlado/otlens_linux/internal/topology"
 )
 
 type Server struct {
@@ -35,6 +38,19 @@ type Server struct {
 	AnalysisMaxBytes int64
 	web              *http.Server
 	sensorAPI        *http.Server
+
+	// topoCache holds the last built /topology response keyed by a
+	// fingerprint of every sensor's telemetry sequence number. As long as
+	// no sensor has posted new telemetry, repeated polls (the UI polls
+	// every few seconds) are served straight from this cache instead of
+	// re-fetching and re-decoding every sensor's topology JSONB blob —
+	// which is the expensive part on a large network. See s.topology.
+	topoCache struct {
+		mu          sync.Mutex
+		fingerprint string
+		etag        string
+		body        []byte
+	}
 }
 
 func bearerAuth(token string) gin.HandlerFunc {
@@ -264,46 +280,132 @@ func (s *Server) tags(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (s *Server) topology(c *gin.Context) {
-	snapshots, err := s.Repo.Telemetry(c)
+// topologyNode/topologyEdge are the wire shape the Central UI's Topology
+// tab consumes. They embed the sensor's own topology.Node/Edge (typed
+// structs, not map[string]interface{} — decoding straight into concrete
+// types is materially cheaper than generic-map decoding once a graph has
+// more than a few hundred nodes/edges) plus the handful of fields Central
+// adds on aggregation across sensors.
+type topologyNode struct {
+	topology.Node
+	SensorID          string `json:"SensorID"`
+	HoneypotThreshold int    `json:"HoneypotThreshold"`
+	IsHoneypot        bool   `json:"IsHoneypot"`
+}
+
+type topologyEdge struct {
+	topology.Edge
+	SensorID  string `json:"SensorID"`
+	SrcNodeID string `json:"SrcNodeID"`
+	DstNodeID string `json:"DstNodeID"`
+}
+
+// buildTopologyResponse fetches every sensor's stored topology JSONB and
+// aggregates it into one graph. This is the expensive path (JSONB fetch +
+// JSON decode for potentially large per-sensor graphs) — s.topology only
+// calls this when the fingerprint shows something actually changed.
+func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
+	rows, err := s.Repo.TelemetryTopology(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
+		return nil, err
 	}
-	nodes := make([]map[string]interface{}, 0)
-	edges := make([]map[string]interface{}, 0)
-	threshold := 100
-	for _, snapshot := range snapshots {
-		var graph struct {
-			Nodes             []map[string]interface{} `json:"Nodes"`
-			Edges             []map[string]interface{} `json:"Edges"`
-			HoneypotThreshold int                      `json:"HoneypotThreshold"`
-		}
-		if json.Unmarshal(snapshot.Topology, &graph) != nil {
+	nodes := make([]topologyNode, 0)
+	edges := make([]topologyEdge, 0)
+	for _, row := range rows {
+		var graph topology.Graph
+		if json.Unmarshal(row.Topology, &graph) != nil {
 			continue
 		}
 		sensorThreshold := graph.HoneypotThreshold
 		if sensorThreshold <= 0 {
 			sensorThreshold = 100
 		}
-		prefix := snapshot.SensorID + "::"
-		for _, node := range graph.Nodes {
-			node["ID"] = prefix + fmt.Sprint(node["ID"])
-			node["SensorID"] = snapshot.SensorID
-			score, _ := strconv.Atoi(fmt.Sprint(node["Score"]))
-			node["HoneypotThreshold"] = sensorThreshold
-			node["IsHoneypot"] = score >= sensorThreshold
-			nodes = append(nodes, node)
+		prefix := row.SensorID + "::"
+		for _, n := range graph.Nodes {
+			n.ID = prefix + n.ID
+			nodes = append(nodes, topologyNode{
+				Node:              n,
+				SensorID:          row.SensorID,
+				HoneypotThreshold: sensorThreshold,
+				IsHoneypot:        n.Score >= sensorThreshold,
+			})
 		}
-		for _, edge := range graph.Edges {
-			edge["ID"] = prefix + fmt.Sprint(edge["ID"])
-			edge["SensorID"] = snapshot.SensorID
-			edge["SrcNodeID"] = prefix + fmt.Sprint(edge["SrcIP"])
-			edge["DstNodeID"] = prefix + fmt.Sprint(edge["DstIP"])
-			edges = append(edges, edge)
+		for _, e := range graph.Edges {
+			srcIP, dstIP := e.SrcIP, e.DstIP
+			e.ID = prefix + e.ID
+			edges = append(edges, topologyEdge{
+				Edge:      e,
+				SensorID:  row.SensorID,
+				SrcNodeID: prefix + srcIP,
+				DstNodeID: prefix + dstIP,
+			})
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"Nodes": nodes, "Edges": edges, "HoneypotThreshold": threshold})
+	return json.Marshal(gin.H{"Nodes": nodes, "Edges": edges, "HoneypotThreshold": 100})
+}
+
+// topologyFingerprint hashes every sensor's telemetry sequence number into
+// a single stable string. It changes if and only if at least one sensor
+// has posted new telemetry since the last call — this is what lets
+// s.topology skip the expensive rebuild (and lets the browser skip
+// re-downloading/re-rendering) when nothing changed in the database.
+func topologyFingerprint(seqBySensor map[string]int64) string {
+	ids := make([]string, 0, len(seqBySensor))
+	for id := range seqBySensor {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	h := sha256.New()
+	for _, id := range ids {
+		fmt.Fprintf(h, "%s=%d;", id, seqBySensor[id])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *Server) topology(c *gin.Context) {
+	seq, err := s.Repo.TelemetryFingerprint(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	fingerprint := topologyFingerprint(seq)
+
+	s.topoCache.mu.Lock()
+	cacheHit := s.topoCache.body != nil && s.topoCache.fingerprint == fingerprint
+	etag := s.topoCache.etag
+	body := s.topoCache.body
+	s.topoCache.mu.Unlock()
+
+	if !cacheHit {
+		// Something changed on at least one sensor since the last poll —
+		// this is the only path that actually fetches+decodes topology
+		// JSONB, so an idle network with no new telemetry never pays it.
+		newBody, err := s.buildTopologyResponse(c)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		etag = `"` + fingerprint + `"`
+		body = newBody
+		s.topoCache.mu.Lock()
+		s.topoCache.fingerprint = fingerprint
+		s.topoCache.etag = etag
+		s.topoCache.body = body
+		s.topoCache.mu.Unlock()
+	}
+
+	// Regardless of whether we just rebuilt or served the cache, honor
+	// conditional GETs: if the browser already has this exact fingerprint
+	// (it sends back the ETag we gave it last time), it doesn't need the
+	// body at all — this is the "draw the graph once, don't touch it
+	// again while it's unchanged in the database" behavior on the wire.
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "no-cache")
+	if match := c.GetHeader("If-None-Match"); match != "" && match == etag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 func aggregateRaw(c *gin.Context, snapshots []management.TelemetrySnapshot, pick func(management.TelemetrySnapshot) json.RawMessage) {

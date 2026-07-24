@@ -8,9 +8,6 @@
 package topology
 
 import (
-	"sort"
-	"strings"
-
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
 	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
@@ -80,7 +77,40 @@ func Build(
 
 	}
 
-	edges := buildEdges(flows, modbusPort, s7Port)
+	edges := make([]Edge, 0, len(flows))
+
+	for _, f := range flows {
+
+		edges = append(
+			edges,
+			Edge{
+				ID: f.ID,
+
+				SrcIP: f.SrcIP,
+				DstIP: f.DstIP,
+
+				Protocol: f.Protocol,
+
+				IsOT: isICSPort(f.SrcPort, modbusPort, s7Port) || isICSPort(f.DstPort, modbusPort, s7Port),
+
+				// f.HoneypotInitiated, not scoreByIP[f.SrcIP] — a flow
+				// folds both directions of a conversation together,
+				// so f.SrcIP only reflects whichever packet happened
+				// to create the record first, not "did the honeypot
+				// ever send anything on this pair." See
+				// flow.Flow.HoneypotInitiated's doc comment.
+				FromHoneypot: f.HoneypotInitiated,
+				VLANID:       f.VLANID,
+
+				Packets: f.Packets,
+				Bytes:   f.Bytes,
+
+				FirstSeen: f.FirstSeen,
+				LastSeen:  f.LastSeen,
+			},
+		)
+
+	}
 
 	return Graph{
 		Nodes: nodes,
@@ -88,99 +118,6 @@ func Build(
 
 		HoneypotThreshold: honeypotThreshold,
 	}
-}
-
-// buildEdges folds every flow.Flow between a given pair of hosts
-// into a single Edge — see Edge's doc comment for why per-flow edges
-// don't scale to a real network's Topology view. Grouping is by
-// unordered IP pair only (not by port/protocol), so an OT
-// conversation and unrelated IT traffic between the same two hosts
-// share one edge; IsOT/FromHoneypot are true for that edge as soon
-// as any one of its constituent flows qualifies, since that's the
-// signal the visualization needs to highlight, not an exhaustive
-// per-flow breakdown (which remains available via /tags and the
-// underlying flow data if ever needed).
-func buildEdges(flows []*flow.Flow, modbusPort, s7Port uint16) []Edge {
-
-	type accum struct {
-		edge      Edge
-		protocols map[string]bool
-	}
-
-	byPair := make(map[string]*accum)
-	order := make([]string, 0)
-
-	for _, f := range flows {
-
-		srcIP, dstIP := f.SrcIP, f.DstIP
-		if srcIP > dstIP {
-			srcIP, dstIP = dstIP, srcIP
-		}
-		key := srcIP + "|" + dstIP
-
-		a, ok := byPair[key]
-		if !ok {
-			a = &accum{
-				edge: Edge{
-					ID:    key,
-					SrcIP: srcIP,
-					DstIP: dstIP,
-
-					VLANID: f.VLANID,
-
-					FirstSeen: f.FirstSeen,
-					LastSeen:  f.LastSeen,
-				},
-				protocols: make(map[string]bool),
-			}
-			byPair[key] = a
-			order = append(order, key)
-		}
-
-		a.protocols[f.Protocol] = true
-		a.edge.FlowCount++
-
-		if isICSPort(f.SrcPort, modbusPort, s7Port) || isICSPort(f.DstPort, modbusPort, s7Port) {
-			a.edge.IsOT = true
-		}
-
-		// f.HoneypotInitiated, not scoreByIP[f.SrcIP] — a flow folds
-		// both directions of a conversation together, so f.SrcIP only
-		// reflects whichever packet happened to create the record
-		// first, not "did the honeypot ever send anything on this
-		// pair." See flow.Flow.HoneypotInitiated's doc comment. Once
-		// true for any flow in the pair, stays true for the edge.
-		if f.HoneypotInitiated {
-			a.edge.FromHoneypot = true
-		}
-
-		a.edge.Packets += f.Packets
-		a.edge.Bytes += f.Bytes
-
-		if f.FirstSeen.Before(a.edge.FirstSeen) {
-			a.edge.FirstSeen = f.FirstSeen
-		}
-		if f.LastSeen.After(a.edge.LastSeen) {
-			a.edge.LastSeen = f.LastSeen
-		}
-	}
-
-	edges := make([]Edge, 0, len(order))
-	for _, key := range order {
-
-		a := byPair[key]
-
-		protocols := make([]string, 0, len(a.protocols))
-		for p := range a.protocols {
-			protocols = append(protocols, p)
-		}
-		sort.Strings(protocols)
-		a.edge.Protocol = strings.Join(protocols, ", ")
-
-		edges = append(edges, a.edge)
-	}
-
-	return edges
 }
 
 // Classify derives, per device IP, whether it has been observed

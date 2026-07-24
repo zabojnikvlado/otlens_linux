@@ -396,6 +396,55 @@ func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnaps
 	return out, rows.Err()
 }
 
+// TelemetryFingerprint returns each sensor's current telemetry sequence
+// number without touching any of the (potentially large) JSONB columns.
+// Handlers that serve a derived/aggregated view — like /topology — use
+// this to cheaply detect "nothing changed since last time" before paying
+// for a full topology fetch + JSON decode. Ordered by sensor_id so the
+// result is stable and directly hashable.
+func (r *Repository) TelemetryFingerprint(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id, sequence FROM sensor_telemetry ORDER BY sensor_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var id string
+		var seq int64
+		if err := rows.Scan(&id, &seq); err != nil {
+			return nil, err
+		}
+		out[id] = seq
+	}
+	return out, rows.Err()
+}
+
+// TopologyRow is the minimal per-sensor payload the /topology handler
+// needs: just enough to rebuild the aggregated graph, without pulling the
+// tags/alerts/baseline/rules columns that other endpoints care about.
+type TopologyRow struct {
+	SensorID string
+	Topology json.RawMessage
+}
+
+func (r *Repository) TelemetryTopology(ctx context.Context) ([]TopologyRow, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id, topology FROM sensor_telemetry ORDER BY sensor_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TopologyRow
+	for rows.Next() {
+		var x TopologyRow
+		if err := rows.Scan(&x.SensorID, &x.Topology); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) QueueCommands(ctx context.Context, sensorID, typ string, targets []string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

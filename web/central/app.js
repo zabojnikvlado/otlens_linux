@@ -1,15 +1,26 @@
 const POLL=10000;let token=localStorage.getItem('otlensCentralToken')||'';let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[];let network,nodesDS,edgesDS;let topologySettling=false;const topologyPositionCache=new Map();const selected=new Set();
-// Rebuilding/redrawing the vis-network graph is the most expensive
-// part of a refresh cycle on a large topology, so it's skipped
-// while the Topology tab isn't visible — new graph data just marks
-// topologyDirty and renderTopology() runs once the tab is opened.
-let topologyDirty=false;
-function isTopologyTabActive(){const t=document.querySelector('.tab[data-tab="topology"]');return!!t&&t.classList.contains('active')}
+// Signature caches for the Topology tab: as long as a node/edge's visible
+// properties are byte-identical to what's already drawn, we skip calling
+// vis-network's update() on it entirely. Redrawing something that hasn't
+// changed in the database is exactly the wasted work that made large
+// graphs feel slow — this makes "unchanged" a no-op instead of a re-render.
+const topologyNodeSigCache=new Map(),topologyEdgeSigCache=new Map();
+const nodeSignature=n=>`${n.label}|${n.title}|${n.color.background}|${n.color.border}|${n.size}|${n.font.size}`;
+const edgeSignature=e=>`${e.label}|${e.title}|${e.color.color}|${e.color.opacity}|${e.width}|${e.dashes}|${e.arrows||''}|${e.font.size}`;
+let topologyETag=null;
+async function fetchTopology(){
+  const h={};if(token)h.Authorization='Bearer '+token;if(topologyETag)h['If-None-Match']=topologyETag;
+  let r;try{r=await fetch('/v1/topology',{headers:h})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}
+  if(r.status===304)return{unchanged:true};
+  if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;throw e}
+  topologyETag=r.headers.get('ETag')||topologyETag;
+  return{unchanged:false,value:await r.json()};
+}
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(token)h.Authorization='Bearer '+token;let r;try{r=await fetch('/v1'+path,{...opt,headers:h})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;throw e}return r.status===204||r.status===202?null:r.json()}
 function setConn(ok,t){document.getElementById('conn-dot').className='dot '+(ok?'ok':'down');document.getElementById('conn-text').textContent=t}
 document.getElementById('token-btn').onclick=()=>{const v=prompt('Management token',token);if(v!==null){token=v.trim();localStorage.setItem('otlensCentralToken',token);refreshAll()}};
-document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'){if(topologyDirty){topologyDirty=false;renderTopology()}else if(network)setTimeout(()=>network.redraw(),30)}};
+document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;const enteringTopology=b.dataset.tab==='topology'&&!document.getElementById('view-topology').classList.contains('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30);if(enteringTopology)refreshAll()};
 function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase()}}
 function topologyHash(value){
   let h=2166136261;
@@ -69,11 +80,12 @@ function renderTopology(){
   const es=rawEdges.map(e=>{
     const src=nodeByIP.get(e.SensorID+'::'+e.SrcIP),dst=nodeByIP.get(e.SensorID+'::'+e.DstIP),
           interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot,
-          flows=Number(e.FlowCount||1),flowNote=flows>1?` (${flows} flows)`:'',
           label=lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(!dense&&e.IsOT?e.Protocol:'');
-    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:(lateral?`Potential lateral movement: honeypot conversation between ${e.SrcIP} and ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
+    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
   }).filter(e=>e.from!=null&&e.to!=null);
   if(!network){
+    ns.forEach(n=>topologyNodeSigCache.set(n.id,nodeSignature(n)));
+    es.forEach(e=>topologyEdgeSigCache.set(e.id,edgeSignature(e)));
     nodesDS=new vis.DataSet(ns);edgesDS=new vis.DataSet(es);
     network=new vis.Network(document.getElementById('graph'),{nodes:nodesDS,edges:edgesDS},{
       nodes:{shape:'dot',borderWidth:2},edges:{smooth:false,selectionWidth:1.5,hoverWidth:1.5},
@@ -93,11 +105,22 @@ function renderTopology(){
   }else{
     const oldIds=new Set(nodesDS.getIds()),nextIds=new Set(ns.map(n=>n.id));
     const newIds=ns.filter(n=>!oldIds.has(n.id)).map(n=>n.id);
-    nodesDS.getIds().filter(id=>!nextIds.has(id)).forEach(id=>{nodesDS.remove(id);topologyPositionCache.delete(id)});
-    nodesDS.update(ns);
+    nodesDS.getIds().filter(id=>!nextIds.has(id)).forEach(id=>{nodesDS.remove(id);topologyPositionCache.delete(id);topologyNodeSigCache.delete(id)});
+    // Only push nodes whose visible properties actually changed (or are
+    // brand new). An asset that's sitting there unchanged in the database
+    // between polls costs nothing here — same principle as the edge diff
+    // below, and the same reasoning as the backend's fingerprint cache.
+    const changedNodes=ns.filter(n=>{const sig=nodeSignature(n),same=topologyNodeSigCache.get(n.id)===sig;topologyNodeSigCache.set(n.id,sig);return!same});
+    if(changedNodes.length)nodesDS.update(changedNodes);
     const edgeIds=new Set(es.map(e=>e.id));
-    edgesDS.getIds().filter(id=>!edgeIds.has(id)).forEach(id=>edgesDS.remove(id));
-    edgesDS.update(es);
+    edgesDS.getIds().filter(id=>!edgeIds.has(id)).forEach(id=>{edgesDS.remove(id);topologyEdgeSigCache.delete(id)});
+    // This is the "draw a connection once, then leave it alone while it's
+    // unchanged in the database" behavior: a conversation between two
+    // assets that Central already knows about, with the same OT/VLAN/
+    // lateral-movement state as before, is never re-submitted to
+    // vis-network — only genuinely new or changed edges are.
+    const changedEdges=es.filter(e=>{const sig=edgeSignature(e),same=topologyEdgeSigCache.get(e.id)===sig;topologyEdgeSigCache.set(e.id,sig);return!same});
+    if(changedEdges.length)edgesDS.update(changedEdges);
     network.setOptions({physics:{enabled:false},interaction:{hideEdgesOnZoom:dense}});
     positionNewTopologyNodes(newIds,es);
     rememberTopologyPositions();
@@ -224,43 +247,55 @@ document.getElementById('view-dashboard').addEventListener('click',e=>{const tar
 function renderBaseline(){const learning=baselines.filter(b=>b.mode==='learning'),d=document.getElementById('baseline-dot'),t=document.getElementById('baseline-text');if(learning.length){d.className='dot learning';const ends=learning.map(x=>new Date(x.learning_ends_at)).filter(x=>!isNaN(x)).sort((a,b)=>a-b)[0];t.textContent=`Learning ${learning.length}/${baselines.length}${ends?' · until '+ends.toLocaleTimeString():''} · alerts suppressed`}else{d.className='dot monitoring';t.textContent=baselines.length?'Monitoring':'No baseline data'}}
 async function refreshAll(){
   setConn(false,'connecting');
-  const paths=['/topology','/assets','/tags','/sensors','/alerts','/rules','/baseline','/tags/changes','/tags/events','/analysis/jobs','/data/backups'];
-  const r=await Promise.allSettled(paths.map(api));
+  // /topology is fetched separately from the rest, and only while that tab
+  // is actually visible: it's the one payload that can get genuinely large
+  // on a big OT network, so there's no reason to pull and decode it every
+  // 10s while the user is looking at Alerts or Sensors. fetchTopology also
+  // sends If-None-Match, so even while the tab IS active, an unchanged
+  // graph comes back as a bodyless 304 instead of a full re-send.
+  const topologyActive=document.getElementById('view-topology').classList.contains('active');
+  const paths=['/assets','/tags','/sensors','/alerts','/rules','/baseline','/tags/changes','/tags/events','/analysis/jobs','/data/backups'];
+  const topoPromise=topologyActive
+    ?fetchTopology().then(v=>({status:'fulfilled',value:v})).catch(reason=>({status:'rejected',reason}))
+    :Promise.resolve({status:'skipped'});
+  const [r,topo]=await Promise.all([Promise.allSettled(paths.map(api)),topoPromise]);
   const list=(i)=>r[i].status==='fulfilled'&&Array.isArray(r[i].value)?r[i].value:[];
-  if(r[0].status==='fulfilled')graph=(r[0].value&&Array.isArray(r[0].value.Nodes)&&Array.isArray(r[0].value.Edges))?r[0].value:{Nodes:[],Edges:[],HoneypotThreshold:100};
-  if(r[1].status==='fulfilled')assets=list(1);
-  if(r[2].status==='fulfilled')tags=list(2);
-  if(r[3].status==='fulfilled')sensors=list(3);
-  if(r[4].status==='fulfilled')alerts=list(4);
-  if(r[5].status==='fulfilled')rules=list(5).map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));
-  if(r[6].status==='fulfilled')baselines=list(6);
-  if(r[7].status==='fulfilled')changes=list(7);
-  if(r[8].status==='fulfilled')events=list(8);
-  if(r[9].status==='fulfilled')analysisJobs=list(9);if(r[10]&&r[10].status==='fulfilled')backups=list(10);
-  try{
-    if(r[0].status==='fulfilled'){
-      // Skip the expensive vis-network rebuild while the Topology
-      // tab isn't visible (see topologyDirty above) — the data is
-      // already in `graph`, so switching to the tab later renders
-      // it immediately instead of waiting for the next poll.
-      if(isTopologyTabActive())renderTopology();else topologyDirty=true;
-    }
-  }catch(e){console.error('render topology',e)}
-  try{if(r[1].status==='fulfilled')renderAssets()}catch(e){console.error('render assets',e)}
-  try{if(r[2].status==='fulfilled')renderTags()}catch(e){console.error('render tags',e)}
-  try{if(r[3].status==='fulfilled')renderSensors()}catch(e){console.error('render sensors',e)}
-  try{if(r[4].status==='fulfilled')renderAlerts()}catch(e){console.error('render alerts',e)}
-  try{if(r[5].status==='fulfilled')renderRules()}catch(e){console.error('render rules',e)}
-  try{if(r[6].status==='fulfilled')renderBaseline()}catch(e){console.error('render baseline',e)}
-  try{if(r[9].status==='fulfilled')renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
+  if(topo.status==='fulfilled'&&topo.value&&!topo.value.unchanged){
+    const v=topo.value.value;
+    graph=(v&&Array.isArray(v.Nodes)&&Array.isArray(v.Edges))?v:{Nodes:[],Edges:[],HoneypotThreshold:100};
+  }
+  if(r[0].status==='fulfilled')assets=list(0);
+  if(r[1].status==='fulfilled')tags=list(1);
+  if(r[2].status==='fulfilled')sensors=list(2);
+  if(r[3].status==='fulfilled')alerts=list(3);
+  if(r[4].status==='fulfilled')rules=list(4).map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));
+  if(r[5].status==='fulfilled')baselines=list(5);
+  if(r[6].status==='fulfilled')changes=list(6);
+  if(r[7].status==='fulfilled')events=list(7);
+  if(r[8].status==='fulfilled')analysisJobs=list(8);if(r[9]&&r[9].status==='fulfilled')backups=list(9);
+  // Render whenever the tab is active and the fetch didn't fail — including
+  // the "unchanged" (304) case, since a freshly-opened tab or a
+  // newly-arrived node still needs its first paint from whatever `graph`
+  // already holds; renderTopology's own signature diff is what makes that
+  // cheap when there's genuinely nothing new to draw.
+  try{if(topologyActive&&topo.status==='fulfilled')renderTopology()}catch(e){console.error('render topology',e)}
+  try{if(r[0].status==='fulfilled')renderAssets()}catch(e){console.error('render assets',e)}
+  try{if(r[1].status==='fulfilled')renderTags()}catch(e){console.error('render tags',e)}
+  try{if(r[2].status==='fulfilled')renderSensors()}catch(e){console.error('render sensors',e)}
+  try{if(r[3].status==='fulfilled')renderAlerts()}catch(e){console.error('render alerts',e)}
+  try{if(r[4].status==='fulfilled')renderRules()}catch(e){console.error('render rules',e)}
+  try{if(r[5].status==='fulfilled')renderBaseline()}catch(e){console.error('render baseline',e)}
+  try{if(r[8].status==='fulfilled')renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
   try{renderDashboard()}catch(e){console.error('render dashboard',e)}
   const rejected=r.map((x,i)=>x.status==='rejected'?{path:paths[i],reason:x.reason}:null).filter(Boolean);
+  if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
+  const attempted=paths.length+(topologyActive?1:0);
   if(!rejected.length){setConn(true,'live');document.getElementById('conn-text').title=''}
   else{
     console.error('Central API refresh failures:',rejected);
-    const allUnauthorized=rejected.length===paths.length&&rejected.every(x=>x.reason&&x.reason.status===401);
-    const allForbidden=rejected.length===paths.length&&rejected.every(x=>x.reason&&x.reason.status===403);
-    const allNetwork=rejected.length===paths.length&&rejected.every(x=>x.reason&&x.reason.kind==='network');
+    const allUnauthorized=rejected.length===attempted&&rejected.every(x=>x.reason&&x.reason.status===401);
+    const allForbidden=rejected.length===attempted&&rejected.every(x=>x.reason&&x.reason.status===403);
+    const allNetwork=rejected.length===attempted&&rejected.every(x=>x.reason&&x.reason.kind==='network');
     let text;
     if(allUnauthorized)text='authentication required';
     else if(allForbidden)text='access forbidden';
