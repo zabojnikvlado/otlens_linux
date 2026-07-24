@@ -396,7 +396,10 @@ async function refreshAll(){
     else text=`partial: ${rejected.map(x=>x.path).join(', ')}`;
     setConn(false,text);
     document.getElementById('conn-text').title=allUnauthorized?'Your session has expired — please log in again':'Failed endpoints: '+rejected.map(x=>x.path).join(', ');
-    if(allUnauthorized)showLogin();
+    if(allUnauthorized){
+      console.warn('All requests came back unauthorized — session cookie missing or invalid. Failing paths and status codes:',rejected.map(x=>({path:x.path,status:x.reason?.status})));
+      showLogin();
+    }
   }
 }
 OTDataTables.init();
@@ -487,6 +490,7 @@ async function boot(){
     showApp();
     startPolling();
   }catch(err){
+    console.warn('Not authenticated (this is expected on a fresh page load):',err.status||err.message);
     showLogin();
   }
 }

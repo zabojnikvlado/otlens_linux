@@ -178,7 +178,17 @@ func isPasswordExpired(expiresAt *time.Time) bool {
 
 func (s *Server) setSessionCookie(c *gin.Context, value string, expiresAt time.Time) {
 	c.SetSameSite(http.SameSiteStrictMode)
+	// A non-positive Max-Age here isn't just "shorter than intended" — per
+	// net/http.Cookie's docs, MaxAge<0 means "delete this cookie now" and
+	// MaxAge==0 means "no Max-Age attribute at all" (session-only cookie).
+	// Either would make login look like it silently failed (the cookie
+	// the browser just received is immediately gone or non-persistent),
+	// so this is clamped defensively rather than trusting the subtraction
+	// to always land comfortably positive.
 	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 60 {
+		maxAge = 60
+	}
 	c.SetCookie(sessionCookieName, value, maxAge, "/", "", s.WebTLSEnabled, true)
 }
 
