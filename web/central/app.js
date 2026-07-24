@@ -1,9 +1,15 @@
 const POLL=10000;let token=localStorage.getItem('otlensCentralToken')||'';let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[];let network,nodesDS,edgesDS;let topologySettling=false;const topologyPositionCache=new Map();const selected=new Set();
+// Rebuilding/redrawing the vis-network graph is the most expensive
+// part of a refresh cycle on a large topology, so it's skipped
+// while the Topology tab isn't visible — new graph data just marks
+// topologyDirty and renderTopology() runs once the tab is opened.
+let topologyDirty=false;
+function isTopologyTabActive(){const t=document.querySelector('.tab[data-tab="topology"]');return!!t&&t.classList.contains('active')}
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(token)h.Authorization='Bearer '+token;let r;try{r=await fetch('/v1'+path,{...opt,headers:h})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;throw e}return r.status===204||r.status===202?null:r.json()}
 function setConn(ok,t){document.getElementById('conn-dot').className='dot '+(ok?'ok':'down');document.getElementById('conn-text').textContent=t}
 document.getElementById('token-btn').onclick=()=>{const v=prompt('Management token',token);if(v!==null){token=v.trim();localStorage.setItem('otlensCentralToken',token);refreshAll()}};
-document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30)};
+document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'){if(topologyDirty){topologyDirty=false;renderTopology()}else if(network)setTimeout(()=>network.redraw(),30)}};
 function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase()}}
 function topologyHash(value){
   let h=2166136261;
@@ -63,8 +69,9 @@ function renderTopology(){
   const es=rawEdges.map(e=>{
     const src=nodeByIP.get(e.SensorID+'::'+e.SrcIP),dst=nodeByIP.get(e.SensorID+'::'+e.DstIP),
           interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot,
+          flows=Number(e.FlowCount||1),flowNote=flows>1?` (${flows} flows)`:'',
           label=lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(!dense&&e.IsOT?e.Protocol:'');
-    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
+    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:(lateral?`Potential lateral movement: honeypot conversation between ${e.SrcIP} and ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
   }).filter(e=>e.from!=null&&e.to!=null);
   if(!network){
     nodesDS=new vis.DataSet(ns);edgesDS=new vis.DataSet(es);
@@ -230,7 +237,15 @@ async function refreshAll(){
   if(r[7].status==='fulfilled')changes=list(7);
   if(r[8].status==='fulfilled')events=list(8);
   if(r[9].status==='fulfilled')analysisJobs=list(9);if(r[10]&&r[10].status==='fulfilled')backups=list(10);
-  try{if(r[0].status==='fulfilled')renderTopology()}catch(e){console.error('render topology',e)}
+  try{
+    if(r[0].status==='fulfilled'){
+      // Skip the expensive vis-network rebuild while the Topology
+      // tab isn't visible (see topologyDirty above) — the data is
+      // already in `graph`, so switching to the tab later renders
+      // it immediately instead of waiting for the next poll.
+      if(isTopologyTabActive())renderTopology();else topologyDirty=true;
+    }
+  }catch(e){console.error('render topology',e)}
   try{if(r[1].status==='fulfilled')renderAssets()}catch(e){console.error('render assets',e)}
   try{if(r[2].status==='fulfilled')renderTags()}catch(e){console.error('render tags',e)}
   try{if(r[3].status==='fulfilled')renderSensors()}catch(e){console.error('render sensors',e)}
