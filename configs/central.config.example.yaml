@@ -98,3 +98,11 @@ siem:
     client_key_file: ""
     # Optional TLS SNI/certificate name override.
     server_name: ""
+
+analysis:
+  enabled: true
+  upload_directory: "./data/pcap-uploads"
+  max_upload_size_mb: 2048
+  job_timeout: 2h
+  retain_pcap: 24h
+  allow_import: true

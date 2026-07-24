@@ -488,6 +488,9 @@ func (e *Engine) raiseCustomRuleAlert(rule *Rule, key, message, ip string) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	a, ok := e.alerts[key]
+	if ok && !e.allowAlertOccurrenceLocked(a) {
+		return
+	}
 	if !ok {
 		a = &Alert{ID: key, Type: rule.AlertType, Severity: rule.Severity, Message: message, IP: ip, FirstSeen: now, Status: AlertStatusNew}
 		e.alerts[key] = a

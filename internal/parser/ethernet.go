@@ -25,11 +25,22 @@ func parseEthernet(pkt gopacket.Packet, packet *core.Packet) bool {
 
 	packet.EtherType = eth.EthernetType.String()
 
+	// Preserve Layer-2 payload for protocols such as PROFINET DCP.
+	// TCP/UDP parsers overwrite AppPayload later with application data.
+	if len(eth.Payload) > 0 {
+		packet.AppPayload = eth.Payload
+		packet.L4Protocol = "Ethernet"
+	}
+
 	if vlanLayer := pkt.Layer(layers.LayerTypeDot1Q); vlanLayer != nil {
 
 		vlan := vlanLayer.(*layers.Dot1Q)
 
 		packet.VLANID = vlan.VLANIdentifier
+
+		if len(vlan.Payload) > 0 {
+			packet.AppPayload = vlan.Payload
+		}
 	}
 
 	return true

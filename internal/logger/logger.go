@@ -56,7 +56,7 @@ func Init(level string, outputs []string, rotation RotationConfig) error {
 }
 
 // NewAudit builds a separate, independent zap logger for structured
-// audit entries (see internal/audit) — deliberately not the same
+// security/audit records — deliberately not the same
 // logger as Log/Init's main application logger: audit entries are
 // low-volume, high-importance records (who did what, when) that
 // belong in their own file with their own retention, not interleaved

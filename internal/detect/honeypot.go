@@ -110,6 +110,10 @@ func (e *Engine) raiseHoneypotAlert(alertType AlertType, severity, key, message,
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		alert = &Alert{

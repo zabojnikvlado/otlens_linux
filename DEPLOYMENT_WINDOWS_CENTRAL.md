@@ -54,3 +54,8 @@ The sensor never connects directly to PostgreSQL.
 4. Persistent local rule state and transactional rollback.
 5. Central alert ingestion and incident correlation.
 6. RBAC and audit trail.
+
+
+## Phase 3.7.0 – Data Management & Backup
+
+Central now includes management-token-protected backup and reset controls. See `PHASE3_7_0_DATA_MANAGEMENT.md` for API, safety and recovery details.

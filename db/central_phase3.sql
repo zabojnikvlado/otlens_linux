@@ -34,3 +34,35 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
+
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+ id TEXT PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ filename TEXT NOT NULL,
+ stored_path TEXT NOT NULL,
+ sha256 TEXT NOT NULL,
+ size_bytes BIGINT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'queued',
+ protocols JSONB NOT NULL DEFAULT '["auto"]'::jsonb,
+ packets INTEGER NOT NULL DEFAULT 0,
+ assets_discovered INTEGER NOT NULL DEFAULT 0,
+ flows_discovered INTEGER NOT NULL DEFAULT 0,
+ tags_discovered INTEGER NOT NULL DEFAULT 0,
+ alerts_generated INTEGER NOT NULL DEFAULT 0,
+ result JSONB NOT NULL DEFAULT '{}'::jsonb,
+ error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ started_at TIMESTAMPTZ,
+ completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_jobs_sensor_status ON analysis_jobs(sensor_id,status,created_at);
+
+CREATE TABLE IF NOT EXISTS system_backups (
+ id TEXT PRIMARY KEY,
+ kind TEXT NOT NULL,
+ name TEXT NOT NULL,
+ payload JSONB NOT NULL,
+ size_bytes BIGINT NOT NULL DEFAULT 0,
+ sha256 TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

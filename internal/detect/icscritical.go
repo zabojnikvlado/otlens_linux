@@ -44,6 +44,10 @@ func (e *Engine) handleICS(msg ics.Message) {
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		alert = &Alert{

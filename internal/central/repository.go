@@ -2,9 +2,11 @@ package central
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -95,6 +97,36 @@ CREATE TABLE IF NOT EXISTS siem_outbox (
  delivered_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_siem_outbox_pending ON siem_outbox(next_attempt_at,id) WHERE delivered_at IS NULL;
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+ id TEXT PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ filename TEXT NOT NULL,
+ stored_path TEXT NOT NULL,
+ sha256 TEXT NOT NULL,
+ size_bytes BIGINT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'queued',
+ protocols JSONB NOT NULL DEFAULT '["auto"]'::jsonb,
+ packets INTEGER NOT NULL DEFAULT 0,
+ assets_discovered INTEGER NOT NULL DEFAULT 0,
+ flows_discovered INTEGER NOT NULL DEFAULT 0,
+ tags_discovered INTEGER NOT NULL DEFAULT 0,
+ alerts_generated INTEGER NOT NULL DEFAULT 0,
+ result JSONB NOT NULL DEFAULT '{}'::jsonb,
+ error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ started_at TIMESTAMPTZ,
+ completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_jobs_sensor_status ON analysis_jobs(sensor_id,status,created_at);
+CREATE TABLE IF NOT EXISTS system_backups (
+ id TEXT PRIMARY KEY,
+ kind TEXT NOT NULL,
+ name TEXT NOT NULL,
+ payload JSONB NOT NULL,
+ size_bytes BIGINT NOT NULL DEFAULT 0,
+ sha256 TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -130,7 +162,11 @@ ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,versio
 	return tx.Commit()
 }
 func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET status='online',version=$2,hostname=$3,last_seen=NOW() WHERE id=$1`, h.SensorID, h.Version, h.Hostname)
+	status := "online"
+	if captureStatus := strings.ToLower(strings.TrimSpace(h.Health["capture"])); captureStatus == "running" || captureStatus == "stopped" {
+		status = captureStatus
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET status=$4,version=$2,hostname=$3,last_seen=NOW() WHERE id=$1`, h.SensorID, h.Version, h.Hostname, status)
 	return err
 }
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
@@ -370,4 +406,173 @@ func (r *Repository) MarkSIEMFailed(ctx context.Context, id int64, retryAfter ti
 	}
 	_, err := r.db.ExecContext(ctx, `UPDATE siem_outbox SET attempts=attempts+1,last_error=$2,next_attempt_at=NOW()+($3*INTERVAL '1 second') WHERE id=$1`, id, message, int64(retryAfter/time.Second))
 	return err
+}
+
+func (r *Repository) CreateAnalysisJob(ctx context.Context, job management.AnalysisJob, storedPath string) error {
+	protocols, _ := json.Marshal(job.Protocols)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO analysis_jobs(id,sensor_id,filename,stored_path,sha256,size_bytes,status,protocols) VALUES($1,$2,$3,$4,$5,$6,'queued',$7)`, job.ID, job.SensorID, job.Filename, storedPath, job.SHA256, job.SizeBytes, protocols)
+	return err
+}
+
+func (r *Repository) ListAnalysisJobs(ctx context.Context) ([]management.AnalysisJob, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,filename,sha256,size_bytes,status,protocols,packets,assets_discovered,flows_discovered,tags_discovered,alerts_generated,error,created_at,started_at,completed_at,result FROM analysis_jobs ORDER BY created_at DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []management.AnalysisJob{}
+	for rows.Next() {
+		var j management.AnalysisJob
+		var protocols, result []byte
+		if err := rows.Scan(&j.ID, &j.SensorID, &j.Filename, &j.SHA256, &j.SizeBytes, &j.Status, &protocols, &j.Packets, &j.AssetsDiscovered, &j.FlowsDiscovered, &j.TagsDiscovered, &j.AlertsGenerated, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &result); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(protocols, &j.Protocols)
+		j.Result = result
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) ClaimAnalysisJob(ctx context.Context, sensorID string) (*management.AnalysisJob, string, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	var j management.AnalysisJob
+	var protocols []byte
+	var path string
+	err = tx.QueryRowContext(ctx, `SELECT id,sensor_id,filename,stored_path,sha256,size_bytes,protocols,created_at FROM analysis_jobs WHERE sensor_id=$1 AND status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`, sensorID).Scan(&j.ID, &j.SensorID, &j.Filename, &path, &j.SHA256, &j.SizeBytes, &protocols, &j.CreatedAt)
+	if err != nil {
+		return nil, "", err
+	}
+	_ = json.Unmarshal(protocols, &j.Protocols)
+	now := time.Now().UTC()
+	j.Status = "running"
+	j.StartedAt = &now
+	if _, err = tx.ExecContext(ctx, `UPDATE analysis_jobs SET status='running',started_at=NOW() WHERE id=$1`, j.ID); err != nil {
+		return nil, "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, "", err
+	}
+	return &j, path, nil
+}
+
+func (r *Repository) AnalysisJobPath(ctx context.Context, id, sensorID string) (string, string, error) {
+	var path, name string
+	err := r.db.QueryRowContext(ctx, `SELECT stored_path,filename FROM analysis_jobs WHERE id=$1 AND sensor_id=$2`, id, sensorID).Scan(&path, &name)
+	return path, name, err
+}
+
+func (r *Repository) FinishAnalysisJob(ctx context.Context, id, sensorID string, result management.AnalysisResult) error {
+	status := "completed"
+	if result.Error != "" {
+		status = "failed"
+	}
+	data, _ := json.Marshal(result)
+	_, err := r.db.ExecContext(ctx, `UPDATE analysis_jobs SET status=$3,packets=$4,assets_discovered=$5,flows_discovered=$6,tags_discovered=$7,alerts_generated=$8,result=$9,error=$10,completed_at=NOW() WHERE id=$1 AND sensor_id=$2`, id, sensorID, status, result.Packets, result.AssetsDiscovered, result.FlowsDiscovered, result.TagsDiscovered, result.AlertsGenerated, data, result.Error)
+	return err
+}
+
+func (r *Repository) DeleteAnalysisJob(ctx context.Context, id string) (string, error) {
+	var path string
+	err := r.db.QueryRowContext(ctx, `DELETE FROM analysis_jobs WHERE id=$1 RETURNING stored_path`, id).Scan(&path)
+	return path, err
+}
+
+type BackupRecord struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	SizeBytes int64     `json:"size_bytes"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	switch operation {
+	case "telemetry", "database":
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_commands, analysis_jobs RESTART IDENTITY`)
+	case "alerts":
+		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb`)
+	case "siem":
+		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
+	case "analysis":
+		_, err = tx.ExecContext(ctx, `TRUNCATE analysis_jobs RESTART IDENTITY`)
+	case "rules":
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets CASCADE`)
+	case "factory":
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_commands, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets, sensors, sites RESTART IDENTITY CASCADE`)
+	default:
+		return fmt.Errorf("unsupported central reset operation %q", operation)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (BackupRecord, error) {
+	payload := map[string]json.RawMessage{}
+	queries := map[string]string{
+		"sites":            `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sites ORDER BY id) t`,
+		"sensors":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensors ORDER BY id) t`,
+		"rule_sets":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_sets ORDER BY id) t`,
+		"sensor_rule_sets": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_rule_sets ORDER BY sensor_id) t`,
+		"sensor_telemetry": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
+	}
+	for key, q := range queries {
+		var raw []byte
+		if err := r.db.QueryRowContext(ctx, q).Scan(&raw); err != nil {
+			return BackupRecord{}, err
+		}
+		payload[key] = raw
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return BackupRecord{}, err
+	}
+	sum := fmt.Sprintf("%x", sha256.Sum256(data))
+	if name == "" {
+		name = "central-" + time.Now().UTC().Format("20060102-150405")
+	}
+	_, err = r.db.ExecContext(ctx, `INSERT INTO system_backups(id,kind,name,payload,size_bytes,sha256) VALUES($1,'central',$2,$3,$4,$5)`, id, name, data, len(data), sum)
+	if err != nil {
+		return BackupRecord{}, err
+	}
+	return BackupRecord{ID: id, Kind: "central", Name: name, SizeBytes: int64(len(data)), SHA256: sum, CreatedAt: time.Now().UTC()}, nil
+}
+
+func (r *Repository) ListBackups(ctx context.Context) ([]BackupRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,kind,name,size_bytes,sha256,created_at FROM system_backups ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BackupRecord
+	for rows.Next() {
+		var b BackupRecord
+		if err := rows.Scan(&b.ID, &b.Kind, &b.Name, &b.SizeBytes, &b.SHA256, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+func (r *Repository) DeleteBackup(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM system_backups WHERE id=$1`, id)
+	return err
+}
+func (r *Repository) BackupPayload(ctx context.Context, id string) ([]byte, string, error) {
+	var b []byte
+	var name string
+	err := r.db.QueryRowContext(ctx, `SELECT payload,name FROM system_backups WHERE id=$1`, id).Scan(&b, &name)
+	return b, name, err
 }

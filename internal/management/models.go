@@ -122,3 +122,33 @@ type TelemetrySnapshot struct {
 	Baseline   json.RawMessage `json:"baseline,omitempty"`
 	Rules      json.RawMessage `json:"rules,omitempty"`
 }
+
+type AnalysisJob struct {
+	ID               string          `json:"id"`
+	SensorID         string          `json:"sensor_id"`
+	Filename         string          `json:"filename"`
+	SHA256           string          `json:"sha256"`
+	SizeBytes        int64           `json:"size_bytes"`
+	Status           string          `json:"status"`
+	Protocols        []string        `json:"protocols,omitempty"`
+	Packets          int             `json:"packets,omitempty"`
+	AssetsDiscovered int             `json:"assets_discovered,omitempty"`
+	FlowsDiscovered  int             `json:"flows_discovered,omitempty"`
+	TagsDiscovered   int             `json:"tags_discovered,omitempty"`
+	AlertsGenerated  int             `json:"alerts_generated,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	StartedAt        *time.Time      `json:"started_at,omitempty"`
+	CompletedAt      *time.Time      `json:"completed_at,omitempty"`
+	Result           json.RawMessage `json:"result,omitempty"`
+}
+
+type AnalysisResult struct {
+	Packets          int      `json:"packets"`
+	AssetsDiscovered int      `json:"assets_discovered"`
+	FlowsDiscovered  int      `json:"flows_discovered"`
+	TagsDiscovered   int      `json:"tags_discovered"`
+	AlertsGenerated  int      `json:"alerts_generated"`
+	Protocols        []string `json:"protocols,omitempty"`
+	Error            string   `json:"error,omitempty"`
+}

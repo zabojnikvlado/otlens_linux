@@ -6,12 +6,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
@@ -122,6 +126,46 @@ func main() {
 		}
 		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, ApplyCommand: func(command management.Command) {
 			switch command.Type {
+			case "sensor.capture.stop":
+				if application.CaptureEngine != nil {
+					application.CaptureEngine.Stop()
+				} else if application.IPFIXEngine != nil {
+					application.IPFIXEngine.Stop()
+				}
+				log.Printf("OTLens sensor capture stopped by Central command")
+			case "sensor.database.reset", "sensor.factory.reset", "sensor.learning.reset", "sensor.assets.reset", "sensor.alerts.reset", "sensor.tags.reset", "sensor.analysis.reset":
+				op := strings.TrimSuffix(strings.TrimPrefix(command.Type, "sensor."), ".reset")
+				if err := application.Snapshotter.Reset(op); err != nil {
+					log.Printf("OTLens sensor reset failed: %v", err)
+				} else {
+					log.Printf("OTLens sensor %s reset completed", op)
+				}
+			case "sensor.backup.create":
+				name := strings.TrimSpace(command.Target)
+				path, err := application.Snapshotter.Backup(filepath.Join(filepath.Dir(cfg.Persist.Path), "backups"), name)
+				if err != nil {
+					log.Printf("OTLens sensor backup failed: %v", err)
+				} else {
+					log.Printf("OTLens sensor backup created: %s", path)
+				}
+			case "sensor.capture.start":
+				go func() {
+					var err error
+					if application.CaptureEngine != nil {
+						if application.CaptureEngine.IsRunning() {
+							return
+						}
+						err = application.CaptureEngine.Start()
+					} else if application.IPFIXEngine != nil {
+						if application.IPFIXEngine.IsRunning() {
+							return
+						}
+						err = application.IPFIXEngine.Start()
+					}
+					if err != nil {
+						log.Printf("OTLens sensor capture start failed: %v", err)
+					}
+				}()
 			case "asset.confirm":
 				application.AssetEngine.Confirm(command.Target)
 			case "asset.delete":
@@ -153,6 +197,82 @@ func main() {
 				}
 			case "rule.delete":
 				application.DetectEngine.DeleteRule(command.Target)
+			}
+		}, Health: func() map[string]string {
+			running := false
+			if application.CaptureEngine != nil {
+				running = application.CaptureEngine.IsRunning()
+			} else if application.IPFIXEngine != nil {
+				running = application.IPFIXEngine.IsRunning()
+			}
+			status := "stopped"
+			if running {
+				status = "running"
+			}
+			return map[string]string{"capture": status, "mode": application.CaptureMode}
+		}, ProcessAnalysis: func(jobCtx context.Context) {
+			job, err := client.NextAnalysisJob(jobCtx)
+			if err != nil {
+				log.Printf("OTLens analysis job poll failed: %v", err)
+				return
+			}
+			if job == nil {
+				return
+			}
+			result := management.AnalysisResult{Protocols: job.Protocols}
+			if application.CaptureEngine == nil {
+				result.Error = "PCAP analysis requires capture engine"
+				_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+				return
+			}
+			ext := filepath.Ext(job.Filename)
+			if ext != ".pcapng" {
+				ext = ".pcap"
+			}
+			tmp, err := os.CreateTemp("", "otlens-analysis-*"+ext)
+			if err != nil {
+				result.Error = err.Error()
+				_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+				return
+			}
+			path := tmp.Name()
+			_ = tmp.Close()
+			defer os.Remove(path)
+			if err := client.DownloadAnalysisPCAP(jobCtx, job.ID, path); err != nil {
+				result.Error = err.Error()
+				_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+				return
+			}
+			if data, err := os.ReadFile(path); err != nil {
+				result.Error = err.Error()
+				_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+				return
+			} else if sum := sha256.Sum256(data); job.SHA256 != "" && hex.EncodeToString(sum[:]) != job.SHA256 {
+				result.Error = "downloaded PCAP SHA-256 mismatch"
+				_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+				return
+			}
+			assetsBefore, flowsBefore, tagsBefore, alertsBefore := len(application.AssetEngine.GetAll()), len(application.FlowEngine.GetAll()), len(application.StoreEngine.GetTags()), len(application.DetectEngine.GetAlerts())
+			wasRunning := application.CaptureEngine.IsRunning()
+			if wasRunning {
+				application.CaptureEngine.Stop()
+			}
+			packets, analyzeErr := application.CaptureEngine.AnalyzeFile(path)
+			if wasRunning {
+				if err := application.CaptureEngine.Start(); err != nil {
+					log.Printf("OTLens capture restart after PCAP analysis failed: %v", err)
+				}
+			}
+			result.Packets = packets
+			result.AssetsDiscovered = max(0, len(application.AssetEngine.GetAll())-assetsBefore)
+			result.FlowsDiscovered = max(0, len(application.FlowEngine.GetAll())-flowsBefore)
+			result.TagsDiscovered = max(0, len(application.StoreEngine.GetTags())-tagsBefore)
+			result.AlertsGenerated = max(0, len(application.DetectEngine.GetAlerts())-alertsBefore)
+			if analyzeErr != nil {
+				result.Error = analyzeErr.Error()
+			}
+			if err := client.PushAnalysisResult(jobCtx, job.ID, result); err != nil {
+				log.Printf("OTLens analysis result upload failed: %v", err)
 			}
 		}, Snapshot: func() (management.TelemetrySnapshot, error) {
 			graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetAll(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)

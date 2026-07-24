@@ -128,6 +128,15 @@ func isWriteOperation(msg ics.Message) bool {
 	case "S7comm":
 
 		return msg.FunctionName == "WriteVar"
+
+	case "EtherNet/IP":
+		return msg.FunctionName == "SendRRData" || msg.FunctionName == "SendUnitData"
+	case "DNP3":
+		return msg.FunctionName == "Write" || msg.FunctionName == "Select" || msg.FunctionName == "Operate" || msg.FunctionName == "DirectOperate" || msg.FunctionName == "DirectOperateNoAck"
+	case "BACnet/IP":
+		return msg.FunctionName == "WriteProperty" || msg.FunctionName == "WritePropertyMultiple"
+	case "IEC 60870-5-104":
+		return msg.FunctionCode >= 45 && msg.FunctionCode <= 50
 	}
 
 	return false

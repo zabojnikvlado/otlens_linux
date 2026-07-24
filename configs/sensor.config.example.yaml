@@ -6,41 +6,9 @@ app:
 # for verifying capture/parsing against real traffic during initial
 # setup. Leave false for any running deployment: it's unstructured,
 # unconditional-volume console output (one line per packet), and the
-# dashboard's Assets/Flows/OT Tags/Alerts tabs already show the
-# structured equivalent.
+# Central UI provides the structured operational view.
 debug:
   enabled: false
-
-# Forward each alert, as it's raised, to an external server as JSON
-# over HTTPS. Off by default. When first enabled, every alert that
-# already existed gets sent once as a backfill (oldest first), and
-# every alert raised from then on is sent as it happens. Also carries
-# audit entries (see the audit: section below) to the same URL, when
-# audit.enabled is also true — distinguished by a "kind" field in the
-# JSON payload ("alert" vs "audit"), no separate URL/TLS needed.
-export:
-  enabled: false
-
-  # https:// endpoint the alert JSON is POSTed to. TLS is what
-  # actually secures this in transit — pointing this at a plain
-  # http:// URL sends alert data unencrypted, which defeats the point
-  # of this feature for anything beyond local testing.
-  url: "https://siem.example.internal/otlens/alerts"
-
-  tls:
-    # true = don't validate the export server's TLS certificate. Only
-    # for a self-signed/internal server during setup or testing —
-    # leave false for anything that matters.
-    insecureskipverify: false
-
-    # Optional: path to a PEM-encoded CA certificate to trust for the
-    # export server, on top of the system's normal CA pool — for an
-    # internal server whose certificate chains to a private CA rather
-    # than a public one. Leave empty to just use the system CA pool
-    # (fine for a server with a certificate from a public CA).
-    cacertfile: ""
-
-  timeout: 10s   # per export request
 
 capture:
   # Data source: "pcap" (live packet capture — needs Npcap/libpcap
@@ -76,11 +44,15 @@ capture:
     listenaddr: "0.0.0.0:4739"
 
 ics:
-  # Non-standard ports here if your Modbus/S7comm traffic doesn't run
-  # on the standard ones. 0 (or omitted) falls back to the standard
-  # port.
+  # Set non-standard ports when required. 0 or omitted uses the
+  # protocol default. PROFINET DCP is Layer 2 and has no port.
   modbusport: 502
   s7port: 102
+  ethernetipport: 44818
+  dnp3port: 20000
+  opcuaport: 4840
+  bacnetport: 47808
+  iec104port: 2404
 
 baseline:
   # Whether the learning phase runs at all. true (default): learn
@@ -150,62 +122,6 @@ persist:
   # with every new client connection's ephemeral port.
   retention: 168h
 
-api:
-  host: 0.0.0.0
-  port: 8080
-  # "debug" (verbose gin request logging, startup warnings) or
-  # "release" (quiet). Use "release" once you're done developing
-  # against the API.
-  mode: debug
-
-  # Access-Control-Allow-Origin sent on every API response. Empty
-  # (the default) sends no CORS header at all — only same-origin
-  # requests work, which is what the bundled dashboard (served from
-  # this same process under /ui) needs. Set this to a specific origin
-  # only if something else genuinely needs cross-origin access — avoid
-  # "*" (any origin) outside local/development use, especially if
-  # username/password below are left empty: an unauthenticated API
-  # with wildcard CORS lets any website a visitor's browser loads
-  # read this API's responses.
-  corsorigin: ""
-
-  # HTTP Basic Auth for everything except /health. Leave both empty
-  # (the default) to run unauthenticated — appropriate only when this
-  # is reachable exclusively from an already-trusted network. Setting
-  # only one of the two is a startup error, not a silent no-op.
-  # Prefer setting the password via the OTLENS_API_PASSWORD
-  # environment variable over writing it here in plaintext (any
-  # OTLENS_ prefixed env var overrides its config.yaml counterpart —
-  # e.g. OTLENS_API_PASSWORD overrides api.password).
-  username: ""
-  password: ""
-
-  tls:
-    # API is plain HTTP by default. Flip this to true to serve over
-    # HTTPS instead — everything else below has a working default,
-    # so enabling encryption can be as simple as this one line.
-    enabled: false
-
-    # If both files already exist, they're used as-is — point these
-    # at a real CA-issued certificate if you have one. If either is
-    # missing, OTLens generates a self-signed pair at these paths
-    # automatically on first startup with tls.enabled: true (the
-    # browser will show a one-time "not trusted" warning to click
-    # past, or import otlens.crt into your OS/browser trust store).
-    certfile: otlens.crt
-    keyfile: otlens.key
-
-    # Minimum TLS protocol version: "1.0", "1.1", "1.2", or "1.3".
-    minversion: "1.2"
-
-    # Optional: restrict to specific cipher suites (Go/IANA names,
-    # e.g. "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" — full list via
-    # `go doc crypto/tls.CipherSuites`). Leave empty to use Go's own
-    # secure defaults, which is fine for most setups. Only applies
-    # when the connection negotiates TLS 1.2 or below; TLS 1.3's
-    # suites are fixed by the protocol and can't be restricted here.
-    ciphersuites: []
-
 oui:
   # Optional: path to the official IEEE MA-L registry CSV
   # (https://standards-oui.ieee.org/oui/oui.csv — public, no account
@@ -218,17 +134,6 @@ oui:
   # NICs or OS-randomized addresses) are identified as such even
   # without a database entry.
   csvpath: ""
-
-# Known vulnerabilities (CVE) for a device's vendor, shown in a
-# popup when you click an asset row in the dashboard. Offline only,
-# by design — no live network calls, ever, since OT networks are
-# routinely air-gapped from the internet on purpose. See
-# internal/vuln and DOCUMENTATION.md section 3 for how to prepare
-# datapath from CISA's public ICS Advisories feed and carry it into
-# an air-gapped network.
-vulnerability:
-  enabled: false
-  datapath: ics_advisories.csv
 
 logging:
   # "debug", "info", "warn", or "error" — same level names zap itself
@@ -261,26 +166,3 @@ logging:
 # start, pcap analyze, asset confirm/delete, alert approve/confirm)
 # and failed authentication attempts — distinct from the routine
 # application log above. Off by default.
-audit:
-  enabled: false
-  path: audit.log   # rotated using logging.rotation above
-
-# Central Management connection for this Linux sensor.
-central:
-  # Enable registration, heartbeat, and rule synchronization with Central.
-  enabled: true
-  # Central sensor API URL. Use http:// while TLS is disabled on Central,
-  # or https:// when sensor_api.tls.enabled is true.
-  url: http://192.168.10.10:9443
-  # Unique stable identity of this sensor.
-  sensor_id: sensor-001
-  # Human-readable labels shown in the Central Web UI.
-  name: "Production Line 1"
-  site_id: "plant-bratislava"
-  # Must match central auth.sensor_token.
-  token: "CHANGE_SENSOR_TOKEN"
-  # Registration/heartbeat/rule polling frequency and HTTP timeout.
-  interval: 30s
-  timeout: 15s
-  # Development only for self-signed HTTPS certificates.
-  insecure_skip_verify: false

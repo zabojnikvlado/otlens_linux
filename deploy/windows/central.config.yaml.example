@@ -61,3 +61,11 @@ auth:
   # It must match central.token in every sensor config.
   # Environment override: OTLENS_CENTRAL_AUTH_SENSOR_TOKEN
   sensor_token: "CHANGE_SENSOR_TOKEN"
+
+analysis:
+  enabled: true
+  upload_directory: "C:\\ProgramData\\OTLens\\pcap-uploads"
+  max_upload_size_mb: 2048
+  job_timeout: 2h
+  retain_pcap: 24h
+  allow_import: true

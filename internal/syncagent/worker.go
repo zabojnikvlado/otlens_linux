@@ -10,13 +10,14 @@ import (
 )
 
 type Worker struct {
-	Client       *Client
-	Detect       *detect.Engine
-	Uptime       func() int64
-	Health       func() map[string]string
-	Metrics      func() map[string]interface{}
-	Snapshot     func() (management.TelemetrySnapshot, error)
-	ApplyCommand func(management.Command)
+	Client          *Client
+	Detect          *detect.Engine
+	Uptime          func() int64
+	Health          func() map[string]string
+	Metrics         func() map[string]interface{}
+	Snapshot        func() (management.TelemetrySnapshot, error)
+	ApplyCommand    func(management.Command)
+	ProcessAnalysis func(context.Context)
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -64,6 +65,10 @@ func (w *Worker) sync(ctx context.Context) {
 	}
 	if err := w.Client.Heartbeat(ctx, h); err != nil {
 		log.Printf("OTLens Central heartbeat failed: %v", err)
+	}
+
+	if w.ProcessAnalysis != nil {
+		w.ProcessAnalysis(ctx)
 	}
 
 	if w.Snapshot != nil {

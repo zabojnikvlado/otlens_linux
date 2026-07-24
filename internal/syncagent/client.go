@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -122,6 +124,77 @@ func (c *Client) PushTelemetry(ctx context.Context, snapshot management.Telemetr
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("telemetry upload failed: %s", resp.Status)
+	}
+	return nil
+}
+
+func (c *Client) NextAnalysisJob(ctx context.Context) (*management.AnalysisJob, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/analysis/jobs/next", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.headers(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("analysis poll failed: %s", resp.Status)
+	}
+	var job management.AnalysisJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (c *Client) DownloadAnalysisPCAP(ctx context.Context, jobID, target string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/analysis/jobs/"+jobID+"/pcap", nil)
+	if err != nil {
+		return err
+	}
+	c.headers(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("analysis download failed: %s", resp.Status)
+	}
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func (c *Client) PushAnalysisResult(ctx context.Context, jobID string, result management.AnalysisResult) error {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/analysis/jobs/"+jobID+"/result", strings.NewReader(string(b)))
+	if err != nil {
+		return err
+	}
+	c.headers(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("analysis result upload failed: %s", resp.Status)
 	}
 	return nil
 }

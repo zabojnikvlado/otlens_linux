@@ -18,7 +18,8 @@ import (
 // database service. Data is stored as JSON blobs behind a small keyed KV
 // abstraction; the application-facing persistence API remains unchanged.
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	path string
 }
 
 const sqliteBusyTimeout = 5000
@@ -74,7 +75,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("checking sqlite db %q: %w", path, err)
 	}
 
-	return &DB{sql: db}, nil
+	return &DB{sql: db, path: path}, nil
 }
 
 func dirName(path string) string {
@@ -272,4 +273,18 @@ func MigrateLegacyBBolt(sqlitePath, legacyBoltPath string) error {
 		return fmt.Errorf("committing legacy migration: %w", err)
 	}
 	return nil
+}
+
+func (d *DB) ClearAll() error { _, err := d.sql.Exec(`DELETE FROM kv`); return err }
+func (d *DB) Backup(destination string) error {
+	if strings.TrimSpace(destination) == "" {
+		return errors.New("backup destination is empty")
+	}
+	if err := os.MkdirAll(dirName(destination), 0750); err != nil {
+		return err
+	}
+	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(FULL)`)
+	escaped := strings.ReplaceAll(destination, "'", "''")
+	_, err := d.sql.Exec(`VACUUM INTO '` + escaped + `'`)
+	return err
 }

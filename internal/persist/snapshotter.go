@@ -8,6 +8,8 @@
 package persist
 
 import (
+	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
@@ -348,4 +350,43 @@ func (s *Snapshotter) Close() error {
 	}
 
 	return s.db.Close()
+}
+
+func (s *Snapshotter) Reset(operation string) error {
+	switch operation {
+	case "database", "factory":
+		s.assetEngine.Restore(nil)
+		s.flowEngine.Restore(nil)
+		s.storeEngine.RestoreTags(nil)
+		s.storeEngine.RestoreValueChanges(nil)
+		s.storeEngine.RestoreControlEvents(nil)
+		s.detectEngine.RestoreAlerts(nil)
+		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.RestoreKnownMAC(map[string]string{})
+		s.detectEngine.RestoreRules(nil)
+	case "assets":
+		s.assetEngine.Restore(nil)
+		s.flowEngine.Restore(nil)
+	case "alerts":
+		s.detectEngine.RestoreAlerts(nil)
+	case "tags":
+		s.storeEngine.RestoreTags(nil)
+		s.storeEngine.RestoreValueChanges(nil)
+		s.storeEngine.RestoreControlEvents(nil)
+	case "learning":
+		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.RestoreKnownMAC(map[string]string{})
+	case "analysis":
+		return nil
+	default:
+		return fmt.Errorf("unsupported reset operation %q", operation)
+	}
+	return s.flush()
+}
+func (s *Snapshotter) Backup(directory, name string) (string, error) {
+	if name == "" {
+		name = "sensor-" + time.Now().UTC().Format("20060102-150405")
+	}
+	path := filepath.Join(directory, name+".sqlite")
+	return path, s.db.Backup(path)
 }

@@ -79,6 +79,10 @@ func (e *Engine) raiseARPAlert(ip, previousMAC, newMAC string) {
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		alert = &Alert{

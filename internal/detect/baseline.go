@@ -225,6 +225,10 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		alert = &Alert{

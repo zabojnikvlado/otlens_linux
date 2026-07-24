@@ -56,6 +56,10 @@ func (e *Engine) handleAssetUnconfirmed(ua core.UnconfirmedAsset) {
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		message := fmt.Sprintf("New device detected: %s", ua.MAC)

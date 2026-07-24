@@ -58,6 +58,10 @@ func (e *Engine) handleValueOutOfRange(ov core.OutOfRangeValue) {
 
 	alert, exists := e.alerts[key]
 
+	if exists && !e.allowAlertOccurrenceLocked(alert) {
+		return
+	}
+
 	if !exists {
 
 		message := fmt.Sprintf(

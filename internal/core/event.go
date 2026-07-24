@@ -72,33 +72,6 @@ const (
 	// (whose job is tracking/persisting values, not deciding what's
 	// alert-worthy) raising alerts directly.
 	EventValueOutOfRange EventType = "value.out_of_range"
-
-	// EventAlertRaised carries a *detect.Alert — published by
-	// internal/detect every time a genuinely NEW alert is created
-	// (not on every repeat-occurrence Count/LastSeen bump of an
-	// already-existing one — see each raise*/handle* function in
-	// internal/detect). internal/export consumes this to forward new
-	// findings to an external server as they happen. The payload is
-	// the concrete *detect.Alert type rather than a core-level
-	// wrapper struct: unlike BaselineComplete/UnconfirmedAsset/
-	// OutOfRangeValue, this event only flows in one direction
-	// (detect -> export), so there's no mutual-import problem to
-	// avoid by keeping the payload shape in core — internal/api
-	// already imports internal/detect directly for the same Alert
-	// type, so this isn't introducing a new kind of dependency.
-	EventAlertRaised EventType = "alert.raised"
-
-	// EventAuditAction carries an AuditEntry — published by
-	// internal/api whenever an admin/state-changing action happens
-	// (asset confirm/delete, alert approve/confirm, capture stop/
-	// start, pcap analyze, database wipe) or authentication fails.
-	// internal/audit consumes this to write the durable audit trail
-	// (a rotated file, and optionally forwarded to an external server
-	// the same way alerts are — see internal/export). Kept separate
-	// from EventAlertRaised: an audit entry is a record of an action
-	// taken through the API, not a detection finding, even though
-	// both end up exported to the same place.
-	EventAuditAction EventType = "audit.action"
 )
 
 // BaselineComplete is the payload for EventBaselineLearningComplete.
@@ -137,57 +110,4 @@ type OutOfRangeValue struct {
 	MinValue any
 	MaxValue any
 	Value    any
-}
-
-// AuditEntry is the payload for EventAuditAction — one record of an
-// action taken through the API (or an attempt that failed
-// authentication). Lives here in core rather than internal/api (the
-// producer), same reasoning as the other payload types above:
-// internal/audit (the consumer) shouldn't need to import
-// internal/api just for this one type.
-type AuditEntry struct {
-	Timestamp time.Time
-
-	// Action identifies what happened, e.g. "asset.confirm",
-	// "admin.wipe", "auth.failed" — see internal/audit's doc comment
-	// for the full list.
-	Action string
-
-	SourceIP string
-
-	// User is the authenticated identity that performed the action —
-	// currently always the single configured api.username (Basic
-	// Auth has no concept of separate per-person accounts yet), or
-	// "" if api.username/password aren't configured at all (API
-	// running unauthenticated). Recorded now, even though it can
-	// only ever hold one value today, so a future move to real
-	// per-user accounts doesn't need to touch the audit trail's
-	// shape — only how this field gets populated.
-	User string
-
-	// Success distinguishes a completed action from a failed
-	// authentication attempt (Action: "auth.failed") — true for
-	// every other Action, since a request that failed authorization
-	// never reaches the handler that would publish one of those in
-	// the first place.
-	Success bool
-
-	// Details holds action-specific extra context, e.g. {"mac":
-	// "aa:bb:..."} for asset.confirm or {"filename": "..."} for
-	// admin.capture.analyze. Deliberately map[string]string rather
-	// than `any` — keeps every audit entry trivially JSON-
-	// serializable without surprises, at the cost of the caller
-	// having to stringify non-string details itself.
-	Details map[string]string
-}
-
-// Event is the envelope every engine publishes and subscribes to.
-// Data's concrete type depends on Type — see the EventType constants
-// above for which Go type to expect and type-assert to.
-type Event struct {
-	Type EventType
-
-	Timestamp time.Time
-
-	Data any
 }

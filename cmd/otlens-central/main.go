@@ -43,6 +43,8 @@ func main() {
 	srv := &central.Server{
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
 		SIEMSource: cfg.SIEM.Source, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
+		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,
+		AnalysisMaxBytes: cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
 	}
 	exporter, err := siem.New(siem.Config{
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,

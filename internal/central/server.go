@@ -1,11 +1,18 @@
 package central
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,13 +24,16 @@ import (
 )
 
 type Server struct {
-	Repo            *Repository
-	ManagementToken string
-	SensorToken     string
-	SIEMSource      string
-	AuditExport     bool
-	web             *http.Server
-	sensorAPI       *http.Server
+	Repo             *Repository
+	ManagementToken  string
+	SensorToken      string
+	SIEMSource       string
+	AuditExport      bool
+	AnalysisEnabled  bool
+	AnalysisDir      string
+	AnalysisMaxBytes int64
+	web              *http.Server
+	sensorAPI        *http.Server
 }
 
 func bearerAuth(token string) gin.HandlerFunc {
@@ -104,6 +114,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 	api := r.Group("/v1", bearerAuth(s.ManagementToken), s.auditMiddleware())
 	api.GET("/sensors", s.sensors)
+	api.POST("/sensors/actions", s.sensorActions)
 	api.GET("/assets", s.assets)
 	api.GET("/topology", s.topology)
 	api.GET("/tags", s.tags)
@@ -123,6 +134,14 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/sensors/:id/alerts/actions", s.alertActions)
 	api.POST("/rulesets", s.putRuleset)
 	api.PUT("/sensors/:id/ruleset/:ruleset", s.assign)
+	api.GET("/analysis/jobs", s.analysisJobs)
+	api.POST("/analysis/jobs", s.createAnalysisJob)
+	api.DELETE("/analysis/jobs/:job", s.deleteAnalysisJob)
+	api.GET("/data/backups", s.listBackups)
+	api.POST("/data/backups", s.createBackup)
+	api.GET("/data/backups/:backup/download", s.downloadBackup)
+	api.DELETE("/data/backups/:backup", s.deleteBackup)
+	api.POST("/data/reset", s.resetData)
 	return r
 }
 
@@ -134,6 +153,9 @@ func (s *Server) SensorRouter() *gin.Engine {
 	api.POST("/sensors/heartbeat", s.heartbeat)
 	api.POST("/sensors/telemetry", s.telemetry)
 	api.GET("/sensors/:id/sync", s.sync)
+	api.GET("/sensors/:id/analysis/jobs/next", s.nextAnalysisJob)
+	api.GET("/sensors/:id/analysis/jobs/:job/pcap", s.downloadAnalysisPCAP)
+	api.POST("/sensors/:id/analysis/jobs/:job/result", s.analysisResult)
 	return r
 }
 
@@ -534,6 +556,50 @@ func (s *Server) heartbeat(c *gin.Context) {
 	}
 	c.Status(204)
 }
+
+func (s *Server) sensorActions(c *gin.Context) {
+	var request struct {
+		Action    string   `json:"action"`
+		SensorIDs []string `json:"sensor_ids"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || len(request.SensorIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action and sensor_ids are required"})
+		return
+	}
+	var commandType string
+	switch strings.ToLower(strings.TrimSpace(request.Action)) {
+	case "start":
+		commandType = "sensor.capture.start"
+	case "stop":
+		commandType = "sensor.capture.stop"
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be start or stop"})
+		return
+	}
+	queued := 0
+	seen := make(map[string]struct{}, len(request.SensorIDs))
+	for _, sensorID := range request.SensorIDs {
+		sensorID = strings.TrimSpace(sensorID)
+		if sensorID == "" {
+			continue
+		}
+		if _, exists := seen[sensorID]; exists {
+			continue
+		}
+		seen[sensorID] = struct{}{}
+		if err := s.Repo.QueueCommands(c, sensorID, commandType, []string{sensorID}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		queued++
+	}
+	if queued == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid sensor IDs"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"queued": queued, "action": request.Action})
+}
+
 func (s *Server) sensors(c *gin.Context) {
 	v, e := s.Repo.ListSensors(c)
 	if e != nil {
@@ -620,4 +686,230 @@ func centralWebDir() string {
 		return filepath.Join(filepath.Dir(exe), "web", "central")
 	}
 	return filepath.Join("web", "central")
+}
+
+func randomAnalysisID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("analysis-%d", time.Now().UnixNano())
+	}
+	return "analysis-" + hex.EncodeToString(b)
+}
+
+func (s *Server) analysisJobs(c *gin.Context) {
+	jobs, err := s.Repo.ListAnalysisJobs(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, jobs)
+}
+
+func (s *Server) createAnalysisJob(c *gin.Context) {
+	if !s.AnalysisEnabled {
+		c.JSON(http.StatusNotFound, gin.H{"error": "PCAP analysis is disabled"})
+		return
+	}
+	if err := c.Request.ParseMultipartForm(s.AnalysisMaxBytes); err != nil {
+		c.JSON(400, gin.H{"error": "invalid multipart upload: " + err.Error()})
+		return
+	}
+	sensorID := strings.TrimSpace(c.PostForm("sensor_id"))
+	if sensorID == "" {
+		c.JSON(400, gin.H{"error": "sensor_id is required"})
+		return
+	}
+	file, header, err := c.Request.FormFile("pcap")
+	if err != nil {
+		c.JSON(400, gin.H{"error": "pcap file is required"})
+		return
+	}
+	defer file.Close()
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".pcap" && ext != ".pcapng" {
+		c.JSON(400, gin.H{"error": "only .pcap and .pcapng files are allowed"})
+		return
+	}
+	if s.AnalysisMaxBytes <= 0 {
+		s.AnalysisMaxBytes = 2 << 30
+	}
+	lr := http.MaxBytesReader(c.Writer, file, s.AnalysisMaxBytes)
+	if err := os.MkdirAll(s.AnalysisDir, 0700); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	id := randomAnalysisID()
+	path := filepath.Join(s.AnalysisDir, id+ext)
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(out, h), lr)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		c.JSON(400, gin.H{"error": "upload failed or exceeds configured limit"})
+		return
+	}
+	magic := make([]byte, 4)
+	f, _ := os.Open(path)
+	if f != nil {
+		_, _ = io.ReadFull(f, magic)
+		_ = f.Close()
+	}
+	valid := bytes.Equal(magic, []byte{0xd4, 0xc3, 0xb2, 0xa1}) || bytes.Equal(magic, []byte{0xa1, 0xb2, 0xc3, 0xd4}) || bytes.Equal(magic, []byte{0x0a, 0x0d, 0x0d, 0x0a})
+	if !valid {
+		_ = os.Remove(path)
+		c.JSON(400, gin.H{"error": "file does not contain a valid PCAP/PCAPNG signature"})
+		return
+	}
+	protocols := c.PostFormArray("protocols")
+	if len(protocols) == 0 {
+		protocols = []string{"auto", "modbus", "s7comm"}
+	}
+	job := management.AnalysisJob{ID: id, SensorID: sensorID, Filename: filepath.Base(header.Filename), SHA256: hex.EncodeToString(h.Sum(nil)), SizeBytes: n, Status: "queued", Protocols: protocols, CreatedAt: time.Now().UTC()}
+	if err := s.Repo.CreateAnalysisJob(c, job, path); err != nil {
+		_ = os.Remove(path)
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, job)
+}
+
+func (s *Server) deleteAnalysisJob(c *gin.Context) {
+	path, err := s.Repo.DeleteAnalysisJob(c, c.Param("job"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": err.Error()})
+		return
+	}
+	_ = os.Remove(path)
+	c.Status(204)
+}
+
+func (s *Server) nextAnalysisJob(c *gin.Context) {
+	job, _, err := s.Repo.ClaimAnalysisJob(c, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.Status(204)
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, job)
+}
+func (s *Server) downloadAnalysisPCAP(c *gin.Context) {
+	path, name, err := s.Repo.AnalysisJobPath(c, c.Param("job"), c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "job not found"})
+		return
+	}
+	c.FileAttachment(path, name)
+}
+func (s *Server) analysisResult(c *gin.Context) {
+	var result management.AnalysisResult
+	if c.ShouldBindJSON(&result) != nil {
+		c.JSON(400, gin.H{"error": "invalid result"})
+		return
+	}
+	if err := s.Repo.FinishAnalysisJob(c, c.Param("job"), c.Param("id"), result); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(204)
+}
+
+func (s *Server) resetData(c *gin.Context) {
+	var req struct {
+		Scope        string   `json:"scope"`
+		Operation    string   `json:"operation"`
+		SensorIDs    []string `json:"sensor_ids"`
+		Confirmation string   `json:"confirmation"`
+	}
+	if c.ShouldBindJSON(&req) != nil || req.Confirmation != "RESET" {
+		c.JSON(400, gin.H{"error": "confirmation RESET is required"})
+		return
+	}
+	switch strings.ToLower(req.Scope) {
+	case "central":
+		if err := s.Repo.ResetCentral(c, strings.ToLower(req.Operation)); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"status": "completed", "scope": "central", "operation": req.Operation})
+	case "sensors":
+		if len(req.SensorIDs) == 0 {
+			c.JSON(400, gin.H{"error": "sensor_ids are required"})
+			return
+		}
+		command := "sensor." + strings.ToLower(req.Operation) + ".reset"
+		if req.Operation == "factory" {
+			command = "sensor.factory.reset"
+		}
+		for _, id := range req.SensorIDs {
+			if err := s.Repo.QueueCommands(c, strings.TrimSpace(id), command, []string{strings.TrimSpace(id)}); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs), "command": command})
+	default:
+		c.JSON(400, gin.H{"error": "scope must be central or sensors"})
+	}
+}
+func (s *Server) createBackup(c *gin.Context) {
+	var req struct {
+		Name      string   `json:"name"`
+		Scope     string   `json:"scope"`
+		SensorIDs []string `json:"sensor_ids"`
+	}
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, gin.H{"error": "invalid request"})
+		return
+	}
+	if req.Scope == "sensors" {
+		for _, id := range req.SensorIDs {
+			_ = s.Repo.QueueCommands(c, id, "sensor.backup.create", []string{func() string {
+				if strings.TrimSpace(req.Name) == "" {
+					return "auto"
+				}
+				return req.Name
+			}()})
+		}
+		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs)})
+		return
+	}
+	id := fmt.Sprintf("bkp-%d", time.Now().UTC().UnixNano())
+	b, err := s.Repo.CreateCentralBackup(c, id, req.Name)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(201, b)
+}
+func (s *Server) listBackups(c *gin.Context) {
+	b, err := s.Repo.ListBackups(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, b)
+}
+func (s *Server) deleteBackup(c *gin.Context) {
+	if err := s.Repo.DeleteBackup(c, c.Param("backup")); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(204)
+}
+func (s *Server) downloadBackup(c *gin.Context) {
+	b, name, err := s.Repo.BackupPayload(c, c.Param("backup"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "backup not found"})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".json"))
+	c.Data(200, "application/json", b)
 }

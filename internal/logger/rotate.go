@@ -13,7 +13,7 @@ import (
 
 // RotationConfig controls in-process log file rotation — used both
 // by the main application log (logging.rotation in config.yaml) and
-// the audit log (internal/audit's NewAudit), so both share the exact
+// other rotated application files, so both share the exact
 // same rotation semantics and config shape.
 //
 // This is a small hand-rolled implementation rather than a

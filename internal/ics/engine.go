@@ -1,10 +1,4 @@
-// Package ics decodes OT/ICS application-layer protocols — currently
-// Modbus/TCP (modbus.go) and S7comm (s7comm.go) — from already
-// TCP-parsed packets, port-matched via Engine.ModbusPort/S7Port. Each
-// decoded message is normalized into the protocol-agnostic Message
-// type (message.go) and published as core.EventICSMessage, so
-// downstream consumers (internal/store, internal/detect) don't need
-// to know Modbus from S7comm.
+// Package ics decodes OT/ICS application protocols into normalized Message events.
 package ics
 
 import (
@@ -13,108 +7,110 @@ import (
 )
 
 const (
-	// PortModbus and PortS7Comm are the default well-known TCP ports
-	// these protocols run on, used when New is given a zero port.
-	// Exported so other packages (e.g. topology's OT/IT
-	// classification, or config defaulting) can reference the same
-	// defaults without duplicating magic numbers.
-	PortModbus uint16 = 502
-	PortS7Comm uint16 = 102
+	PortModbus     uint16 = 502
+	PortS7Comm     uint16 = 102
+	PortEtherNetIP uint16 = 44818
+	PortDNP3       uint16 = 20000
+	PortOPCUA      uint16 = 4840
+	PortBACnet     uint16 = 47808
+	PortIEC104     uint16 = 2404
 )
 
-// Engine recognizes OT/ICS traffic among already-parsed packets and
-// decodes it into normalized ics.Message events. Protocol detection
-// is port-based (same first-pass approach Nozomi/Zeek use), since
-// these protocols don't self-identify the way e.g. TLS ALPN does.
-// The ports are configurable — some deployments run Modbus/S7comm on
-// non-standard ports.
+type Config struct {
+	ModbusPort, S7Port, EtherNetIPPort, DNP3Port, OPCUAPort, BACnetPort, IEC104Port uint16
+}
+
+type protocolParser interface {
+	Name() string
+	CanParse(core.Packet) bool
+	Parse(core.Packet) (Message, bool)
+}
+
 type Engine struct {
 	EventBus *core.EventBus
+	Config   Config
 
+	// Compatibility fields used by topology/API wiring.
 	ModbusPort uint16
 	S7Port     uint16
+	parsers    []protocolParser
 }
 
-// New creates an ICS decoding engine. A zero modbusPort/s7Port falls
-// back to the standard PortModbus/PortS7Comm.
-func New(bus *core.EventBus, modbusPort, s7Port uint16) *Engine {
-
-	if modbusPort == 0 {
-		modbusPort = PortModbus
+func New(bus *core.EventBus, cfg Config) *Engine {
+	if cfg.ModbusPort == 0 {
+		cfg.ModbusPort = PortModbus
 	}
-
-	if s7Port == 0 {
-		s7Port = PortS7Comm
+	if cfg.S7Port == 0 {
+		cfg.S7Port = PortS7Comm
 	}
-
-	return &Engine{
-		EventBus: bus,
-
-		ModbusPort: modbusPort,
-		S7Port:     s7Port,
+	if cfg.EtherNetIPPort == 0 {
+		cfg.EtherNetIPPort = PortEtherNetIP
 	}
+	if cfg.DNP3Port == 0 {
+		cfg.DNP3Port = PortDNP3
+	}
+	if cfg.OPCUAPort == 0 {
+		cfg.OPCUAPort = PortOPCUA
+	}
+	if cfg.BACnetPort == 0 {
+		cfg.BACnetPort = PortBACnet
+	}
+	if cfg.IEC104Port == 0 {
+		cfg.IEC104Port = PortIEC104
+	}
+	e := &Engine{EventBus: bus, Config: cfg, ModbusPort: cfg.ModbusPort, S7Port: cfg.S7Port}
+	e.parsers = []protocolParser{
+		portParser{"Modbus", "TCP", cfg.ModbusPort, func(p core.Packet) (Message, bool) { return parseModbus(p, cfg.ModbusPort) }},
+		portParser{"S7comm", "TCP", cfg.S7Port, parseS7Comm},
+		portParser{"EtherNet/IP", "TCP", cfg.EtherNetIPPort, parseEtherNetIP},
+		portParser{"DNP3", "TCP", cfg.DNP3Port, parseDNP3},
+		portParser{"OPC UA", "TCP", cfg.OPCUAPort, parseOPCUA},
+		portParser{"BACnet/IP", "UDP", cfg.BACnetPort, parseBACnet},
+		portParser{"IEC 60870-5-104", "TCP", cfg.IEC104Port, parseIEC104},
+		profinetParser{},
+	}
+	return e
 }
+
+type portParser struct {
+	name, transport string
+	port            uint16
+	parse           func(core.Packet) (Message, bool)
+}
+
+func (p portParser) Name() string { return p.name }
+func (p portParser) CanParse(pkt core.Packet) bool {
+	return pkt.L4Protocol == p.transport && (pkt.SrcPort == p.port || pkt.DstPort == p.port) && len(pkt.AppPayload) > 0
+}
+func (p portParser) Parse(pkt core.Packet) (Message, bool) { return p.parse(pkt) }
 
 func (e *Engine) Start() {
-
-	logger.Log.Info(
-		"ICS engine started",
-	)
-
+	logger.Log.WithField("protocols", len(e.parsers)).Info("ICS engine started")
 	ch := e.EventBus.Subscribe(core.EventPacketParsed)
-
 	go func() {
-
 		for event := range ch {
-
 			e.handle(event)
-
 		}
-
 	}()
-
 }
-
 func (e *Engine) handle(event core.Event) {
-
 	packet, ok := event.Data.(core.Packet)
-
 	if !ok {
 		return
 	}
-
-	if packet.L4Protocol != "TCP" || len(packet.AppPayload) == 0 {
-		return
-	}
-
 	msg, ok := e.decode(packet)
-
 	if !ok {
 		return
 	}
-
-	e.EventBus.Publish(
-		core.Event{
-			Type: core.EventICSMessage,
-			Data: msg,
-		},
-	)
-
+	e.EventBus.Publish(core.Event{Type: core.EventICSMessage, Data: msg})
 }
-
-// decode dispatches to the right protocol parser based on the
-// configured port. Any given parser can still reject the payload
-// (return false) if it doesn't actually look like that protocol —
-// port matching is just a cheap first filter, not proof.
 func (e *Engine) decode(packet core.Packet) (Message, bool) {
-
-	if packet.SrcPort == e.ModbusPort || packet.DstPort == e.ModbusPort {
-		return parseModbus(packet, e.ModbusPort)
+	for _, parser := range e.parsers {
+		if parser.CanParse(packet) {
+			if msg, ok := parser.Parse(packet); ok {
+				return msg, true
+			}
+		}
 	}
-
-	if packet.SrcPort == e.S7Port || packet.DstPort == e.S7Port {
-		return parseS7Comm(packet)
-	}
-
 	return Message{}, false
 }

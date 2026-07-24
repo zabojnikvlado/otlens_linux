@@ -17,10 +17,9 @@ ktorý:
 
 Všetky pravidlá zdieľajú **rovnaký `Alert` model** (`alert.go`) a
 **rovnakú infraštruktúru** (`engine.go`) — mapu alertov, mutex,
-Approve/Confirm workflow, retention pruning, logovanie aj export na
-externý server. Vďaka tomu nové pravidlo **nikdy nepotrebuje zásah**
-do frontendu, API vrstvy ani `internal/export` — všetky tri fungujú
-generic, podľa spoločného modelu, nie podľa konkrétneho typu.
+Approve/Confirm workflow, retention pruning a logovanie. Central prijíma
+normalizovaný alert cez telemetry pipeline, takže nové pravidlo nepotrebuje
+špeciálny endpoint ani samostatnú UI implementáciu.
 
 ---
 
@@ -143,8 +142,6 @@ func (e *Engine) startICSWatch(bus *core.EventBus) {
   záznamu (vnútri `if !exists { ... }`) — nie pri každom opakovanom
   výskyte. Toto jedno volanie automaticky:
   - zaloguje (`logger.Log.Warn`)
-  - publikuje `core.EventAlertRaised` (na to počúva `internal/export`,
-    ak je zapnutý)
 - **Dedup kľúč** je to najdôležitejšie rozhodnutie pri návrhu nového
   pravidla — určuje, čo znamená "ten istý nález". Príliš úzky kľúč
   (napr. vrátane presného timestampu) by vytváral nový alert pri
@@ -265,10 +262,8 @@ func (e *Engine) Start(bus *core.EventBus) {
 ### Hotovo
 
 Nové pravidlo sa **automaticky** objaví:
-- v Alerts tabe (dashboard číta `Alert` generic, bez ohľadu na typ)
-- v `GET /alerts` API
-- v `internal/export`, ak je zapnutý (posiela každý `Alert` bez
-  ohľadu na typ)
+- v Central Alerts tabe po najbližšej synchronizácii senzora
+- v Central telemetry a SIEM pipeline podľa spoločného modelu alertu
 
 **Žiadny ďalší súbor sa meniť nemusí.**
 
@@ -301,3 +296,7 @@ Nové pravidlo sa **automaticky** objaví:
   `value_out_of_range.go` ako vzor — subscribe na
   `core.EventBaselineLearningComplete` a drž si vlastný `bool`
   príznak, nezavolávaj priamo metódy iného enginu.
+
+## Extended OT protocol operations
+
+The built-in **Critical ICS Operation** rule now also receives security-relevant events from EtherNet/IP, DNP3, OPC UA, BACnet/IP, IEC 60870-5-104 and PROFINET DCP parsers. Examples include DNP3 Operate/Direct Operate, BACnet WriteProperty and ReinitializeDevice, IEC-104 control commands and clock synchronization, PROFINET DCP Set and selected CIP write-like services.

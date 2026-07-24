@@ -229,14 +229,7 @@ func (e *Engine) startBaselineWatch(bus *core.EventBus) {
 
 }
 
-// logNewAlert logs a freshly-created alert and, if internal/export is
-// listening (see core.EventAlertRaised's doc comment), publishes it
-// for forwarding to an external server. Deliberately called only
-// once per unique finding (from each raise*/handle* function's
-// !exists branch) — not on every repeat-occurrence Count/LastSeen
-// bump — so a chronic, already-known issue doesn't re-flood an
-// external SIEM every time it recurs. Caller must hold e.mutex (only
-// called from within the handle*/raise* functions).
+// logNewAlert records a newly created alert in the sensor log.
 func (e *Engine) logNewAlert(alert *Alert) {
 
 	logger.Log.Warn(
@@ -246,26 +239,6 @@ func (e *Engine) logNewAlert(alert *Alert) {
 		zap.String("message", alert.Message),
 	)
 
-	if e.eventBus != nil {
-
-		// A copy, not the live *alert — internal/export consumes this
-		// asynchronously on its own goroutine, potentially well after
-		// this call returns (e.g. mid HTTP request to a slow export
-		// server). The live pointer is still sitting in e.alerts[key]
-		// and gets Count/LastSeen updated on every future occurrence,
-		// unguarded by any lock from export's point of view — reading
-		// and writing the same struct from two goroutines with no
-		// shared lock is a data race regardless of how unlikely a
-		// visible symptom is in practice.
-		clone := *alert
-
-		e.eventBus.Publish(
-			core.Event{
-				Type: core.EventAlertRaised,
-				Data: &clone,
-			},
-		)
-	}
 }
 
 // ApproveAlert marks an existing alert as reviewed and accepted as
@@ -274,6 +247,22 @@ func (e *Engine) logNewAlert(alert *Alert) {
 // from a client's cached view).
 func (e *Engine) ApproveAlert(id string) bool {
 	return e.setAlertStatus(id, AlertStatusApproved)
+}
+
+// allowAlertOccurrenceLocked applies the operator verdict before an alert is
+// updated. Approved alert IDs are remembered as accepted patterns and are no
+// longer raised or counted. A confirmed alert is only acknowledged: when the
+// same condition is observed again it becomes new and visible again.
+// Caller must hold e.mutex.
+func (e *Engine) allowAlertOccurrenceLocked(alert *Alert) bool {
+	switch alert.Status {
+	case AlertStatusApproved:
+		return false
+	case AlertStatusConfirmed:
+		alert.Status = AlertStatusNew
+		alert.StatusChangedAt = time.Now()
+	}
+	return true
 }
 
 // ConfirmAlert marks an existing alert as reviewed and confirmed as
