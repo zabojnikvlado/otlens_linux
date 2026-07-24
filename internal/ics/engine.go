@@ -4,6 +4,7 @@ package ics
 import (
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"go.uber.org/zap"
 )
 
 const (
@@ -85,7 +86,7 @@ func (p portParser) CanParse(pkt core.Packet) bool {
 func (p portParser) Parse(pkt core.Packet) (Message, bool) { return p.parse(pkt) }
 
 func (e *Engine) Start() {
-	logger.Log.WithField("protocols", len(e.parsers)).Info("ICS engine started")
+	logger.Log.Info("ICS engine started", zap.Int("protocols", len(e.parsers)))
 	ch := e.EventBus.Subscribe(core.EventPacketParsed)
 	go func() {
 		for event := range ch {
