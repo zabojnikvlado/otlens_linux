@@ -88,3 +88,7 @@ See the phase documents for feature-specific behavior and migration notes. `PHAS
 ## Central Dashboard
 
 The first tab in Windows Central is the operational Dashboard. It summarizes running, stopped and offline sensors, open alerts, detected assets, active rules, OT tags, analysis jobs, alert severities, observed OT protocols, baseline state and the most recent backup. Dashboard cards link directly to their corresponding detailed tabs. Detailed behavior is documented in `PHASE3_9_0_DASHBOARD.md`.
+
+## Sensor packet-capture runtime diagnostics
+
+From Phase 3.9.1, live-capture sensors require libpcap 1.10.0 or newer. Startup fails before opening the interface when an older library is detected. Heartbeats include OTLens, Go, libpcap and gopacket versions plus capture backend, interface, snap length and promiscuous mode. Central persists and displays these values in the Sensors table.

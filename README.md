@@ -123,3 +123,7 @@ Windows Central tables support sortable data columns and independent pagination 
 ## Phase 3.9.0 dashboard
 
 Windows Central now opens on a Dashboard tab with sensor health, open alerts, asset and OT-tag totals, enabled-rule coverage, PCAP queue status, severity and protocol summaries, recent activity, baseline status, and latest backup information. See `PHASE3_9_0_DASHBOARD.md`.
+
+## libpcap requirement
+
+Linux sensors using `capture.mode: pcap` require **libpcap 1.10.0 or newer**. The sensor validates the linked runtime library during startup and reports its version and capture diagnostics to the Windows Central Sensors tab. IPFIX-only sensors do not require libpcap at runtime. See `PHASE3_9_1_LIBPCAP_1_10.md`.

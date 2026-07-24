@@ -14,6 +14,13 @@ type Sensor struct {
 	Hostname               string    `json:"hostname"`
 	LastSeen               time.Time `json:"last_seen"`
 	CertificateFingerprint string    `json:"certificate_fingerprint,omitempty"`
+	GoVersion              string    `json:"go_version,omitempty"`
+	LibpcapVersion         string    `json:"libpcap_version,omitempty"`
+	GopacketVersion        string    `json:"gopacket_version,omitempty"`
+	CaptureBackend         string    `json:"capture_backend,omitempty"`
+	CaptureInterface       string    `json:"capture_interface,omitempty"`
+	CaptureSnaplen         int32     `json:"capture_snaplen,omitempty"`
+	CapturePromiscuous     bool      `json:"capture_promiscuous,omitempty"`
 }
 
 type Site struct {
@@ -87,6 +94,8 @@ type Heartbeat struct {
 	Uptime   int64                  `json:"uptime"`
 	Health   map[string]string      `json:"health"`
 	Metrics  map[string]interface{} `json:"metrics"`
+	Versions map[string]string      `json:"versions,omitempty"`
+	Capture  map[string]interface{} `json:"capture,omitempty"`
 }
 
 type SyncState struct {

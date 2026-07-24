@@ -15,6 +15,8 @@ type Worker struct {
 	Uptime          func() int64
 	Health          func() map[string]string
 	Metrics         func() map[string]interface{}
+	Versions        func() map[string]string
+	CaptureInfo     func() map[string]interface{}
 	Snapshot        func() (management.TelemetrySnapshot, error)
 	ApplyCommand    func(management.Command)
 	ProcessAnalysis func(context.Context)
@@ -62,6 +64,12 @@ func (w *Worker) sync(ctx context.Context) {
 	}
 	if w.Metrics != nil {
 		h.Metrics = w.Metrics()
+	}
+	if w.Versions != nil {
+		h.Versions = w.Versions()
+	}
+	if w.CaptureInfo != nil {
+		h.Capture = w.CaptureInfo()
 	}
 	if err := w.Client.Heartbeat(ctx, h); err != nil {
 		log.Printf("OTLens Central heartbeat failed: %v", err)

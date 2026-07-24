@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS sensors (
  version TEXT NOT NULL DEFAULT '',
  hostname TEXT NOT NULL DEFAULT '',
  certificate_fingerprint TEXT,
+ go_version TEXT NOT NULL DEFAULT '',
+ libpcap_version TEXT NOT NULL DEFAULT '',
+ gopacket_version TEXT NOT NULL DEFAULT '',
+ capture_backend TEXT NOT NULL DEFAULT '',
+ capture_interface TEXT NOT NULL DEFAULT '',
+ capture_snaplen INTEGER NOT NULL DEFAULT 0,
+ capture_promiscuous BOOLEAN NOT NULL DEFAULT FALSE,
  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS rule_sets (
@@ -69,6 +76,13 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS go_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS libpcap_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS gopacket_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_backend TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_interface TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_snaplen INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_promiscuous BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -166,11 +180,54 @@ func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) erro
 	if captureStatus := strings.ToLower(strings.TrimSpace(h.Health["capture"])); captureStatus == "running" || captureStatus == "stopped" {
 		status = captureStatus
 	}
-	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET status=$4,version=$2,hostname=$3,last_seen=NOW() WHERE id=$1`, h.SensorID, h.Version, h.Hostname, status)
+	stringValue := func(values map[string]string, key string) string {
+		if values == nil {
+			return ""
+		}
+		return values[key]
+	}
+	interfaceValue := func(key string) interface{} {
+		if h.Capture == nil {
+			return nil
+		}
+		return h.Capture[key]
+	}
+	toString := func(value interface{}) string {
+		if value == nil {
+			return ""
+		}
+		return fmt.Sprint(value)
+	}
+	toInt32 := func(value interface{}) int32 {
+		switch typed := value.(type) {
+		case float64:
+			return int32(typed)
+		case int:
+			return int32(typed)
+		case int32:
+			return typed
+		case int64:
+			return int32(typed)
+		default:
+			return 0
+		}
+	}
+	toBool := func(value interface{}) bool {
+		typed, ok := value.(bool)
+		return ok && typed
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET
+ status=$4,version=$2,hostname=$3,go_version=$5,libpcap_version=$6,gopacket_version=$7,
+ capture_backend=$8,capture_interface=$9,capture_snaplen=$10,capture_promiscuous=$11,last_seen=NOW()
+ WHERE id=$1`, h.SensorID, h.Version, h.Hostname, status,
+		stringValue(h.Versions, "go"), stringValue(h.Versions, "libpcap"), stringValue(h.Versions, "gopacket"),
+		toString(interfaceValue("backend")), toString(interfaceValue("interface")), toInt32(interfaceValue("snaplen")), toBool(interfaceValue("promiscuous")))
 	return err
 }
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,'') FROM sensors ORDER BY name,id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,''),
+COALESCE(go_version,''),COALESCE(libpcap_version,''),COALESCE(gopacket_version,''),COALESCE(capture_backend,''),
+COALESCE(capture_interface,''),COALESCE(capture_snaplen,0),COALESCE(capture_promiscuous,FALSE) FROM sensors ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +235,8 @@ func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, erro
 	var out []management.Sensor
 	for rows.Next() {
 		var s management.Sensor
-		if err := rows.Scan(&s.ID, &s.Name, &s.SiteID, &s.Status, &s.Version, &s.Hostname, &s.LastSeen, &s.CertificateFingerprint); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.SiteID, &s.Status, &s.Version, &s.Hostname, &s.LastSeen, &s.CertificateFingerprint,
+			&s.GoVersion, &s.LibpcapVersion, &s.GopacketVersion, &s.CaptureBackend, &s.CaptureInterface, &s.CaptureSnaplen, &s.CapturePromiscuous); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

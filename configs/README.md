@@ -31,3 +31,7 @@ Override with:
 ```
 
 The Central config contains the PostgreSQL connection settings. The Sensor config contains capture, local SQLite, and Central endpoint settings.
+
+## libpcap
+
+`capture.mode: pcap` requires libpcap 1.10.0 or newer on the Linux sensor. The version is checked from the linked runtime library during startup. `capture.mode: ipfix` does not require libpcap at runtime.

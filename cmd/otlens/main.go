@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"syscall"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/app"
+	"github.com/zabojnikvlado/otlens_linux/internal/capture"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
@@ -76,6 +78,19 @@ func main() {
 			cfg.Capture.Interface,
 		),
 	)
+
+	libpcapVersion := "not used"
+	if strings.EqualFold(cfg.Capture.Mode, "pcap") || strings.TrimSpace(cfg.Capture.Mode) == "" {
+		libpcapVersion = capture.LibpcapVersion()
+		if err := capture.ValidateLibpcapVersion(libpcapVersion); err != nil {
+			logger.Log.Fatal("Unsupported packet capture backend", zap.String("libpcap", libpcapVersion), zap.Error(err))
+		}
+		logger.Log.Info("Packet capture backend",
+			zap.String("backend", "libpcap"),
+			zap.String("version", libpcapVersion),
+			zap.String("minimum_supported", capture.MinimumLibpcapVersion),
+		)
+	}
 
 	logger.Log.Info(
 		"OTLens ready",
@@ -197,6 +212,24 @@ func main() {
 				}
 			case "rule.delete":
 				application.DetectEngine.DeleteRule(command.Target)
+			}
+		}, Versions: func() map[string]string {
+			return map[string]string{
+				"otlens":   cfg.App.Version,
+				"go":       runtime.Version(),
+				"libpcap":  libpcapVersion,
+				"gopacket": "v1.1.19",
+			}
+		}, CaptureInfo: func() map[string]interface{} {
+			backend := "ipfix"
+			if application.CaptureEngine != nil {
+				backend = "libpcap"
+			}
+			return map[string]interface{}{
+				"backend":     backend,
+				"interface":   cfg.Capture.Interface,
+				"snaplen":     cfg.Capture.Snaplen,
+				"promiscuous": cfg.Capture.Promiscuous,
 			}
 		}, Health: func() map[string]string {
 			running := false
