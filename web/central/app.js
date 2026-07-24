@@ -1,63 +1,99 @@
-const POLL=10000;let token=localStorage.getItem('otlensCentralToken')||'';let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[];let network,nodesDS,edgesDS;let topologySettling=false;const selected=new Set();
+const POLL=10000;let token=localStorage.getItem('otlensCentralToken')||'';let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[];let network,nodesDS,edgesDS;let topologySettling=false;const topologyPositionCache=new Map();const selected=new Set();
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};if(token)h.Authorization='Bearer '+token;let r;try{r=await fetch('/v1'+path,{...opt,headers:h})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;throw e}return r.status===204||r.status===202?null:r.json()}
 function setConn(ok,t){document.getElementById('conn-dot').className='dot '+(ok?'ok':'down');document.getElementById('conn-text').textContent=t}
 document.getElementById('token-btn').onclick=()=>{const v=prompt('Management token',token);if(v!==null){token=v.trim();localStorage.setItem('otlensCentralToken',token);refreshAll()}};
 document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30)};
 function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase()}}
-function settleTopology(newNodeIds=[]){
-  if(!network||topologySettling)return;
-  topologySettling=true;
-  const allIds=nodesDS.getIds();
-  const moving=new Set(newNodeIds);
-  // Existing nodes stay exactly where the operator left them. Only newly
-  // discovered nodes participate in the short stabilization pass.
-  if(moving.size){
-    const pos=network.getPositions(allIds);
-    nodesDS.update(allIds.map(id=>({id,fixed:moving.has(id)?{x:false,y:false}:{x:true,y:true},...(pos[id]?{x:pos[id].x,y:pos[id].y}:{})})));
+function topologyHash(value){
+  let h=2166136261;
+  for(const ch of String(value)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}
+  return h>>>0;
+}
+function rememberTopologyPositions(){
+  if(!network||!nodesDS)return;
+  const positions=network.getPositions(nodesDS.getIds());
+  Object.entries(positions).forEach(([id,p])=>topologyPositionCache.set(id,{x:p.x,y:p.y}));
+}
+function positionNewTopologyNodes(newIds,edges){
+  if(!network||!newIds.length)return;
+  rememberTopologyPositions();
+  const neighbours=new Map();
+  for(const edge of edges){
+    if(!neighbours.has(edge.from))neighbours.set(edge.from,[]);
+    if(!neighbours.has(edge.to))neighbours.set(edge.to,[]);
+    neighbours.get(edge.from).push(edge.to);
+    neighbours.get(edge.to).push(edge.from);
   }
-  network.setOptions({physics:{enabled:true}});
-  network.stabilize(moving.size?90:250);
+  const existingPositions=network.getPositions(nodesDS.getIds());
+  const updates=[];
+  const total=Math.max(nodesDS.length,1);
+  const fallbackRadius=Math.max(260,Math.sqrt(total)*70);
+  newIds.forEach((id,index)=>{
+    const linked=(neighbours.get(id)||[]).map(n=>existingPositions[n]||topologyPositionCache.get(n)).filter(Boolean);
+    const hash=topologyHash(id),angle=(hash%360)*Math.PI/180;
+    let x,y;
+    if(linked.length){
+      const centre=linked.reduce((a,p)=>({x:a.x+p.x,y:a.y+p.y}),{x:0,y:0});
+      centre.x/=linked.length;centre.y/=linked.length;
+      const radius=90+(hash%70);
+      x=centre.x+Math.cos(angle)*radius;
+      y=centre.y+Math.sin(angle)*radius;
+    }else{
+      const ring=Math.floor(index/18)+1;
+      const radius=fallbackRadius+ring*100;
+      x=Math.cos(angle)*radius;y=Math.sin(angle)*radius;
+    }
+    topologyPositionCache.set(id,{x,y});
+    updates.push({id,x,y,fixed:{x:false,y:false}});
+  });
+  nodesDS.update(updates);
+  network.redraw();
 }
 function renderTopology(){
-  const ns=(graph.Nodes||[]).map(node),
-        ip=new Map((graph.Nodes||[]).map(n=>[n.SensorID+'::'+n.IP,n.ID])),
-        nodeByIP=new Map((graph.Nodes||[]).map(n=>[n.SensorID+'::'+n.IP,n]));
-  const es=(graph.Edges||[]).map(e=>{
+  const rawNodes=graph.Nodes||[],rawEdges=graph.Edges||[],dense=rawNodes.length>80||rawEdges.length>160;
+  const ns=rawNodes.map(n=>{
+    const item=node(n),cached=topologyPositionCache.get(item.id);
+    if(cached){item.x=cached.x;item.y=cached.y}
+    if(dense&&!n.IsHoneypot&&n.Confirmed!==false)item.font={...item.font,size:11};
+    return item;
+  }),
+        ip=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n.ID])),
+        nodeByIP=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n]));
+  const es=rawEdges.map(e=>{
     const src=nodeByIP.get(e.SensorID+'::'+e.SrcIP),dst=nodeByIP.get(e.SensorID+'::'+e.DstIP),
-          interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot;
-    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label:lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(e.IsOT?e.Protocol:''),title:lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220'},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b'},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined}
+          interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot,
+          label=lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(!dense&&e.IsOT?e.Protocol:'');
+    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
   }).filter(e=>e.from!=null&&e.to!=null);
   if(!network){
     nodesDS=new vis.DataSet(ns);edgesDS=new vis.DataSet(es);
     network=new vis.Network(document.getElementById('graph'),{nodes:nodesDS,edges:edgesDS},{
-      nodes:{shape:'dot',borderWidth:2},edges:{smooth:false},
-      physics:{enabled:true,solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:-120,springLength:160,avoidOverlap:1},stabilization:{enabled:true,iterations:250,updateInterval:25,fit:true}},
-      interaction:{hover:true}
+      nodes:{shape:'dot',borderWidth:2},edges:{smooth:false,selectionWidth:1.5,hoverWidth:1.5},
+      physics:{enabled:true,solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:dense?-70:-115,centralGravity:.015,springLength:dense?115:155,springConstant:.055,damping:.72,avoidOverlap:1},minVelocity:.75,maxVelocity:22,timestep:.35,adaptiveTimestep:true,stabilization:{enabled:true,iterations:dense?500:320,updateInterval:40,fit:true}},
+      interaction:{hover:true,hideEdgesOnDrag:true,hideEdgesOnZoom:dense,multiselect:true},layout:{improvedLayout:true}
     });
     network.once('stabilized',()=>{
+      rememberTopologyPositions();
       network.setOptions({physics:{enabled:false}});
-      nodesDS.update(nodesDS.getIds().map(id=>({id,fixed:{x:false,y:false}})));
       topologySettling=false;
+    });
+    network.on('dragEnd',params=>{
+      const ids=params.nodes&&params.nodes.length?params.nodes:nodesDS.getIds();
+      const positions=network.getPositions(ids);
+      Object.entries(positions).forEach(([id,p])=>topologyPositionCache.set(id,{x:p.x,y:p.y}));
     });
   }else{
     const oldIds=new Set(nodesDS.getIds()),nextIds=new Set(ns.map(n=>n.id));
     const newIds=ns.filter(n=>!oldIds.has(n.id)).map(n=>n.id);
-    nodesDS.getIds().filter(id=>!nextIds.has(id)).forEach(id=>nodesDS.remove(id));
-    // Do not write x/y for existing nodes. vis-network retains both automatic
-    // and manually dragged positions while physics is disabled.
+    nodesDS.getIds().filter(id=>!nextIds.has(id)).forEach(id=>{nodesDS.remove(id);topologyPositionCache.delete(id)});
     nodesDS.update(ns);
     const edgeIds=new Set(es.map(e=>e.id));
     edgesDS.getIds().filter(id=>!edgeIds.has(id)).forEach(id=>edgesDS.remove(id));
     edgesDS.update(es);
-    if(newIds.length){
-      network.once('stabilized',()=>{
-        network.setOptions({physics:{enabled:false}});
-        nodesDS.update(nodesDS.getIds().map(id=>({id,fixed:{x:false,y:false}})));
-        topologySettling=false;
-      });
-      settleTopology(newIds);
-    }
+    network.setOptions({physics:{enabled:false},interaction:{hideEdgesOnZoom:dense}});
+    positionNewTopologyNodes(newIds,es);
+    rememberTopologyPositions();
   }
   applySearch();
 }
