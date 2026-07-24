@@ -288,13 +288,26 @@ func main() {
 			assetsBefore, flowsBefore, tagsBefore, alertsBefore := len(application.AssetEngine.GetAll()), len(application.FlowEngine.GetAll()), len(application.StoreEngine.GetTags()), len(application.DetectEngine.GetAlerts())
 			wasRunning := application.CaptureEngine.IsRunning()
 			if wasRunning {
-				application.CaptureEngine.Stop()
+				// Stop() only requests shutdown. Wait for the old capture loop to
+				// release its running flag before replaying the PCAP; otherwise the
+				// restart below races it and fails with "capture already running",
+				// leaving the sensor permanently without live flow detection.
+				if err := application.CaptureEngine.StopAndWait(5 * time.Second); err != nil {
+					result.Error = fmt.Sprintf("stopping live capture before analysis failed: %v", err)
+					_ = client.PushAnalysisResult(jobCtx, job.ID, result)
+					return
+				}
 			}
 			packets, analyzeErr := application.CaptureEngine.AnalyzeFile(path)
 			if wasRunning {
-				if err := application.CaptureEngine.Start(); err != nil {
-					log.Printf("OTLens capture restart after PCAP analysis failed: %v", err)
-				}
+				// Start blocks for the lifetime of the capture session. Run it in its
+				// own goroutine so analysis completion and telemetry synchronization
+				// can continue after live capture has been restored.
+				go func() {
+					if err := application.CaptureEngine.Start(); err != nil {
+						log.Printf("OTLens capture restart after PCAP analysis failed: %v", err)
+					}
+				}()
 			}
 			result.Packets = packets
 			result.AssetsDiscovered = max(0, len(application.AssetEngine.GetAll())-assetsBefore)

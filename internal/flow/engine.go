@@ -276,6 +276,10 @@ func (e *Engine) Restore(flows []*Flow) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	// Replace the complete snapshot. In particular, Restore(nil) must clear
+	// PCAP-derived flows during database and factory resets.
+	e.flows = make(map[string]*Flow, len(flows))
+
 	for _, f := range flows {
 		e.flows[f.ID] = f
 	}

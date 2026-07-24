@@ -331,6 +331,10 @@ func (e *Engine) RestoreAlerts(alerts []*Alert) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	// Restore is used both at startup and for destructive resets. Always
+	// replace the map so RestoreAlerts(nil) actually clears persisted alerts.
+	e.alerts = make(map[string]*Alert, len(alerts))
+
 	for _, alert := range alerts {
 
 		if alert.Status == "" {
@@ -489,6 +493,7 @@ func (e *Engine) RestoreKnownMAC(knownMAC map[string]string) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	e.knownMAC = make(map[string]string, len(knownMAC))
 	for k, v := range knownMAC {
 		e.knownMAC[k] = v
 	}

@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS sensors (
  capture_interface TEXT NOT NULL DEFAULT '',
  capture_snaplen INTEGER NOT NULL DEFAULT 0,
  capture_promiscuous BOOLEAN NOT NULL DEFAULT FALSE,
+ last_heartbeat_at TIMESTAMPTZ,
+ last_sync_attempt_at TIMESTAMPTZ,
+ last_sync_success_at TIMESTAMPTZ,
+ last_data_received_at TIMESTAMPTZ,
+ sync_status TEXT NOT NULL DEFAULT 'unknown',
+ pending_records BIGINT NOT NULL DEFAULT 0,
+ sync_failures INTEGER NOT NULL DEFAULT 0,
+ last_sync_error TEXT NOT NULL DEFAULT '',
+ sync_sequence BIGINT NOT NULL DEFAULT 0,
  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS rule_sets (
@@ -58,6 +67,9 @@ CREATE TABLE IF NOT EXISTS rule_sets (
  name TEXT NOT NULL,
  version BIGINT NOT NULL DEFAULT 1,
  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+ batch_id TEXT NOT NULL DEFAULT '',
+ sequence BIGINT NOT NULL DEFAULT 0,
+ checksum TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS sensor_rule_sets (
@@ -74,6 +86,9 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  alerts JSONB NOT NULL DEFAULT '[]'::jsonb,
  baseline JSONB NOT NULL DEFAULT '{}'::jsonb,
  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+ batch_id TEXT NOT NULL DEFAULT '',
+ sequence BIGINT NOT NULL DEFAULT 0,
+ checksum TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS go_version TEXT NOT NULL DEFAULT '';
@@ -83,6 +98,15 @@ ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_backend TEXT NOT NULL DEFAU
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_interface TEXT NOT NULL DEFAULT '';
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_snaplen INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_promiscuous BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_attempt_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_success_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_data_received_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS pending_records BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_sequence BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -90,6 +114,9 @@ ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL 
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS alerts JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS baseline JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS sequence BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS sensor_commands (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -218,16 +245,21 @@ func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) erro
 	}
 	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET
  status=$4,version=$2,hostname=$3,go_version=$5,libpcap_version=$6,gopacket_version=$7,
- capture_backend=$8,capture_interface=$9,capture_snaplen=$10,capture_promiscuous=$11,last_seen=NOW()
+ capture_backend=$8,capture_interface=$9,capture_snaplen=$10,capture_promiscuous=$11,last_seen=NOW(),last_heartbeat_at=NOW(),
+ last_sync_attempt_at=NULLIF($12, '0001-01-01'::timestamptz),last_sync_success_at=NULLIF($13, '0001-01-01'::timestamptz),
+ pending_records=$14,sync_failures=$15,last_sync_error=$16,sync_sequence=$17,
+ sync_status=CASE WHEN $15>0 AND $14>0 THEN 'stalled' WHEN $15>0 THEN 'error' WHEN $14>0 THEN 'pending' ELSE 'healthy' END
  WHERE id=$1`, h.SensorID, h.Version, h.Hostname, status,
 		stringValue(h.Versions, "go"), stringValue(h.Versions, "libpcap"), stringValue(h.Versions, "gopacket"),
-		toString(interfaceValue("backend")), toString(interfaceValue("interface")), toInt32(interfaceValue("snaplen")), toBool(interfaceValue("promiscuous")))
+		toString(interfaceValue("backend")), toString(interfaceValue("interface")), toInt32(interfaceValue("snaplen")), toBool(interfaceValue("promiscuous")),
+		h.Sync.LastAttemptAt, h.Sync.LastSuccessAt, h.Sync.PendingRecords, h.Sync.ConsecutiveFailures, h.Sync.LastError, h.Sync.Sequence)
 	return err
 }
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,''),
 COALESCE(go_version,''),COALESCE(libpcap_version,''),COALESCE(gopacket_version,''),COALESCE(capture_backend,''),
-COALESCE(capture_interface,''),COALESCE(capture_snaplen,0),COALESCE(capture_promiscuous,FALSE) FROM sensors ORDER BY name,id`)
+COALESCE(capture_interface,''),COALESCE(capture_snaplen,0),COALESCE(capture_promiscuous,FALSE),
+last_heartbeat_at,last_sync_attempt_at,last_sync_success_at,last_data_received_at,COALESCE(sync_status,'unknown'),COALESCE(pending_records,0),COALESCE(sync_failures,0),COALESCE(last_sync_error,''),COALESCE(sync_sequence,0) FROM sensors ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +268,7 @@ COALESCE(capture_interface,''),COALESCE(capture_snaplen,0),COALESCE(capture_prom
 	for rows.Next() {
 		var s management.Sensor
 		if err := rows.Scan(&s.ID, &s.Name, &s.SiteID, &s.Status, &s.Version, &s.Hostname, &s.LastSeen, &s.CertificateFingerprint,
-			&s.GoVersion, &s.LibpcapVersion, &s.GopacketVersion, &s.CaptureBackend, &s.CaptureInterface, &s.CaptureSnaplen, &s.CapturePromiscuous); err != nil {
+			&s.GoVersion, &s.LibpcapVersion, &s.GopacketVersion, &s.CaptureBackend, &s.CaptureInterface, &s.CaptureSnaplen, &s.CapturePromiscuous, &s.LastHeartbeatAt, &s.LastSyncAttemptAt, &s.LastSyncSuccessAt, &s.LastDataReceivedAt, &s.SyncStatus, &s.PendingRecords, &s.SyncFailures, &s.LastSyncError, &s.SyncSequence); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -295,8 +327,9 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,updated_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,updated_at=NOW()`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"))
+	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,batch_id,sequence,checksum,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
+WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
 		return err
 	}
@@ -327,6 +360,9 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET ca
 			}
 		}
 	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NOW(),last_sync_success_at=NOW(),sync_status='healthy',pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=GREATEST(sync_sequence,$2) WHERE id=$1`, x.SensorID, x.Sequence); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -344,7 +380,7 @@ func firstString(m map[string]interface{}, keys ...string) string {
 }
 
 func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules FROM sensor_telemetry ORDER BY sensor_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,batch_id,sequence,checksum FROM sensor_telemetry ORDER BY sensor_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +388,7 @@ func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnaps
 	var out []management.TelemetrySnapshot
 	for rows.Next() {
 		var x management.TelemetrySnapshot
-		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules); err != nil {
+		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules, &x.BatchID, &x.Sequence, &x.Checksum); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

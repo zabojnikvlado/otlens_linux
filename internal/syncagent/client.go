@@ -8,6 +8,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -33,7 +34,15 @@ func New(cfg Config) *Client {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 15 * time.Second
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}}}}
+	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: cfg.Timeout,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          20,
+		MaxIdleConnsPerHost:   4,
+	}}}
 }
 func (c *Client) headers(r *http.Request) {
 	if c.cfg.Token != "" {
@@ -107,25 +116,32 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	return out.Commands, nil
 }
 
-func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) error {
+func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) (management.TelemetryAck, error) {
 	b, err := json.Marshal(snapshot)
 	if err != nil {
-		return err
+		return management.TelemetryAck{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/telemetry", strings.NewReader(string(b)))
 	if err != nil {
-		return err
+		return management.TelemetryAck{}, err
 	}
 	c.headers(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return management.TelemetryAck{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("telemetry upload failed: %s", resp.Status)
+		return management.TelemetryAck{}, fmt.Errorf("telemetry upload failed: %s", resp.Status)
 	}
-	return nil
+	var ack management.TelemetryAck
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		return management.TelemetryAck{}, fmt.Errorf("decode telemetry acknowledgement: %w", err)
+	}
+	if !ack.Accepted || ack.AcceptedSequence != snapshot.Sequence {
+		return management.TelemetryAck{}, fmt.Errorf("invalid telemetry acknowledgement for sequence %d", snapshot.Sequence)
+	}
+	return ack, nil
 }
 
 func (c *Client) NextAnalysisJob(ctx context.Context) (*management.AnalysisJob, error) {

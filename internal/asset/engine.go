@@ -228,6 +228,10 @@ func (e *Engine) Restore(assets []*Asset) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	// Restore is a replacement operation, not a merge. Reset paths call
+	// Restore(nil), so retaining the previous map here made every reset a no-op.
+	e.assets = make(map[string]*Asset, len(assets))
+
 	for _, a := range assets {
 
 		a.Confirmed = true

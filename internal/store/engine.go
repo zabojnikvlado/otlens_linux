@@ -655,6 +655,10 @@ func (e *Engine) RestoreTags(tags []*Tag) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	// Replace rather than merge. The old merge semantics meant RestoreTags(nil)
+	// left all known registers in memory and they were written back to SQLite.
+	e.tags = make(map[string]*Tag, len(tags))
+
 	for _, tag := range tags {
 		e.tags[tag.Key] = tag
 	}

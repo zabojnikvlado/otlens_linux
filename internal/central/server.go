@@ -173,11 +173,27 @@ func (s *Server) telemetry(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "sensor id mismatch"})
 		return
 	}
+	if x.Sequence <= 0 || strings.TrimSpace(x.BatchID) == "" || strings.TrimSpace(x.Checksum) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "telemetry batch metadata is required"})
+		return
+	}
+	checksumInput := x
+	checksumInput.Checksum = ""
+	payload, err := json.Marshal(checksumInput)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid telemetry payload"})
+		return
+	}
+	sum := sha256.Sum256(payload)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), x.Checksum) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "telemetry checksum mismatch"})
+		return
+	}
 	if err := s.Repo.PutTelemetry(c, x); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, management.TelemetryAck{Accepted: true, BatchID: x.BatchID, AcceptedSequence: x.Sequence, StoredAt: time.Now().UTC()})
 }
 
 func (s *Server) assets(c *gin.Context) {

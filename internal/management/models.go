@@ -6,21 +6,30 @@ import (
 )
 
 type Sensor struct {
-	ID                     string    `json:"id"`
-	Name                   string    `json:"name"`
-	SiteID                 string    `json:"site_id"`
-	Status                 string    `json:"status"`
-	Version                string    `json:"version"`
-	Hostname               string    `json:"hostname"`
-	LastSeen               time.Time `json:"last_seen"`
-	CertificateFingerprint string    `json:"certificate_fingerprint,omitempty"`
-	GoVersion              string    `json:"go_version,omitempty"`
-	LibpcapVersion         string    `json:"libpcap_version,omitempty"`
-	GopacketVersion        string    `json:"gopacket_version,omitempty"`
-	CaptureBackend         string    `json:"capture_backend,omitempty"`
-	CaptureInterface       string    `json:"capture_interface,omitempty"`
-	CaptureSnaplen         int32     `json:"capture_snaplen,omitempty"`
-	CapturePromiscuous     bool      `json:"capture_promiscuous,omitempty"`
+	ID                     string     `json:"id"`
+	Name                   string     `json:"name"`
+	SiteID                 string     `json:"site_id"`
+	Status                 string     `json:"status"`
+	Version                string     `json:"version"`
+	Hostname               string     `json:"hostname"`
+	LastSeen               time.Time  `json:"last_seen"`
+	CertificateFingerprint string     `json:"certificate_fingerprint,omitempty"`
+	GoVersion              string     `json:"go_version,omitempty"`
+	LibpcapVersion         string     `json:"libpcap_version,omitempty"`
+	GopacketVersion        string     `json:"gopacket_version,omitempty"`
+	CaptureBackend         string     `json:"capture_backend,omitempty"`
+	CaptureInterface       string     `json:"capture_interface,omitempty"`
+	CaptureSnaplen         int32      `json:"capture_snaplen,omitempty"`
+	CapturePromiscuous     bool       `json:"capture_promiscuous,omitempty"`
+	LastHeartbeatAt        *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastSyncAttemptAt      *time.Time `json:"last_sync_attempt_at,omitempty"`
+	LastSyncSuccessAt      *time.Time `json:"last_sync_success_at,omitempty"`
+	LastDataReceivedAt     *time.Time `json:"last_data_received_at,omitempty"`
+	SyncStatus             string     `json:"sync_status,omitempty"`
+	PendingRecords         int64      `json:"pending_records,omitempty"`
+	SyncFailures           int        `json:"sync_failures,omitempty"`
+	LastSyncError          string     `json:"last_sync_error,omitempty"`
+	SyncSequence           int64      `json:"sync_sequence,omitempty"`
 }
 
 type Site struct {
@@ -96,6 +105,24 @@ type Heartbeat struct {
 	Metrics  map[string]interface{} `json:"metrics"`
 	Versions map[string]string      `json:"versions,omitempty"`
 	Capture  map[string]interface{} `json:"capture,omitempty"`
+	Sync     SyncHealth             `json:"sync,omitempty"`
+}
+
+type SyncHealth struct {
+	LastAttemptAt       time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt       time.Time `json:"last_success_at,omitempty"`
+	LastDataSentAt      time.Time `json:"last_data_sent_at,omitempty"`
+	PendingRecords      int64     `json:"pending_records,omitempty"`
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
+	LastError           string    `json:"last_error,omitempty"`
+	Sequence            int64     `json:"sequence,omitempty"`
+}
+
+type TelemetryAck struct {
+	Accepted         bool      `json:"accepted"`
+	BatchID          string    `json:"batch_id"`
+	AcceptedSequence int64     `json:"accepted_sequence"`
+	StoredAt         time.Time `json:"stored_at"`
 }
 
 type SyncState struct {
@@ -130,6 +157,9 @@ type TelemetrySnapshot struct {
 	Alerts     json.RawMessage `json:"alerts,omitempty"`
 	Baseline   json.RawMessage `json:"baseline,omitempty"`
 	Rules      json.RawMessage `json:"rules,omitempty"`
+	BatchID    string          `json:"batch_id,omitempty"`
+	Sequence   int64           `json:"sequence,omitempty"`
+	Checksum   string          `json:"checksum,omitempty"`
 }
 
 type AnalysisJob struct {

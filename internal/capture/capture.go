@@ -292,6 +292,29 @@ func (e *Engine) Stop() {
 	}
 }
 
+// StopAndWait stops the active capture session and waits until Start has
+// completely released its running flag. Stop itself is intentionally
+// asynchronous, so callers that immediately start a new session (notably the
+// PCAP analysis workflow) must use this helper to avoid racing the old Start
+// goroutine and receiving "capture already running".
+func (e *Engine) StopAndWait(timeout time.Duration) error {
+	e.Stop()
+
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+
+	deadline := time.Now().Add(timeout)
+	for e.IsRunning() {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("capture did not stop within %s", timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	return nil
+}
+
 // IsRunning reports whether a capture session is currently active.
 func (e *Engine) IsRunning() bool {
 	return e.running.Load()
