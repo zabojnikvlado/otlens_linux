@@ -111,3 +111,11 @@ type OutOfRangeValue struct {
 	MaxValue any
 	Value    any
 }
+
+
+// Event is the envelope published through the in-process EventBus.
+type Event struct {
+	Type EventType
+	Timestamp time.Time
+	Data any
+}
