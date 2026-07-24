@@ -276,6 +276,18 @@ type CentralConfig struct {
 			ServerName         string `mapstructure:"server_name"`
 		} `mapstructure:"tls"`
 	} `mapstructure:"siem"`
+	Sensors struct {
+		// OfflineAfter — a sensor whose last heartbeat is older than this
+		// is marked "offline" in the Sensors tab. Heartbeats normally
+		// arrive every sensor.central.interval (30s by default), so this
+		// should be a few multiples of that, not equal to it, to tolerate
+		// a couple of missed/slow syncs without flapping the status.
+		OfflineAfter time.Duration `mapstructure:"offline_after"`
+		// CheckInterval is how often Central re-evaluates every sensor's
+		// last heartbeat against OfflineAfter. See main.go's offline-sweep
+		// goroutine.
+		CheckInterval time.Duration `mapstructure:"check_interval"`
+	} `mapstructure:"sensors"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -329,6 +341,8 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("siem.tls.client_cert_file", "")
 	v.SetDefault("siem.tls.client_key_file", "")
 	v.SetDefault("siem.tls.server_name", "")
+	v.SetDefault("sensors.offline_after", 90*time.Second)
+	v.SetDefault("sensors.check_interval", 20*time.Second)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)

@@ -298,6 +298,9 @@ type topologyEdge struct {
 	SensorID  string `json:"SensorID"`
 	SrcNodeID string `json:"SrcNodeID"`
 	DstNodeID string `json:"DstNodeID"`
+	// FlowCount is how many distinct flows (protocol/port combinations)
+	// were aggregated into this single visual edge. See aggregateEdges.
+	FlowCount int `json:"FlowCount"`
 }
 
 // buildTopologyResponse fetches every sensor's stored topology JSONB and
@@ -330,19 +333,109 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 				IsHoneypot:        n.Score >= sensorThreshold,
 			})
 		}
-		for _, e := range graph.Edges {
-			srcIP, dstIP := e.SrcIP, e.DstIP
-			e.ID = prefix + e.ID
+		for _, edge := range aggregateEdges(graph.Edges) {
+			srcIP, dstIP := edge.SrcIP, edge.DstIP
+			edge.ID = prefix + edge.ID
 			edges = append(edges, topologyEdge{
-				Edge:      e,
+				Edge:      edge.Edge,
 				SensorID:  row.SensorID,
 				SrcNodeID: prefix + srcIP,
 				DstNodeID: prefix + dstIP,
+				FlowCount: edge.FlowCount,
 			})
 		}
 	}
 	return json.Marshal(gin.H{"Nodes": nodes, "Edges": edges, "HoneypotThreshold": 100})
 }
+
+// aggregatedEdge pairs a topology.Edge with how many raw flows were folded
+// into it, for display ("N flows" in the tooltip) without needing to keep
+// every individual flow around.
+type aggregatedEdge struct {
+	topology.Edge
+	FlowCount int
+}
+
+// aggregateEdges folds every flow between the same two assets into one
+// visual edge. A sensor's raw graph has one Edge per underlying flow.Flow,
+// and flow.Flow is keyed on protocol+both ports — so a single chatty asset
+// pair (an HMI polling a PLC over several sessions, a workstation with many
+// ephemeral client ports to a server, etc.) can otherwise produce dozens of
+// parallel edges between the exact same two nodes. On a busy network this
+// inflates edge count far more than the actual number of devices does, and
+// is what actually makes a "large network" graph feel slow — so the
+// Topology tab draws one edge per asset pair, with the underlying flow
+// count/aggregated traffic available in the edge's tooltip.
+//
+// Direction (SrcIP/DstIP) is arbitrary per individual flow — flowKey folds
+// both directions of a conversation into one record, so which side ended
+// up as SrcIP just reflects whichever packet happened to create it first.
+// That's harmless for most fields (VLAN mismatch, OT classification, byte
+// counts don't care which side is "src"), but it does matter for
+// FromHoneypot: that flag specifically means "the honeypot initiated this",
+// so once we've seen a flow where it's true, its Src/DstIP (the honeypot as
+// SrcIP) is kept as the aggregated edge's direction rather than being
+// overwritten by some later, direction-arbitrary non-honeypot flow.
+func aggregateEdges(flows []topology.Edge) []aggregatedEdge {
+	type bucket struct {
+		edge      topology.Edge
+		protocols map[string]bool
+		count     int
+	}
+	order := make([]string, 0, len(flows))
+	buckets := make(map[string]*bucket, len(flows))
+	for _, f := range flows {
+		lo, hi := f.SrcIP, f.DstIP
+		if hi < lo {
+			lo, hi = hi, lo
+		}
+		key := lo + "|" + hi
+
+		b, ok := buckets[key]
+		if !ok {
+			b = &bucket{edge: f, protocols: map[string]bool{}}
+			buckets[key] = b
+			order = append(order, key)
+		}
+		b.protocols[f.Protocol] = true
+		b.count++
+
+		if f.IsOT {
+			b.edge.IsOT = true
+		}
+		if f.FromHoneypot && !b.edge.FromHoneypot {
+			// First honeypot-initiated flow seen for this pair — lock in
+			// its direction so later flows can't overwrite it.
+			b.edge.SrcIP, b.edge.DstIP = f.SrcIP, f.DstIP
+		}
+		if f.FromHoneypot {
+			b.edge.FromHoneypot = true
+		}
+		b.edge.Packets += f.Packets
+		b.edge.Bytes += f.Bytes
+		if b.edge.FirstSeen.IsZero() || (!f.FirstSeen.IsZero() && f.FirstSeen.Before(b.edge.FirstSeen)) {
+			b.edge.FirstSeen = f.FirstSeen
+		}
+		if f.LastSeen.After(b.edge.LastSeen) {
+			b.edge.LastSeen = f.LastSeen
+		}
+	}
+
+	out := make([]aggregatedEdge, 0, len(order))
+	for _, key := range order {
+		b := buckets[key]
+		protocols := make([]string, 0, len(b.protocols))
+		for p := range b.protocols {
+			protocols = append(protocols, p)
+		}
+		sort.Strings(protocols)
+		b.edge.ID = "agg:" + key
+		b.edge.Protocol = strings.Join(protocols, ", ")
+		out = append(out, aggregatedEdge{Edge: b.edge, FlowCount: b.count})
+	}
+	return out
+}
+
 
 // topologyFingerprint hashes every sensor's telemetry sequence number into
 // a single stable string. It changes if and only if at least one sensor

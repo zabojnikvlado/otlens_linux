@@ -60,6 +60,26 @@ func main() {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	go exporter.Run(workerCtx)
+
+	// Nothing else flips a sensor's status away from whatever it last
+	// reported in a heartbeat — if a sensor's process dies, its host loses
+	// power, or the network to it drops, Central would otherwise show it
+	// as "online" forever. This sweep is what makes the Sensors tab
+	// actually reflect reality once a sensor stops checking in.
+	go func() {
+		ticker := time.NewTicker(cfg.Sensors.CheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-ticker.C:
+				if err := repo.MarkOffline(workerCtx, cfg.Sensors.OfflineAfter); err != nil {
+					log.Printf("mark stale sensors offline: %v", err)
+				}
+			}
+		}
+	}()
 	webAddr := fmt.Sprintf("%s:%d", cfg.Web.Host, cfg.Web.Port)
 	sensorAddr := fmt.Sprintf("%s:%d", cfg.SensorAPI.Host, cfg.SensorAPI.Port)
 	log.Printf("OTLens Central web/API listener: %s", webAddr)

@@ -99,6 +99,17 @@ siem:
     # Optional TLS SNI/certificate name override.
     server_name: ""
 
+# A sensor is shown "online" from registration/heartbeat until Central
+# hasn't heard from it for offline_after, at which point it's flipped to
+# "offline" — checked every check_interval. Sensors sync (and therefore
+# heartbeat) every sensor.central.interval, 30s by default; offline_after
+# should be a few multiples of whatever that's actually set to on your
+# sensors, not equal to it, so one slow/missed sync doesn't flap the
+# status.
+sensors:
+  offline_after: 90s
+  check_interval: 20s
+
 analysis:
   enabled: true
   upload_directory: "./data/pcap-uploads"

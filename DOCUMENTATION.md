@@ -41,6 +41,7 @@ Sensors open only the configured capture interface or IPFIX UDP listener. They c
 - Data Management and backups
 - SIEM outbox/export
 - audit of management mutations
+- periodic sweep marking sensors offline once their heartbeat goes stale (`sensors.offline_after`/`sensors.check_interval`, see Configuration)
 
 ## Configuration
 
@@ -64,6 +65,8 @@ Sensor reset and backup commands are delivered through the command queue. A stop
 ## UI
 
 The only supported UI is `web/central`. It includes Sensors, Topology, Assets, OT Tags, Alerts, Rules, Analysis and Data Management. Tables support sorting and page sizes 10, 50, 100 and All.
+
+The Topology tab draws one edge per asset pair, not one per underlying flow — a sensor's raw graph has a separate flow per protocol/port combination, so a single busy pair (e.g. an HMI polling a PLC over several sessions) could otherwise produce dozens of parallel lines between the same two nodes. Central's `/topology` handler aggregates these server-side (see `aggregateEdges` in `internal/central/server.go`); the aggregated edge's tooltip shows the flow count and combined traffic.
 
 ## Security boundaries
 
