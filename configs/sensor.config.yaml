@@ -1,0 +1,189 @@
+app:
+  name: OTLens
+  version: 0.1.0
+
+# Raw stdout dump of every parsed packet/ICS message — only useful
+# for verifying capture/parsing against real traffic during initial
+# setup. Leave false for any running deployment: it's unstructured,
+# unconditional-volume console output (one line per packet), and the
+# Central UI provides the structured operational view.
+# Outbound connection from this headless Linux sensor to Windows Central.
+# Central must expose its Sensor API listener (normally port 9443).
+central:
+  enabled: true
+  # Base URL of the Central Sensor API. Do not include /v1.
+  url: "https://central.example.local:9443"
+  # Stable unique identifier for this sensor.
+  sensor_id: "sensor-001"
+  # Human-readable labels shown in the Central UI.
+  name: "Production Line 1"
+  site_id: "site-001"
+  # Must match auth.sensor_token in central.config.yaml. Prefer the
+  # OTLENS_CENTRAL_TOKEN environment variable in production.
+  token: "CHANGE_SENSOR_TOKEN"
+  # Registration, heartbeat, command polling, rule sync, telemetry,
+  # and PCAP job polling run on this synchronization interval.
+  interval: 30s
+  timeout: 15s
+  # Testing only. Keep false when Central uses a trusted certificate.
+  insecure_skip_verify: false
+
+debug:
+  enabled: false
+
+capture:
+  # Data source: "pcap" (live packet capture — needs Npcap/libpcap
+  # installed and admin/root rights) or "ipfix" (receive flow records
+  # exported by a router/switch/probe over UDP — no local capture
+  # privileges needed at all). IMPORTANT: ipfix only sees flow-level
+  # summaries (addresses, ports, packet/byte counts) — it never
+  # carries packet payload or MAC addresses, so Modbus/S7comm
+  # decoding, ARP spoofing detection, and MAC-based asset identity
+  # are all unavailable in ipfix mode. Everything below "interface"
+  # through "bpffilter" only applies in pcap mode.
+  mode: pcap
+
+  # Can be either the friendly description shown by `interfaces` tool
+  # (e.g. "Ethernet") or the raw pcap device name
+  # (e.g. \Device\NPF_{GUID} on Windows, eth0 on Linux).
+  #
+  # NOTE: this is a plain (unquoted) YAML scalar, so backslashes are
+  # NOT escape characters here — write a single backslash, not \\.
+  # (If you prefer quotes: single quotes also take it literally,
+  # e.g. '\Device\NPF_{GUID}'; double quotes DO require \\ escaping.)
+  interface: \Device\NPF_{4756D65C-AD35-43AF-89F4-193BEFEC3AF9}
+  snaplen: 1600
+  promiscuous: true
+  # Optional BPF filter, e.g. "tcp or udp" to skip non-IP noise like STP/LLDP.
+  bpffilter: "ip or arp"
+
+  ipfix:
+    # UDP address to receive IPFIX export packets on. 4739 is IPFIX's
+    # IANA-assigned default port; point your router/switch/probe's
+    # flow-export configuration at this host:port. Only used when
+    # mode: ipfix.
+    listenaddr: "0.0.0.0:4739"
+
+ics:
+  # Set non-standard ports when required. 0 or omitted uses the
+  # protocol default. PROFINET DCP is Layer 2 and has no port.
+  modbusport: 502
+  s7port: 102
+  ethernetipport: 44818
+  dnp3port: 20000
+  opcuaport: 4840
+  bacnetport: 47808
+  iec104port: 2404
+
+baseline:
+  # Whether the learning phase runs at all. true (default): learn
+  # "normal" for learningduration below before alerting on anything
+  # new. false: skip learning entirely — the engine starts directly
+  # in monitoring mode with nothing pre-approved, so every device and
+  # every communication is flagged as new right from the very first
+  # packet (new_asset / new_communication alerts, red topology
+  # highlighting) until manually confirmed. Set this false if the
+  # network's normal baseline is already known/trusted and there's no
+  # reason to wait out a learning window before real alerting starts.
+  enabled: true
+
+  # How long to learn "normal" asset-to-asset communication before
+  # raising alerts for anything not seen during this window. Go
+  # duration syntax, e.g. "10m", "1h", "24h". Only used when enabled
+  # is true. Keep this short (e.g. 10m) while testing so you don't
+  # have to wait an hour to see /alerts populate with
+  # new_communication findings.
+  learningduration: 10m
+
+# Deliberately-planted decoy/honeypot stations, for lateral-movement
+# detection. Nothing legitimate should ever have a real reason to
+# talk to or from a genuine honeypot — any traffic touching one is
+# inherently suspicious, giving a very low-false-positive signal
+# compared to baseline learning's "this is new" alerts. Also usable
+# more generally: assign a higher score to any asset (not just an
+# actual honeypot) to weight it as more critical.
+deception:
+  # Score at or above which a station counts as a honeypot for
+  # alerting purposes (see stations below) — not just "somewhat more
+  # important than usual."
+  honeypotthreshold: 100
+
+  stations: []
+    # - ip: "192.168.1.99"
+    #   score: 100
+
+detect:
+  # How many consecutive conflicting ARP claims for the same IP are
+  # required before treating the new MAC as the legitimate mapping
+  # (debounces against a single stray/retransmitted packet). Lower is
+  # more sensitive (faster alerts, more false positives from normal
+  # DHCP/NIC changes); higher is slower to alert but more tolerant of
+  # transient noise.
+  arpconfirmthreshold: 3
+
+store:
+  # Safety caps on the value-change/control-event history kept in
+  # memory between prune passes — on top of, not instead of,
+  # persist.retention's time-based pruning below.
+  maxvaluechanges: 1000
+  maxcontrolevents: 1000
+
+persist:
+  # Path to the local SQLite database file. Assets, flows, tags, and alerts
+  # are periodically snapshotted here so a restart doesn't lose
+  # everything and baseline learning doesn't start over from scratch.
+  path: otlens.sqlite
+  # How often to flush current state to disk. Go duration syntax.
+  flushinterval: 10s
+  # How long to keep records (based on last-seen time) before they're
+  # pruned from both memory and disk, so the database file doesn't
+  # grow forever. Go duration syntax, e.g. "168h" (7 days), "720h"
+  # (30 days). Set to "0" to disable pruning and keep everything —
+  # not recommended long-term, especially for /flows, which grows
+  # with every new client connection's ephemeral port.
+  retention: 168h
+
+oui:
+  # Optional: path to the official IEEE MA-L registry CSV
+  # (https://standards-oui.ieee.org/oui/oui.csv — public, no account
+  # needed) for full MAC-address vendor identification, including
+  # OT/ICS vendors. Leave empty to use only the small built-in seed
+  # list (VMware, VirtualBox, Hyper-V, Xen, QEMU/KVM, Raspberry Pi) —
+  # see internal/oui/oui.go for why it's deliberately minimal rather
+  # than guessing at OT/ICS vendor prefixes without the real
+  # registry. Devices with a "locally administered" MAC (virtual
+  # NICs or OS-randomized addresses) are identified as such even
+  # without a database entry.
+  csvpath: ""
+
+logging:
+  # "debug", "info", "warn", or "error" — same level names zap itself
+  # uses.
+  level: debug
+  # Where log lines are written — any combination of "stdout",
+  # "stderr", or a file path. Console-only (stderr) by default;
+  # uncomment/add a file path below if you're running this as a
+  # background service with no visible console, or just want logs to
+  # persist beyond the current session.
+  output:
+    - stderr
+    # - otlens.log
+
+  # In-process rotation for any file-path entries in output above
+  # (stdout/stderr are never rotated). Off by default, matching the
+  # original unbounded-growth behavior — turn this on if you add a
+  # file path above for long-term running. Also used by audit.path
+  # below, so the audit trail and the application log share the same
+  # rotation behavior.
+  rotation:
+    enabled: false
+    maxsizemb: 100      # rotate once the file reaches this size
+    maxbackups: 10       # keep at most this many rotated files (0 = unlimited)
+    maxagedays: 90        # delete rotated files older than this (0 = unlimited)
+    compress: true          # gzip rotated files
+
+# A separate, low-volume, high-importance trail of who did what
+# through the API — admin actions (database wipe, capture stop/
+# start, pcap analyze, asset confirm/delete, alert approve/confirm)
+# and failed authentication attempts — distinct from the routine
+# application log above. Off by default.

@@ -35,3 +35,12 @@ The Central config contains the PostgreSQL connection settings. The Sensor confi
 ## libpcap
 
 `capture.mode: pcap` requires libpcap 1.10.0 or newer on the Linux sensor. The version is checked from the linked runtime library during startup. `capture.mode: ipfix` does not require libpcap at runtime.
+
+## Ready-to-copy Linux sensor configuration
+
+`configs/sensor.config.yaml` contains the complete sensor configuration, including the outbound `central:` connection block. Copy it to the sensor's default location and edit the URL, sensor ID, and token:
+
+```bash
+sudo install -d -m 0750 /etc/otlens
+sudo install -m 0640 configs/sensor.config.yaml /etc/otlens/config.yaml
+```
