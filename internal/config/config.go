@@ -431,6 +431,21 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.Central.Enabled {
+		if strings.TrimSpace(cfg.Central.URL) == "" {
+			return nil, fmt.Errorf("central.url must not be empty when central.enabled is true")
+		}
+		if strings.TrimSpace(cfg.Central.SensorID) == "" {
+			return nil, fmt.Errorf("central.sensor_id must not be empty when central.enabled is true")
+		}
+		if strings.TrimSpace(cfg.Central.Token) == "" {
+			return nil, fmt.Errorf("central.token must not be empty when central.enabled is true")
+		}
+		if !strings.HasPrefix(cfg.Central.URL, "http://") && !strings.HasPrefix(cfg.Central.URL, "https://") {
+			return nil, fmt.Errorf("central.url must start with http:// or https://")
+		}
+	}
+
 	if cfg.Deception.HoneypotThreshold < 0 || cfg.Deception.HoneypotThreshold > 100 {
 		return nil, fmt.Errorf("deception.honeypotthreshold must be between 0 and 100, got %d", cfg.Deception.HoneypotThreshold)
 	}

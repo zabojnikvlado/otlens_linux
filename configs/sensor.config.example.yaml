@@ -7,6 +7,27 @@ app:
 # setup. Leave false for any running deployment: it's unstructured,
 # unconditional-volume console output (one line per packet), and the
 # Central UI provides the structured operational view.
+# Outbound connection from this headless Linux sensor to Windows Central.
+# Central must expose its Sensor API listener (normally port 9443).
+central:
+  enabled: true
+  # Base URL of the Central Sensor API. Do not include /v1.
+  url: "https://central.example.local:9443"
+  # Stable unique identifier for this sensor.
+  sensor_id: "sensor-001"
+  # Human-readable labels shown in the Central UI.
+  name: "Production Line 1"
+  site_id: "site-001"
+  # Must match auth.sensor_token in central.config.yaml. Prefer the
+  # OTLENS_CENTRAL_TOKEN environment variable in production.
+  token: "CHANGE_SENSOR_TOKEN"
+  # Registration, heartbeat, command polling, rule sync, telemetry,
+  # and PCAP job polling run on this synchronization interval.
+  interval: 30s
+  timeout: 15s
+  # Testing only. Keep false when Central uses a trusted certificate.
+  insecure_skip_verify: false
+
 debug:
   enabled: false
 

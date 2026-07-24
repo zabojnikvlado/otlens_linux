@@ -112,10 +112,10 @@ type OutOfRangeValue struct {
 	Value    any
 }
 
-
 // Event is the envelope published through the in-process EventBus.
+// Data contains the payload associated with Type.
 type Event struct {
-	Type EventType
+	Type      EventType
 	Timestamp time.Time
-	Data any
+	Data      any
 }
