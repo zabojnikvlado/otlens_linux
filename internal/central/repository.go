@@ -557,14 +557,18 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 	defer tx.Rollback()
 	switch operation {
 	case "telemetry", "database":
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_commands, analysis_jobs RESTART IDENTITY`)
+		// Telemetry reset must never remove configuration, rules, sensors,
+		// sites, pending management commands, SIEM data or backups.
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry RESTART IDENTITY`)
 	case "alerts":
-		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb`)
+		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
 	case "siem":
 		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
 	case "analysis":
 		_, err = tx.ExecContext(ctx, `TRUNCATE analysis_jobs RESTART IDENTITY`)
 	case "rules":
+		// Central rule assignments are configuration. This explicit reset is
+		// intentionally separate from telemetry/database reset.
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets CASCADE`)
 	case "factory":
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_commands, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets, sensors, sites RESTART IDENTITY CASCADE`)

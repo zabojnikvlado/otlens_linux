@@ -161,7 +161,10 @@ func (s *Server) SensorRouter() *gin.Engine {
 
 func (s *Server) telemetry(c *gin.Context) {
 	var x management.TelemetrySnapshot
-	if c.ShouldBindJSON(&x) != nil || x.SensorID == "" || len(x.Topology) == 0 || len(x.Tags) == 0 {
+	// Empty telemetry arrays are valid after a reset or on a newly deployed
+	// sensor. Requiring at least one topology node and one tag made Central
+	// reject the first post-reset snapshot and left the UI permanently empty.
+	if c.ShouldBindJSON(&x) != nil || strings.TrimSpace(x.SensorID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid telemetry snapshot"})
 		return
 	}
@@ -204,7 +207,13 @@ func (s *Server) tags(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	out := make([]map[string]interface{}, 0)
+
+	// The main OT Tags table represents current tag state, not individual
+	// observations. Keep one row per sensor + stable tag key. Older sensor
+	// versions could emit repeated entries for the same register, so Central
+	// also deduplicates defensively.
+	unique := make(map[string]map[string]interface{})
+	order := make([]string, 0)
 	for _, snapshot := range snapshots {
 		var tags []map[string]interface{}
 		if json.Unmarshal(snapshot.Tags, &tags) != nil {
@@ -212,8 +221,20 @@ func (s *Server) tags(c *gin.Context) {
 		}
 		for _, tag := range tags {
 			tag["SensorID"] = snapshot.SensorID
-			out = append(out, tag)
+			stableKey := strings.TrimSpace(fmt.Sprint(tag["Key"]))
+			if stableKey == "" {
+				stableKey = fmt.Sprintf("%v|%v|%v|%v|%v", tag["DeviceIP"], tag["DevicePort"], tag["Protocol"], tag["AddressSpace"], tag["Address"])
+			}
+			key := snapshot.SensorID + "::" + stableKey
+			if _, exists := unique[key]; !exists {
+				order = append(order, key)
+			}
+			unique[key] = tag
 		}
+	}
+	out := make([]map[string]interface{}, 0, len(order))
+	for _, key := range order {
+		out = append(out, unique[key])
 	}
 	c.JSON(http.StatusOK, out)
 }
