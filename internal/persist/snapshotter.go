@@ -354,7 +354,21 @@ func (s *Snapshotter) Close() error {
 
 func (s *Snapshotter) Reset(operation string) error {
 	switch operation {
-	case "database", "factory":
+	case "database":
+		// Clear all observed data, including records learned from imported
+		// PCAP files, but preserve detection-rule configuration.
+		s.assetEngine.Restore(nil)
+		s.flowEngine.Restore(nil)
+		s.storeEngine.RestoreTags(nil)
+		s.storeEngine.RestoreValueChanges(nil)
+		s.storeEngine.RestoreControlEvents(nil)
+		s.detectEngine.RestoreAlerts(nil)
+		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.RestoreKnownMAC(map[string]string{})
+	case "factory":
+		// Factory data reset additionally removes custom/managed rules.
+		// Built-in rules remain because RestoreRules(nil) only removes
+		// managed custom rules and leaves the built-in seed intact.
 		s.assetEngine.Restore(nil)
 		s.flowEngine.Restore(nil)
 		s.storeEngine.RestoreTags(nil)
@@ -377,7 +391,52 @@ func (s *Snapshotter) Reset(operation string) error {
 		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
 		s.detectEngine.RestoreKnownMAC(map[string]string{})
 	case "analysis":
-		return nil
+		// Remove records that still originate exclusively from imported
+		// PCAP analysis while retaining anything subsequently observed live.
+		assets := s.assetEngine.GetAll()
+		liveAssets := assets[:0]
+		for _, item := range assets {
+			if item != nil && !item.FromAnalysis {
+				liveAssets = append(liveAssets, item)
+			}
+		}
+		s.assetEngine.Restore(liveAssets)
+
+		flows := s.flowEngine.GetAll()
+		liveFlows := flows[:0]
+		for _, item := range flows {
+			if item != nil && !item.FromAnalysis {
+				liveFlows = append(liveFlows, item)
+			}
+		}
+		s.flowEngine.Restore(liveFlows)
+
+		tags := s.storeEngine.GetTags()
+		liveTags := tags[:0]
+		for _, item := range tags {
+			if item != nil && !item.FromAnalysis {
+				liveTags = append(liveTags, item)
+			}
+		}
+		s.storeEngine.RestoreTags(liveTags)
+
+		changes := s.storeEngine.GetValueChanges()
+		liveChanges := changes[:0]
+		for _, item := range changes {
+			if !item.FromAnalysis {
+				liveChanges = append(liveChanges, item)
+			}
+		}
+		s.storeEngine.RestoreValueChanges(liveChanges)
+
+		events := s.storeEngine.GetControlEvents()
+		liveEvents := events[:0]
+		for _, item := range events {
+			if !item.FromAnalysis {
+				liveEvents = append(liveEvents, item)
+			}
+		}
+		s.storeEngine.RestoreControlEvents(liveEvents)
 	default:
 		return fmt.Errorf("unsupported reset operation %q", operation)
 	}

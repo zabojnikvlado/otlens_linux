@@ -571,7 +571,11 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// intentionally separate from telemetry/database reset.
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets CASCADE`)
 	case "factory":
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_commands, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets, sensors, sites RESTART IDENTITY CASCADE`)
+		// Preserve the sensor registry and sensor_commands long enough for
+		// connected sensors to receive sensor.factory.reset. Deleting those
+		// rows here made the reset command disappear before the next sync and
+		// the sensor immediately uploaded all old telemetry again.
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}

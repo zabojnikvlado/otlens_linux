@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,13 +189,21 @@ func (s *Server) assets(c *gin.Context) {
 	out := make([]map[string]interface{}, 0)
 	for _, snapshot := range snapshots {
 		var graph struct {
-			Nodes []map[string]interface{} `json:"Nodes"`
+			Nodes             []map[string]interface{} `json:"Nodes"`
+			HoneypotThreshold int                      `json:"HoneypotThreshold"`
 		}
 		if json.Unmarshal(snapshot.Topology, &graph) != nil {
 			continue
 		}
+		threshold := graph.HoneypotThreshold
+		if threshold <= 0 {
+			threshold = 100
+		}
 		for _, node := range graph.Nodes {
 			node["SensorID"] = snapshot.SensorID
+			score, _ := strconv.Atoi(fmt.Sprint(node["Score"]))
+			node["HoneypotThreshold"] = threshold
+			node["IsHoneypot"] = score >= threshold
 			out = append(out, node)
 		}
 	}
@@ -247,7 +256,7 @@ func (s *Server) topology(c *gin.Context) {
 	}
 	nodes := make([]map[string]interface{}, 0)
 	edges := make([]map[string]interface{}, 0)
-	threshold := 10
+	threshold := 100
 	for _, snapshot := range snapshots {
 		var graph struct {
 			Nodes             []map[string]interface{} `json:"Nodes"`
@@ -257,13 +266,17 @@ func (s *Server) topology(c *gin.Context) {
 		if json.Unmarshal(snapshot.Topology, &graph) != nil {
 			continue
 		}
-		if graph.HoneypotThreshold > threshold {
-			threshold = graph.HoneypotThreshold
+		sensorThreshold := graph.HoneypotThreshold
+		if sensorThreshold <= 0 {
+			sensorThreshold = 100
 		}
 		prefix := snapshot.SensorID + "::"
 		for _, node := range graph.Nodes {
 			node["ID"] = prefix + fmt.Sprint(node["ID"])
 			node["SensorID"] = snapshot.SensorID
+			score, _ := strconv.Atoi(fmt.Sprint(node["Score"]))
+			node["HoneypotThreshold"] = sensorThreshold
+			node["IsHoneypot"] = score >= sensorThreshold
 			nodes = append(nodes, node)
 		}
 		for _, edge := range graph.Edges {
@@ -855,11 +868,40 @@ func (s *Server) resetData(c *gin.Context) {
 	}
 	switch strings.ToLower(req.Scope) {
 	case "central":
-		if err := s.Repo.ResetCentral(c, strings.ToLower(req.Operation)); err != nil {
+		op := strings.ToLower(strings.TrimSpace(req.Operation))
+
+		// Central stores snapshots uploaded by sensors. Clearing PostgreSQL
+		// alone is temporary: on the next sync every sensor uploads its still
+		// populated SQLite snapshot and all data reappears. Queue the matching
+		// sensor-side reset first, while preserving sensor_commands in the
+		// repository reset, so the deletion is durable across the whole system.
+		commandByOperation := map[string]string{
+			"telemetry": "sensor.database.reset",
+			"database":  "sensor.database.reset",
+			"alerts":    "sensor.alerts.reset",
+			"analysis":  "sensor.analysis.reset",
+			"factory":   "sensor.factory.reset",
+		}
+		queued := 0
+		if command, ok := commandByOperation[op]; ok {
+			sensors, err := s.Repo.ListSensors(c)
+			if err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+			for _, sensor := range sensors {
+				if err := s.Repo.QueueCommands(c, sensor.ID, command, []string{sensor.ID}); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+				queued++
+			}
+		}
+		if err := s.Repo.ResetCentral(c, op); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(200, gin.H{"status": "completed", "scope": "central", "operation": req.Operation})
+		c.JSON(202, gin.H{"status": "reset_queued", "scope": "central", "operation": op, "sensors": queued})
 	case "sensors":
 		if len(req.SensorIDs) == 0 {
 			c.JSON(400, gin.H{"error": "sensor_ids are required"})
