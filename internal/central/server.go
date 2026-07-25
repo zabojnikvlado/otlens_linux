@@ -455,9 +455,11 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 		}
 		prefix := row.SensorID + "::"
 		liveIPs := make(map[string]bool, len(graph.Nodes))
+		seenIDs := make(map[string]bool, len(graph.Nodes))
 		for _, n := range graph.Nodes {
 			liveIPs[n.IP] = true
 			n.ID = prefix + n.ID
+			seenIDs[n.ID] = true
 			nodes = append(nodes, topologyNode{
 				Node:              n,
 				SensorID:          row.SensorID,
@@ -484,8 +486,23 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 			if id == "" {
 				id = "ip:" + rec.IP
 			}
+			fullID := prefix + id
+			// A device that changed IP over time (DHCP renewal etc.) has one
+			// topology_nodes row per IP it's ever had, all sharing the same
+			// MAC — without this check, every one of those old-IP rows would
+			// produce the *same* node id (MAC-derived), and vis.DataSet
+			// throws on the frontend the moment a second item with an
+			// already-used id is added. Only the first (most recently
+			// upserted, since ListTopologyNodes has no defined order beyond
+			// that) stale IP per MAC gets a node; edges tied to any other
+			// now-superseded IP for that same device won't resolve to a
+			// node until that IP is seen live again.
+			if seenIDs[fullID] {
+				continue
+			}
+			seenIDs[fullID] = true
 			ledgerNode := topology.Node{
-				ID: prefix + id, IP: rec.IP, MAC: rec.MAC, Hostname: rec.Hostname, Vendor: rec.Vendor,
+				ID: fullID, IP: rec.IP, MAC: rec.MAC, Hostname: rec.Hostname, Vendor: rec.Vendor,
 				IsOT: rec.IsOT, Protocols: splitProtocols(rec.Protocols), Confirmed: rec.Confirmed,
 				Score: rec.Score, VLANID: rec.VLANID, FirstSeen: rec.FirstSeen, LastSeen: rec.LastSeen,
 				PacketCount: rec.PacketCount,

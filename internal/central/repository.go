@@ -331,8 +331,8 @@ func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) erro
  status=$4,version=$2,hostname=$3,go_version=$5,libpcap_version=$6,gopacket_version=$7,
  capture_backend=$8,capture_interface=$9,capture_snaplen=$10,capture_promiscuous=$11,last_seen=NOW(),last_heartbeat_at=NOW(),
  last_sync_attempt_at=NULLIF($12, '0001-01-01'::timestamptz),last_sync_success_at=NULLIF($13, '0001-01-01'::timestamptz),
- pending_records=$14,sync_failures=$15,last_sync_error=$16,sync_sequence=$17,
- sync_status=CASE WHEN $15>0 AND $14>0 THEN 'stalled' WHEN $15>0 THEN 'error' WHEN $14>0 THEN 'pending' ELSE 'healthy' END
+ pending_records=$14::bigint,sync_failures=$15::integer,last_sync_error=$16,sync_sequence=$17,
+ sync_status=CASE WHEN $15::integer>0 AND $14::bigint>0 THEN 'stalled' WHEN $15::integer>0 THEN 'error' WHEN $14::bigint>0 THEN 'pending' ELSE 'healthy' END
  WHERE id=$1`, h.SensorID, h.Version, h.Hostname, status,
 		stringValue(h.Versions, "go"), stringValue(h.Versions, "libpcap"), stringValue(h.Versions, "gopacket"),
 		toString(interfaceValue("backend")), toString(interfaceValue("interface")), toInt32(interfaceValue("snaplen")), toBool(interfaceValue("promiscuous")),

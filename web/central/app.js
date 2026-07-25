@@ -76,21 +76,27 @@ function positionNewTopologyNodes(newIds,edges){
 }
 function renderTopology(){
   const rawNodes=graph.Nodes||[],rawEdges=graph.Edges||[],dense=rawNodes.length>80||rawEdges.length>160;
-  const ns=rawNodes.map(n=>{
+  // vis.DataSet throws on any duplicate id rather than just ignoring the
+  // repeat — one bad record would otherwise take the whole tab down. Central
+  // shouldn't ever send duplicates (see buildTopologyResponse's own
+  // dedup), but this is a cheap, harmless safety net either way: keeps
+  // the first occurrence, drops the rest.
+  const dedupeById=arr=>{const seen=new Set();return arr.filter(x=>seen.has(x.id)?false:(seen.add(x.id),true))};
+  const ns=dedupeById(rawNodes.map(n=>{
     const item=node(n),cached=topologyPositionCache.get(item.id);
     if(cached){item.x=cached.x;item.y=cached.y}
     if(dense&&!n.IsHoneypot&&n.Confirmed!==false)item.font={...item.font,size:11};
     return item;
-  }),
+  })),
         ip=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n.ID])),
         nodeByIP=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n]));
-  const es=rawEdges.map(e=>{
+  const es=dedupeById(rawEdges.map(e=>{
     const src=nodeByIP.get(e.SensorID+'::'+e.SrcIP),dst=nodeByIP.get(e.SensorID+'::'+e.DstIP),
           interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot,
           label=lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(!dense&&e.IsOT?e.Protocol:'');
     const flowNote=e.FlowCount>1?` (${e.FlowCount} flows aggregated, ${e.Packets||0} pkts)`:'';
     return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:(lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
-  }).filter(e=>e.from!=null&&e.to!=null);
+  }).filter(e=>e.from!=null&&e.to!=null));
   if(!network){
     ns.forEach(n=>topologyNodeSigCache.set(n.id,nodeSignature(n)));
     es.forEach(e=>topologyEdgeSigCache.set(e.id,edgeSignature(e)));
