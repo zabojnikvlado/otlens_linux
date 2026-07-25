@@ -84,6 +84,27 @@ func upsertTopologyEdges(ctx context.Context, x execer, sensorID string, edges [
 	return nil
 }
 
+// ListTopologyEdges returns every pair ever recorded for a sensor —
+// this is what the /topology handler draws from instead of the sensor's
+// current (pruned) live snapshot, so a connection drawn once stays on
+// the map even after the sensor itself has aged the underlying flow out.
+func (r *Repository) ListTopologyEdges(ctx context.Context, sensorID string) ([]topologyEdgeRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT src_ip,dst_ip,protocols,is_ot,from_honeypot,vlan_id,packets,bytes,flow_count,first_seen,last_seen FROM topology_edges WHERE sensor_id=$1`, sensorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]topologyEdgeRecord, 0)
+	for rows.Next() {
+		var e topologyEdgeRecord
+		if err := rows.Scan(&e.SrcIP, &e.DstIP, &e.Protocol, &e.IsOT, &e.FromHoneypot, &e.VLANID, &e.Packets, &e.Bytes, &e.FlowCount, &e.FirstSeen, &e.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // topologyNodeRecord is one row of topology_nodes — see that table's
 // doc comment in the embedded schema.
 type topologyNodeRecord struct {
