@@ -139,6 +139,20 @@ func (s *Server) WebRouter() *gin.Engine {
 	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/ui/") })
 	r.GET("/ui", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/ui/") })
 	if info, err := os.Stat(webDir); err == nil && info.IsDir() {
+		// Go's default static file server sets Last-Modified/ETag but no
+		// Cache-Control, which leaves it up to each browser's own
+		// heuristics whether to even ask before reusing a cached copy —
+		// in practice that can mean a redeployed style.css/app.js sits
+		// stale in someone's browser indefinitely. no-cache forces a
+		// revalidation request on every load; the server still answers
+		// with a fast 304 when the file genuinely hasn't changed, so this
+		// costs a round trip, not a re-download, for the common case.
+		r.Use(func(c *gin.Context) {
+			if strings.HasPrefix(c.Request.URL.Path, "/ui/") {
+				c.Header("Cache-Control", "no-cache")
+			}
+			c.Next()
+		})
 		r.StaticFS("/ui", http.Dir(webDir))
 	} else {
 		r.GET("/ui/", func(c *gin.Context) {

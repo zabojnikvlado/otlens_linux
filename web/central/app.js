@@ -1,4 +1,58 @@
-const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[];let network,nodesDS,edgesDS;let topologySettling=false;const topologyPositionCache=new Map();const selected=new Set();
+const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[];let network,nodesDS,edgesDS;const topologyPositionCache=new Map();const selected=new Set();
+// Groups connected nodes together (assets that talk to each other end up
+// near each other, same visual intent as force-directed physics used to
+// give) without ever running a physics simulation: connected components
+// found via one BFS pass, each laid out as its own small internal grid,
+// components themselves packed left-to-right/wrapping into rows (shelf
+// packing) so there's no large empty gaps or clumps left to chance. All
+// O(n+m) — computed once, not re-simulated every frame — so it stays
+// responsive on a large network instead of physics grinding the page to
+// a halt.
+function computeClusterLayout(ids,edges){
+  const idSet=new Set(ids);
+  const adjacency=new Map(ids.map(id=>[id,[]]));
+  edges.forEach(e=>{
+    if(!idSet.has(e.from)||!idSet.has(e.to))return;
+    adjacency.get(e.from).push(e.to);
+    adjacency.get(e.to).push(e.from);
+  });
+  const visited=new Set(),components=[];
+  for(const id of ids){
+    if(visited.has(id))continue;
+    const stack=[id],comp=[];
+    visited.add(id);
+    while(stack.length){
+      const cur=stack.pop();
+      comp.push(cur);
+      for(const n of adjacency.get(cur)||[]){
+        if(!visited.has(n)){visited.add(n);stack.push(n)}
+      }
+    }
+    components.push(comp.sort());
+  }
+  components.sort((a,b)=>b.length-a.length||(a[0]<b[0]?-1:1));
+
+  const nodeSpacing=95,clusterMargin=70;
+  const maxRowWidth=Math.max(900,Math.sqrt(ids.length)*260);
+  const positions=new Map();
+  let cursorX=0,cursorY=0,rowHeight=0;
+  for(const comp of components){
+    const cols=Math.max(1,Math.ceil(Math.sqrt(comp.length))),rows=Math.ceil(comp.length/cols);
+    const width=cols*nodeSpacing,height=rows*nodeSpacing;
+    if(cursorX>0&&cursorX+width>maxRowWidth){cursorX=0;cursorY+=rowHeight+clusterMargin;rowHeight=0}
+    comp.forEach((id,i)=>{
+      const col=i%cols,row=Math.floor(i/cols);
+      positions.set(id,{x:cursorX+col*nodeSpacing,y:cursorY+row*nodeSpacing});
+    });
+    cursorX+=width+clusterMargin;
+    rowHeight=Math.max(rowHeight,height);
+  }
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  positions.forEach(p=>{minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y)});
+  const cx=(minX+maxX)/2||0,cy=(minY+maxY)/2||0;
+  positions.forEach(p=>{p.x-=cx;p.y-=cy});
+  return positions;
+}
 // Auth state — populated from GET /v1/me on boot and again right after
 // login. permissions.view drives which nav tabs are shown (server-side
 // requireView enforces the same thing, this just reflects it in the UI);
@@ -51,22 +105,23 @@ function positionNewTopologyNodes(newIds,edges){
   }
   const existingPositions=network.getPositions(nodesDS.getIds());
   const updates=[];
-  const total=Math.max(nodesDS.length,1);
-  const fallbackRadius=Math.max(260,Math.sqrt(total)*70);
-  newIds.forEach((id,index)=>{
+  // Unconnected new nodes (no edges yet) extend the existing grid rather
+  // than scattering in a radial ring — computed over every node so it
+  // lines up with whatever grid spacing/column count the rest of the map
+  // is already using, not just the newcomers.
+  const gridForAll=computeClusterLayout(nodesDS.getIds(),edges);
+  newIds.forEach(id=>{
     const linked=(neighbours.get(id)||[]).map(n=>existingPositions[n]||topologyPositionCache.get(n)).filter(Boolean);
-    const hash=topologyHash(id),angle=(hash%360)*Math.PI/180;
     let x,y;
     if(linked.length){
       const centre=linked.reduce((a,p)=>({x:a.x+p.x,y:a.y+p.y}),{x:0,y:0});
       centre.x/=linked.length;centre.y/=linked.length;
-      const radius=90+(hash%70);
+      const hash=topologyHash(id),angle=(hash%360)*Math.PI/180,radius=90+(hash%70);
       x=centre.x+Math.cos(angle)*radius;
       y=centre.y+Math.sin(angle)*radius;
     }else{
-      const ring=Math.floor(index/18)+1;
-      const radius=fallbackRadius+ring*100;
-      x=Math.cos(angle)*radius;y=Math.sin(angle)*radius;
+      const slot=gridForAll.get(id);
+      x=slot?slot.x:0;y=slot?slot.y:0;
     }
     topologyPositionCache.set(id,{x,y});
     updates.push({id,x,y,fixed:{x:false,y:false}});
@@ -92,24 +147,25 @@ function renderTopology(){
     return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:(lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#3fbfb0':'#64748b',opacity:dense&&!lateral&&!interVlan?.42:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
   }).filter(e=>e.from!=null&&e.to!=null);
   if(!network){
-    ns.forEach(n=>topologyNodeSigCache.set(n.id,nodeSignature(n)));
+    const gridPositions=computeClusterLayout(ns.map(n=>n.id),es);
+    ns.forEach(n=>{
+      if(n.x==null||n.y==null){const slot=gridPositions.get(n.id);if(slot){n.x=slot.x;n.y=slot.y}}
+      topologyPositionCache.set(n.id,{x:n.x,y:n.y});
+      topologyNodeSigCache.set(n.id,nodeSignature(n));
+    });
     es.forEach(e=>topologyEdgeSigCache.set(e.id,edgeSignature(e)));
     nodesDS=new vis.DataSet(ns);edgesDS=new vis.DataSet(es);
     network=new vis.Network(document.getElementById('graph'),{nodes:nodesDS,edges:edgesDS},{
       nodes:{shape:'dot',borderWidth:2},edges:{smooth:false,selectionWidth:1.5,hoverWidth:1.5},
-      physics:{enabled:true,solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:dense?-70:-115,centralGravity:.015,springLength:dense?115:155,springConstant:.055,damping:.72,avoidOverlap:1},minVelocity:.75,maxVelocity:22,timestep:.35,adaptiveTimestep:true,stabilization:{enabled:true,iterations:dense?500:320,updateInterval:40,fit:true}},
+      physics:{enabled:false},
       interaction:{hover:true,hideEdgesOnDrag:true,hideEdgesOnZoom:dense,multiselect:true},layout:{improvedLayout:true}
-    });
-    network.once('stabilized',()=>{
-      rememberTopologyPositions();
-      network.setOptions({physics:{enabled:false}});
-      topologySettling=false;
     });
     network.on('dragEnd',params=>{
       const ids=params.nodes&&params.nodes.length?params.nodes:nodesDS.getIds();
       const positions=network.getPositions(ids);
       Object.entries(positions).forEach(([id,p])=>topologyPositionCache.set(id,{x:p.x,y:p.y}));
     });
+    network.fit();
   }else{
     const oldIds=new Set(nodesDS.getIds()),nextIds=new Set(ns.map(n=>n.id));
     const newIds=ns.filter(n=>!oldIds.has(n.id)).map(n=>n.id);
