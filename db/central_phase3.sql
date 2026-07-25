@@ -203,3 +203,27 @@ CREATE TABLE IF NOT EXISTS topology_edges (
  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY (sensor_id, pair_key)
 );
+-- Companion to topology_edges, same reasoning: a sensor's live topology
+-- snapshot only ever contains its *current* assets (subject to the same
+-- persist.retention pruning as flows). Without this, an edge safely
+-- recorded in topology_edges becomes undrawable the moment either
+-- endpoint asset ages out of the live snapshot, since the frontend can
+-- only place an edge between two nodes it actually has — exactly the
+-- "the line was there, then it vanished" symptom this fixes. See
+-- upsertTopologyNodes/ListTopologyNodes in internal/central/topology_edges.go.
+CREATE TABLE IF NOT EXISTS topology_nodes (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ hostname TEXT NOT NULL DEFAULT '',
+ vendor TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ protocols TEXT NOT NULL DEFAULT '',
+ confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+ score INTEGER NOT NULL DEFAULT 1,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packet_count BIGINT NOT NULL DEFAULT 0,
+ first_seen TIMESTAMPTZ NOT NULL,
+ last_seen TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY (sensor_id, ip)
+);

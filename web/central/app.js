@@ -28,7 +28,7 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}return r.status===204||r.status===202?null:r.json()}
 function setConn(ok,t){document.getElementById('conn-dot').className='dot '+(ok?'ok':'down');document.getElementById('conn-text').textContent=t}
 document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;const enteringTopology=b.dataset.tab==='topology'&&!document.getElementById('view-topology').classList.contains('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30);if(enteringTopology)refreshAll()};
-function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase()}}
+function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase(),_vlan:Number(n.VLANID||0)}}
 function topologyHash(value){
   let h=2166136261;
   for(const ch of String(value)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}
@@ -132,9 +132,44 @@ function renderTopology(){
     positionNewTopologyNodes(newIds,es);
     rememberTopologyPositions();
   }
+  renderVlanFilter();
+  applyVlanFilter();
   applySearch();
 }
 function applySearch(){if(!network)return;const q=document.getElementById('topology-search-input').value.trim().toLowerCase();document.getElementById('topology-search-clear').hidden=!q;if(!q){network.unselectAll();document.getElementById('topology-search-status').textContent='';return}const ids=nodesDS.get().filter(n=>n._search.includes(q)).map(n=>n.id);network.selectNodes(ids);document.getElementById('topology-search-status').textContent=ids.length+' match(es)';if(ids.length===1)network.focus(ids[0],{scale:1.2,animation:true})}
+// VLAN filter — hiddenVlans holds the VLAN ids currently toggled OFF.
+// Empty set means "show everything" (the default). Persists across
+// polls/re-renders the same way topologyPositionCache does, so a filter
+// choice doesn't reset itself every 10s.
+const hiddenVlans=new Set();
+function vlanLabel(v){return v===0?'Untagged':'VLAN '+v}
+function renderVlanFilter(){
+  if(!nodesDS)return;
+  const present=[...new Set(nodesDS.get().map(n=>n._vlan??0))].sort((a,b)=>a-b);
+  const list=document.getElementById('vlan-filter-list');
+  if(!present.length){list.innerHTML='';return}
+  list.innerHTML=present.map(v=>{
+    const off=hiddenVlans.has(v);
+    return `<label class="vlan-chip ${off?'off':''}" data-vlan="${v}"><input type="checkbox" ${off?'':'checked'}> ${esc(vlanLabel(v))}</label>`;
+  }).join('');
+}
+function applyVlanFilter(){
+  if(!nodesDS)return;
+  const updates=nodesDS.get().filter(n=>Boolean(n.hidden)!==hiddenVlans.has(n._vlan??0)).map(n=>({id:n.id,hidden:hiddenVlans.has(n._vlan??0)}));
+  if(updates.length)nodesDS.update(updates);
+}
+document.getElementById('vlan-filter-list').addEventListener('click',e=>{
+  const chip=e.target.closest('.vlan-chip');
+  if(!chip)return;
+  e.preventDefault();
+  const v=Number(chip.dataset.vlan);
+  if(hiddenVlans.has(v))hiddenVlans.delete(v);else hiddenVlans.add(v);
+  chip.classList.toggle('off',hiddenVlans.has(v));
+  chip.querySelector('input').checked=!hiddenVlans.has(v);
+  applyVlanFilter();
+});
+document.getElementById('vlan-filter-all').onclick=()=>{hiddenVlans.clear();renderVlanFilter();applyVlanFilter()};
+document.getElementById('vlan-filter-none').onclick=()=>{if(!nodesDS)return;nodesDS.get().forEach(n=>hiddenVlans.add(n._vlan??0));renderVlanFilter();applyVlanFilter()};
 document.getElementById('topology-search-input').oninput=applySearch;document.getElementById('topology-search-clear').onclick=()=>{document.getElementById('topology-search-input').value='';applySearch()};
 function renderAssets(){const q=document.getElementById('assets-filter').value.toLowerCase(),data=assets.filter(a=>JSON.stringify(a).toLowerCase().includes(q));document.getElementById('assets-count').textContent=data.length+' assets';document.querySelector('#table-assets tbody').innerHTML=data.map(a=>`<tr class="asset-row ${a.Confirmed===false?'row-unconfirmed':''}" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}" data-vendor="${esc(a.Vendor||'')}" data-ip="${esc(a.IP||'')}"><td><input class="asset-check" type="checkbox" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}" ${selected.has(a.SensorID+'::'+a.MAC)?'checked':''}></td><td>${esc(a.SensorID)}</td><td>${esc(a.IP)}</td><td>${esc(a.MAC)}</td><td>${esc(a.Vendor)}</td><td>${esc(a.Hostname)}</td><td class="${a.Confirmed===false?'state-new':'state-ok'}">${a.Confirmed===false?'NEW / UNCONFIRMED':'confirmed'}</td><td>${a.IsOT?'OT':'IT'}</td><td>${esc((a.Protocols||[]).join(', '))}</td><td>${esc(a.VLANID||'untagged')}</td><td>${esc(a.Score??1)}</td><td>${(a.IsHoneypot===true||Number(a.Score??1)>=Number(a.HoneypotThreshold??100))?'<span class="pill honeypot">HONEYPOT</span>':Number(a.Score??1)>=75?'<span class="pill severity-high">CRITICAL</span>':Number(a.Score??1)>=40?'<span class="pill severity-medium">ELEVATED</span>':'standard'}</td><td>${esc(a.PacketCount)}</td><td>${time(a.LastSeen)}</td><td>${a.Confirmed===false&&can('asset_confirm_delete')?`<button class="ack-btn confirm-one" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}">Confirm</button>`:a.Confirmed===false?'pending':'—'}</td></tr>`).join('');updateBulk()}
 function updateBulk(){const on=selected.size>0;document.querySelectorAll('.bulk').forEach(b=>b.hidden=!on)}

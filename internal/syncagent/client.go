@@ -44,6 +44,22 @@ func New(cfg Config) *Client {
 		MaxIdleConnsPerHost:   4,
 	}}}
 }
+// syncErr builds an error from a non-2xx response that includes Central's
+// actual response body (typically a JSON {"error":"..."} with the real
+// failure reason), not just the HTTP status line. resp.Status alone tells
+// you *that* something failed, never *why* — which otherwise means the
+// real cause only ever shows up in Central's own logs, not the sensor's,
+// even though the sensor is what's reporting the failure. Capped at 2KB
+// so a misbehaving proxy returning an HTML error page doesn't flood logs.
+func syncErr(prefix string, resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		return fmt.Errorf("%s: %s", prefix, resp.Status)
+	}
+	return fmt.Errorf("%s: %s: %s", prefix, resp.Status, msg)
+}
+
 func (c *Client) headers(r *http.Request) {
 	if c.cfg.Token != "" {
 		r.Header.Set("Authorization", "Bearer "+c.cfg.Token)
@@ -64,7 +80,7 @@ func (c *Client) Register(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("registration failed: %s", resp.Status)
+		return syncErr("registration failed", resp)
 	}
 	return nil
 }
@@ -81,7 +97,7 @@ func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("heartbeat failed: %s", resp.Status)
+		return syncErr("heartbeat failed", resp)
 	}
 	return nil
 }
@@ -97,7 +113,7 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("sync failed: %s", resp.Status)
+		return nil, syncErr("sync failed", resp)
 	}
 	var out management.SyncResponse
 	if e := json.NewDecoder(resp.Body).Decode(&out); e != nil {
@@ -132,7 +148,7 @@ func (c *Client) PushTelemetry(ctx context.Context, snapshot management.Telemetr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return management.TelemetryAck{}, fmt.Errorf("telemetry upload failed: %s", resp.Status)
+		return management.TelemetryAck{}, syncErr("telemetry upload failed", resp)
 	}
 	var ack management.TelemetryAck
 	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
@@ -159,7 +175,7 @@ func (c *Client) NextAnalysisJob(ctx context.Context) (*management.AnalysisJob, 
 		return nil, nil
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("analysis poll failed: %s", resp.Status)
+		return nil, syncErr("analysis poll failed", resp)
 	}
 	var job management.AnalysisJob
 	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
@@ -180,7 +196,7 @@ func (c *Client) DownloadAnalysisPCAP(ctx context.Context, jobID, target string)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("analysis download failed: %s", resp.Status)
+		return syncErr("analysis download failed", resp)
 	}
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
@@ -210,7 +226,7 @@ func (c *Client) PushAnalysisResult(ctx context.Context, jobID string, result ma
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("analysis result upload failed: %s", resp.Status)
+		return syncErr("analysis result upload failed", resp)
 	}
 	return nil
 }

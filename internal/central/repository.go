@@ -228,6 +228,30 @@ CREATE TABLE IF NOT EXISTS topology_edges (
  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY (sensor_id, pair_key)
 );
+-- Companion to topology_edges, same reasoning: a sensor's live topology
+-- snapshot only ever contains its *current* assets (subject to the same
+-- persist.retention pruning as flows). Without this, an edge safely
+-- recorded in topology_edges becomes undrawable the moment either
+-- endpoint asset ages out of the live snapshot, since the frontend can
+-- only place an edge between two nodes it actually has — exactly the
+-- "the line was there, then it vanished" symptom this fixes. See
+-- upsertTopologyNodes/ListTopologyNodes in internal/central/topology_edges.go.
+CREATE TABLE IF NOT EXISTS topology_nodes (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ hostname TEXT NOT NULL DEFAULT '',
+ vendor TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ protocols TEXT NOT NULL DEFAULT '',
+ confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+ score INTEGER NOT NULL DEFAULT 1,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packet_count BIGINT NOT NULL DEFAULT 0,
+ first_seen TIMESTAMPTZ NOT NULL,
+ last_seen TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY (sensor_id, ip)
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -423,12 +447,21 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	if _, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NOW(),last_sync_success_at=NOW(),sync_status='healthy',pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=GREATEST(sync_sequence,$2) WHERE id=$1`, x.SensorID, x.Sequence); err != nil {
 		return err
 	}
-	// Fold this sync's edges into the durable per-sensor ledger (see
-	// topology_edges.go) before committing, so it's atomic with the rest
-	// of the sync — a failed upsert here rolls back the whole telemetry
-	// write rather than silently skipping just the topology history.
+	// Fold this sync's nodes/edges into the durable per-sensor ledgers
+	// (see topology_edges.go) before committing, so it's atomic with the
+	// rest of the sync — a failed upsert here rolls back the whole
+	// telemetry write rather than silently skipping just the topology
+	// history. Nodes must go in before edges are read back out by
+	// buildTopologyResponse matters less here (both land in this same
+	// transaction), but nodes are upserted first on principle: an edge
+	// whose endpoint isn't in the node ledger yet is still fine to have
+	// on record, since ListTopologyNodes is a superset fill-in, not a
+	// strict foreign key.
 	var graph topology.Graph
 	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
+		if err := upsertTopologyNodes(ctx, tx, x.SensorID, graph.Nodes); err != nil {
+			return err
+		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
 			return err
 		}

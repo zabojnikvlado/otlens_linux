@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,6 +71,34 @@ type Server struct {
 		etag        string
 		body        []byte
 	}
+}
+
+// serverErrorLogger logs the response body whenever a handler answers with
+// a 5xx status. Central's handlers already return the real failure reason
+// in the response body (c.JSON(500, gin.H{"error": err.Error()})), but
+// that only helps whoever's inspecting that specific response — a sensor
+// that only logs resp.Status, or an operator who wasn't watching at the
+// exact moment, never sees it. This puts it in Central's own log
+// unconditionally, independent of what any particular caller does with it.
+func serverErrorLogger(source string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		capture := &bodyCaptureWriter{ResponseWriter: c.Writer, body: &bytes.Buffer{}}
+		c.Writer = capture
+		c.Next()
+		if status := c.Writer.Status(); status >= 500 {
+			log.Printf("[%s] %s %s -> %d: %s", source, c.Request.Method, c.Request.URL.Path, status, strings.TrimSpace(capture.body.String()))
+		}
+	}
+}
+
+type bodyCaptureWriter struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
+}
+
+func (w *bodyCaptureWriter) Write(b []byte) (int, error) {
+	w.body.Write(b)
+	return w.ResponseWriter.Write(b)
 }
 
 func bearerAuth(token string) gin.HandlerFunc {
@@ -171,7 +200,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	public.POST("/login", s.login)
 	public.POST("/logout", s.logout)
 
-	api := r.Group("/v1", s.authMiddleware(), s.auditMiddleware())
+	api := r.Group("/v1", serverErrorLogger("web-api"), s.authMiddleware(), s.auditMiddleware())
 	api.GET("/me", s.me)
 	api.POST("/change-password", s.changePassword)
 
@@ -224,7 +253,7 @@ func (s *Server) WebRouter() *gin.Engine {
 func (s *Server) SensorRouter() *gin.Engine {
 	r := gin.Default()
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
-	api := r.Group("/v1", bearerAuth(s.SensorToken))
+	api := r.Group("/v1", serverErrorLogger("sensor-api"), bearerAuth(s.SensorToken))
 	api.POST("/sensors/register", s.register)
 	api.POST("/sensors/heartbeat", s.heartbeat)
 	api.POST("/sensors/telemetry", s.telemetry)
@@ -425,13 +454,47 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 			sensorThreshold = 100
 		}
 		prefix := row.SensorID + "::"
+		liveIPs := make(map[string]bool, len(graph.Nodes))
 		for _, n := range graph.Nodes {
+			liveIPs[n.IP] = true
 			n.ID = prefix + n.ID
 			nodes = append(nodes, topologyNode{
 				Node:              n,
 				SensorID:          row.SensorID,
 				HoneypotThreshold: sensorThreshold,
 				IsHoneypot:        n.Score >= sensorThreshold,
+			})
+		}
+		// Nodes, same durability problem edges had: the live snapshot only
+		// ever has this sensor's *current* assets (persist.retention prunes
+		// the rest), so an edge safely recorded in topology_edges would
+		// otherwise become undrawable — no node to attach it to — the
+		// moment either endpoint asset ages out of the live list. Anything
+		// in the node ledger that the live snapshot doesn't currently have
+		// fills that gap; live data always wins when both exist.
+		persistedNodes, err := s.Repo.ListTopologyNodes(c, row.SensorID)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range persistedNodes {
+			if liveIPs[rec.IP] {
+				continue
+			}
+			id := rec.MAC
+			if id == "" {
+				id = "ip:" + rec.IP
+			}
+			ledgerNode := topology.Node{
+				ID: prefix + id, IP: rec.IP, MAC: rec.MAC, Hostname: rec.Hostname, Vendor: rec.Vendor,
+				IsOT: rec.IsOT, Protocols: splitProtocols(rec.Protocols), Confirmed: rec.Confirmed,
+				Score: rec.Score, VLANID: rec.VLANID, FirstSeen: rec.FirstSeen, LastSeen: rec.LastSeen,
+				PacketCount: rec.PacketCount,
+			}
+			nodes = append(nodes, topologyNode{
+				Node:              ledgerNode,
+				SensorID:          row.SensorID,
+				HoneypotThreshold: sensorThreshold,
+				IsHoneypot:        ledgerNode.Score >= sensorThreshold,
 			})
 		}
 		// Edges are drawn from the durable per-sensor ledger (topology_edges),

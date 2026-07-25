@@ -162,6 +162,14 @@ them; hover an edge to see the combined flow count and traffic. Node
 positions are stable across refreshes — dragging a node keeps it there,
 and new assets are the only thing that triggers a brief re-layout.
 
+Above the map, a row of VLAN chips (one per distinct VLAN currently on the
+map, plus "Untagged") lets you toggle assets from a given VLAN on or off —
+click a chip to hide/show just that VLAN, or use **All**/**None** to
+reset or clear the whole map at once. This is a display filter only (it
+doesn't change what Central has recorded); the choice persists across
+polling refreshes and newly-discovered VLANs get their own chip
+automatically.
+
 ### Assets
 
 Every discovered device: IP, MAC, hostname, vendor, OT/IT classification,
@@ -439,6 +447,15 @@ honeypot-initiated (`FromHoneypot`) flag, which is permanent in this ledger
 as a historical fact even after the device moves off the decoy IP (the
 *alert* for it is cleared automatically in that case — the map annotation
 isn't, see [Setting up a honeypot](#setting-up-a-honeypot)).
+
+Assets get the same treatment (`topology_nodes`) and for the same reason:
+an edge recorded in `topology_edges` is only drawable if both endpoint
+assets exist as nodes, so if only edges were made durable, a connection
+would still vanish the moment either endpoint asset aged out of the live
+snapshot — it just wouldn't be immediately obvious *why*, since the edge
+record itself was still there. Live snapshot data always wins when an
+asset is present in both; the ledger only fills in for assets the current
+snapshot doesn't have.
 
 The Topology tab also draws one edge per **asset pair**, not one per
 underlying flow: a sensor's raw graph has a separate flow per protocol/port
