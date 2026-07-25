@@ -48,8 +48,13 @@ func Build(
 	isOT, protocols := Classify(tags)
 
 	nodes := make([]Node, 0, len(assets))
+	// Used below to orient FromHoneypot edges correctly — see the edges
+	// loop's comment.
+	scoreByIP := make(map[string]int, len(assets))
 
 	for _, a := range assets {
+
+		scoreByIP[a.IP] = a.Score
 
 		nodes = append(
 			nodes,
@@ -81,13 +86,28 @@ func Build(
 
 	for _, f := range flows {
 
+		srcIP, dstIP := f.SrcIP, f.DstIP
+		// f.SrcIP/f.DstIP reflect whichever direction happened to create
+		// the flow record first (see flow.Flow's doc comment) — NOT
+		// necessarily the honeypot's side, even when HoneypotInitiated is
+		// true. A flow first created by something probing the honeypot,
+		// which only later (same bidirectional record) saw the honeypot
+		// itself send something back, would otherwise leave the arrow on
+		// the Topology tab pointing the wrong way — into the honeypot
+		// instead of out of it. Swap so SrcIP is always the honeypot's IP
+		// when this flag is set, matching what "lateral movement"
+		// actually means: traffic leaving the honeypot.
+		if f.HoneypotInitiated && scoreByIP[srcIP] < honeypotThreshold && scoreByIP[dstIP] >= honeypotThreshold {
+			srcIP, dstIP = dstIP, srcIP
+		}
+
 		edges = append(
 			edges,
 			Edge{
 				ID: f.ID,
 
-				SrcIP: f.SrcIP,
-				DstIP: f.DstIP,
+				SrcIP: srcIP,
+				DstIP: dstIP,
 
 				Protocol: f.Protocol,
 
