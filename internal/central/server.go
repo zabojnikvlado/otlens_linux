@@ -130,7 +130,23 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 		}
 		started := time.Now().UTC()
 		c.Next()
-		if !s.AuditExport || s.Repo == nil {
+		if s.Repo == nil {
+			return
+		}
+		status := c.Writer.Status()
+		actor := identityFromContext(c).Username
+		// Written unconditionally — this is the durable audit trail
+		// (audit_log), independent of whether SIEM export happens to be
+		// configured. A failure here is logged, not fatal to the
+		// request: the action the person took already happened either
+		// way, and audit logging shouldn't be able to break the app.
+		if err := s.Repo.InsertAuditLog(c, AuditEntry{
+			Actor: actor, Action: method + " " + c.FullPath(), Method: method, Path: c.Request.URL.Path,
+			Status: status, Success: status < 400, SourceIP: c.ClientIP(), SensorID: c.Param("id"),
+		}); err != nil {
+			log.Printf("audit_log insert failed: %v", err)
+		}
+		if !s.AuditExport {
 			return
 		}
 		source := s.SIEMSource
@@ -145,17 +161,17 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 				"action":     method + " " + c.FullPath(),
 				"method":     method,
 				"path":       c.Request.URL.Path,
-				"status":     c.Writer.Status(),
-				"success":    c.Writer.Status() < 400,
+				"status":     status,
+				"success":    status < 400,
 				"source_ip":  c.ClientIP(),
 				"user_agent": c.Request.UserAgent(),
 				"sensor_id":  c.Param("id"),
 				"rule_id":    c.Param("rule"),
 				"ruleset_id": c.Param("ruleset"),
-				"actor":      identityFromContext(c).Username,
+				"actor":      actor,
 			},
 		}
-		key := fmt.Sprintf("audit:%d:%s:%s:%d", started.UnixNano(), method, c.Request.URL.Path, c.Writer.Status())
+		key := fmt.Sprintf("audit:%d:%s:%s:%d", started.UnixNano(), method, c.Request.URL.Path, status)
 		if err := s.Repo.EnqueueSIEM(c, key, "audit", entry); err != nil {
 			fmt.Fprintf(os.Stderr, "OTLens Central audit enqueue failed: %v\n", err)
 		}
@@ -209,6 +225,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/assets", requireView(ViewAssets), s.assets)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/settings", requireView(ViewSettings), s.settings)
+	api.GET("/audit", requireView(ViewAudit), s.auditLog)
 	api.GET("/topology", requireView(ViewTopology), s.topology)
 	api.GET("/tags", requireView(ViewTags), s.tags)
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
@@ -370,6 +387,15 @@ func (s *Server) settings(c *gin.Context) {
 		"WebTLSEnabled":              s.WebTLSEnabled,
 		"SensorAPITLSEnabled":        s.SensorAPITLSEnabled,
 	})
+}
+
+func (s *Server) auditLog(c *gin.Context) {
+	entries, err := s.Repo.ListAuditLog(c, 500)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, entries)
 }
 
 func (s *Server) tags(c *gin.Context) {
@@ -985,9 +1011,23 @@ func (s *Server) alertActions(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid action"})
 		return
 	}
-	if err := s.Repo.QueueCommands(c, c.Param("id"), "alert."+req.Action, req.Targets); err != nil {
+	sensorID := c.Param("id")
+	if err := s.Repo.QueueCommands(c, sensorID, "alert."+req.Action, req.Targets); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+	}
+	// Best-effort: Central already knows who did this and when, right
+	// now — no need to wait for the sensor to eventually process the
+	// queued command and report the status change back on its next
+	// sync. upsertAlertHistory's status-downgrade guard means that
+	// later report is a safe no-op against what's set here.
+	actor := identityFromContext(c).Username
+	status := "confirmed"
+	if req.Action == "approve" {
+		status = "approved"
+	}
+	if err := s.Repo.MarkAlertsReviewed(c, sensorID, req.Targets, status, actor); err != nil {
+		log.Printf("mark alert_history reviewed: %v", err)
 	}
 	c.Status(202)
 }

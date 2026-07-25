@@ -125,7 +125,7 @@ no self-service "forgot password" flow (deliberately — see
 
 ## Using the Central UI
 
-The nav bar along the top has 11 tabs. Which ones you see depends on your
+The nav bar along the top has 12 tabs. Which ones you see depends on your
 role (see [Roles and permissions](#roles-and-permissions)) — a tab you
 can't view is simply not shown, and the same permission is enforced again
 on the server, not just hidden client-side.
@@ -285,6 +285,43 @@ without that, the Topology tab would keep showing every previously-seen
 connection regardless of any Central reset, since that ledger is
 deliberately designed to survive a sensor's own pruning.
 
+### Audit
+
+*(Admin only.)* Every mutating Management API request, newest first — who
+did what, when, source IP, and whether it succeeded. Written
+unconditionally to `audit_log`, independent of whether SIEM export is
+configured (`siem.enabled`/`export_audit` only additionally *forwards* a
+copy to SIEM; it was never what determined whether an audit trail existed
+at all). Pruned by `database_retention.audit_days`, same as everything
+else — see below.
+
+### Database retention
+
+Central bounds its own PostgreSQL growth with a background sweep
+(`database_retention` in `central.config.yaml`, `6h` interval by default).
+It only ever touches telemetry-derived history (`topology_edges`,
+`topology_nodes`, `analysis_jobs`), `alert_history` (a durable per-alert
+record, separate from the live Alerts tab's `sensor_telemetry.alerts`
+snapshot — see [Alerts](#alerts)), and `audit_log`. Configuration
+(`rule_sets`, `sensors`, `sites`), accounts (`users`, `roles`, `sessions`),
+and `system_backups` are never affected, regardless of size pressure.
+
+Each sweep runs two passes:
+
+1. **Age-based** — every row in those five tables older than its
+   category's `*_days` cutoff (`telemetry_days`/`alerts_days`/
+   `audit_days`, by last activity, not creation) is deleted, regardless
+   of database size.
+2. **Size backstop** — only if those same five tables' combined size is
+   still over `max_database_size_gb` afterward: the globally oldest rows
+   across *all five* (not a fixed per-category order — whichever table
+   currently holds the single oldest row loses the next batch) are
+   deleted until back at or under `target_database_size_gb`.
+
+Both passes delete in `delete_batch_size`-row chunks with a short pause
+between, so a large backlog doesn't hold a long-running lock or spike
+load in one shot.
+
 ---
 
 ## Setting up a honeypot
@@ -334,7 +371,7 @@ Three built-in roles ship by default:
 | Role | Can view | Can do |
 |---|---|---|
 | **Administrator** | everything | everything |
-| **Analyst** | everything except Users, Settings, Data Management | everything except starting/stopping sensors |
+| **Analyst** | everything except Users, Settings, Data Management, Audit | everything except starting/stopping sensors |
 | **View only** | Dashboard, Topology, Alerts | nothing (read-only) |
 
 Both the tabs a role can see and the actions it can perform are stored in

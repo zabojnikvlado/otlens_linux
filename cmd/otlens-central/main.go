@@ -126,6 +126,38 @@ func main() {
 			}
 		}
 	}()
+
+	// See internal/central/retention.go for exactly what this does and
+	// doesn't touch. Runs once shortly after startup (so a long-idle
+	// Central doesn't wait a full interval before its first sweep), then
+	// on cfg.DatabaseRetention.Interval from there.
+	go func() {
+		retentionCfg := central.RetentionConfig{
+			Enabled: cfg.DatabaseRetention.Enabled, TelemetryDays: cfg.DatabaseRetention.TelemetryDays,
+			AlertsDays: cfg.DatabaseRetention.AlertsDays, AuditDays: cfg.DatabaseRetention.AuditDays,
+			MaxDatabaseSizeGB: cfg.DatabaseRetention.MaxDatabaseSizeGB, TargetDatabaseSizeGB: cfg.DatabaseRetention.TargetDatabaseSizeGB,
+			DeleteBatchSize: cfg.DatabaseRetention.DeleteBatchSize,
+		}
+		if !retentionCfg.Enabled {
+			return
+		}
+		select {
+		case <-workerCtx.Done():
+			return
+		case <-time.After(2 * time.Minute):
+		}
+		repo.RunRetention(workerCtx, retentionCfg)
+		ticker := time.NewTicker(cfg.DatabaseRetention.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-ticker.C:
+				repo.RunRetention(workerCtx, retentionCfg)
+			}
+		}
+	}()
 	webAddr := fmt.Sprintf("%s:%d", cfg.Web.Host, cfg.Web.Port)
 	sensorAddr := fmt.Sprintf("%s:%d", cfg.SensorAPI.Host, cfg.SensorAPI.Port)
 	log.Printf("OTLens Central web/API listener: %s", webAddr)

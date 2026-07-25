@@ -1,4 +1,4 @@
-const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[];let network,nodesDS,edgesDS;const topologyPositionCache=new Map();const selected=new Set();
+const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[];let network,nodesDS,edgesDS;const topologyPositionCache=new Map();const selected=new Set();
 // Auth state — populated from GET /v1/me on boot and again right after
 // login. permissions.view drives which nav tabs are shown (server-side
 // requireView enforces the same thing, this just reflects it in the UI);
@@ -357,6 +357,10 @@ function renderSettings(){
   document.getElementById('settings-web-tls').textContent=onOff(settings.WebTLSEnabled);
   document.getElementById('settings-sensor-tls').textContent=onOff(settings.SensorAPITLSEnabled);
 }
+function renderAudit(){
+  const tbody=document.querySelector('#table-audit tbody');if(!tbody)return;
+  tbody.innerHTML=audit.map(a=>`<tr><td>${time(a.CreatedAt)}</td><td>${esc(a.Actor||'—')}</td><td>${esc(a.Action)}</td><td class="${a.Success?'state-ok':'state-new'}">${a.Status}</td><td>${esc(a.SensorID||'—')}</td><td>${esc(a.SourceIP||'—')}</td></tr>`).join('');
+}
 document.getElementById('own-password-form').addEventListener('submit',async e=>{
   e.preventDefault();
   const status=document.getElementById('own-password-status');status.textContent='';
@@ -380,7 +384,7 @@ async function refreshAll(){
   // server-side (see requireView in internal/central/server.go) — a role
   // that can't see a tab never even requests its data, instead of
   // spamming 403s into the "partial failure" indicator every 10s.
-  const pathView={'/assets':'assets','/tags':'tags','/tags/changes':'tags','/tags/events':'tags','/sensors':'sensors','/alerts':'alerts','/rules':'rules','/baseline':'dashboard','/analysis/jobs':'analysis','/data/backups':'data','/settings':'settings'};
+  const pathView={'/assets':'assets','/tags':'tags','/tags/changes':'tags','/tags/events':'tags','/sensors':'sensors','/alerts':'alerts','/rules':'rules','/baseline':'dashboard','/analysis/jobs':'analysis','/data/backups':'data','/settings':'settings','/audit':'audit'};
   const paths=Object.keys(pathView).filter(p=>canView(pathView[p]));
   const topoPromise=topologyActive
     ?fetchTopology().then(v=>({status:'fulfilled',value:v})).catch(reason=>({status:'rejected',reason}))
@@ -404,6 +408,7 @@ async function refreshAll(){
   if(ok('/analysis/jobs'))analysisJobs=list('/analysis/jobs');
   if(ok('/data/backups'))backups=list('/data/backups');
   if(ok('/settings')&&results['/settings'].value&&typeof results['/settings'].value==='object')settings=results['/settings'].value;
+  if(ok('/audit'))audit=list('/audit');
   // Render whenever the tab is active and the fetch didn't fail — including
   // the "unchanged" (304) case, since a freshly-opened tab or a
   // newly-arrived node still needs its first paint from whatever `graph`
@@ -418,6 +423,7 @@ async function refreshAll(){
   try{if(ok('/baseline'))renderBaseline()}catch(e){console.error('render baseline',e)}
   try{if(ok('/analysis/jobs'))renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
   try{if(ok('/settings'))renderSettings()}catch(e){console.error('render settings',e)}
+  try{if(ok('/audit'))renderAudit()}catch(e){console.error('render audit',e)}
   try{if(canView('users'))await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
   try{renderDashboard()}catch(e){console.error('render dashboard',e)}
   const rejected=paths.map(p=>results[p].status==='rejected'?{path:p,reason:results[p].reason}:null).filter(Boolean);
@@ -482,7 +488,7 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management'};
+const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server

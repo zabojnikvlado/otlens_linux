@@ -39,7 +39,7 @@ func (p Permissions) HasAction(action string) bool {
 // allTabs/allActions are what the built-in "admin" role gets. Named
 // slices rather than scattering the literal list across the file — a tab
 // or action added later only needs to be added here to reach admin.
-var allTabs = []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis", "users", "settings", "data"}
+var allTabs = []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis", "users", "settings", "data", "audit"}
 var allActions = []string{"sensor_start_stop", "asset_confirm_delete", "alert_confirm_approve", "rule_manage", "analysis_manage", "data_management", "users_roles_manage"}
 
 // Role is one row of the roles table.

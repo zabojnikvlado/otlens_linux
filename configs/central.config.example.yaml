@@ -141,6 +141,35 @@ vulnerability:
   enabled: false
   csv_path: ""
 
+# Bounds PostgreSQL growth over time. Only ever touches telemetry-derived
+# history (topology_edges, topology_nodes, analysis_jobs), alert_history,
+# and audit_log — configuration (rule_sets, sensors, sites), accounts
+# (users, roles, sessions), and system_backups are never affected,
+# regardless of size pressure. Age-based cutoffs (*_days) run first on
+# every sweep; the size backstop only kicks in afterward, and only for
+# these same five tables — see DOCUMENTATION.md's Architecture section.
+database_retention:
+  enabled: true
+  # How often the retention sweep runs.
+  interval: 6h
+  # Age-based cutoffs, one per category — a row older than this (by its
+  # own last-activity timestamp, not creation) is deleted every sweep
+  # regardless of database size. 0 disables that category's age cutoff
+  # (it's still subject to the size backstop below).
+  telemetry_days: 30
+  alerts_days: 180
+  audit_days: 365
+  # If the combined size of just the five tables above still exceeds
+  # this after the age-based pass, the globally oldest rows across all
+  # of them (not a fixed per-category order) are deleted in batches
+  # until back at or under target_database_size_gb.
+  max_database_size_gb: 80
+  target_database_size_gb: 70
+  # Deletes are chunked into batches this size, with a short pause
+  # between, so a big backlog doesn't hold a long-running lock or spike
+  # load in one shot.
+  delete_batch_size: 10000
+
 analysis:
   enabled: true
   upload_directory: "./data/pcap-uploads"

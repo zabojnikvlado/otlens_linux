@@ -227,3 +227,45 @@ CREATE TABLE IF NOT EXISTS topology_nodes (
  last_seen TIMESTAMPTZ NOT NULL,
  PRIMARY KEY (sensor_id, ip)
 );
+-- Durable, one-row-per-alert history, independent of sensor_telemetry.alerts
+-- (which is a single JSONB array per sensor, wholesale-overwritten on every
+-- sync — no per-alert timestamp to prune by). Upserted from that JSONB on
+-- every PutTelemetry, same pattern as topology_edges/topology_nodes. This is
+-- what database_retention.alerts_days actually prunes; it does not replace
+-- the live Alerts tab, which still reads the current sensor_telemetry.alerts
+-- snapshot.
+CREATE TABLE IF NOT EXISTS alert_history (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ alert_key TEXT NOT NULL,
+ type TEXT NOT NULL,
+ severity TEXT NOT NULL,
+ message TEXT NOT NULL,
+ ip TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'new',
+ approved_by TEXT NOT NULL DEFAULT '',
+ approved_at TIMESTAMPTZ,
+ first_seen TIMESTAMPTZ NOT NULL,
+ last_seen TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY (sensor_id, alert_key)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_history_last_seen ON alert_history(last_seen);
+
+-- Written unconditionally by auditMiddleware for every mutating
+-- Management API request, independent of whether SIEM export is
+-- configured — siem_outbox (a delivery queue whose rows are deleted once
+-- delivered) was never a retained history and only existed at all when
+-- SIEM was enabled. This is what the Audit tab reads and what
+-- database_retention.audit_days prunes.
+CREATE TABLE IF NOT EXISTS audit_log (
+ id BIGSERIAL PRIMARY KEY,
+ actor TEXT NOT NULL DEFAULT '',
+ action TEXT NOT NULL,
+ method TEXT NOT NULL,
+ path TEXT NOT NULL,
+ status INTEGER NOT NULL,
+ success BOOLEAN NOT NULL,
+ source_ip TEXT NOT NULL DEFAULT '',
+ sensor_id TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);

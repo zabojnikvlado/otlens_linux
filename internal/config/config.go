@@ -313,6 +313,40 @@ type CentralConfig struct {
 		Enabled bool   `mapstructure:"enabled"`
 		CSVPath string `mapstructure:"csv_path"`
 	} `mapstructure:"vulnerability"`
+	// DatabaseRetention bounds PostgreSQL growth by age and, as a backstop,
+	// by total size — see internal/central/retention.go. Scope is
+	// deliberately narrow: only telemetry-derived history (topology_edges,
+	// topology_nodes, analysis_jobs), alert_history, and audit_log are ever
+	// touched. Configuration (rule_sets, sensors, sites), accounts (users,
+	// roles, sessions), and system_backups are never affected by this,
+	// regardless of size pressure.
+	DatabaseRetention struct {
+		Enabled bool `mapstructure:"enabled"`
+		// Interval is how often the retention sweep runs.
+		Interval time.Duration `mapstructure:"interval"`
+		// *Days are age-based cutoffs, one per category. A row older than
+		// this (by its own last-activity timestamp, not creation) is
+		// deleted on every sweep, regardless of database size.
+		TelemetryDays int `mapstructure:"telemetry_days"`
+		AlertsDays    int `mapstructure:"alerts_days"`
+		AuditDays     int `mapstructure:"audit_days"`
+		// MaxDatabaseSizeGB is a backstop independent of the *Days
+		// cutoffs above: if the *combined size of only the tables this
+		// system is allowed to touch* exceeds this after the age-based
+		// pass, the oldest rows across those same tables are deleted
+		// (regardless of age) until back at or under TargetDatabaseSizeGB.
+		// Deliberately scoped to just those tables rather than the whole
+		// database, so growth in something this system can't touch (a
+		// large rule_sets or system_backups, say) never triggers deleting
+		// telemetry/alerts/audit data that isn't actually the problem.
+		MaxDatabaseSizeGB    int `mapstructure:"max_database_size_gb"`
+		TargetDatabaseSizeGB int `mapstructure:"target_database_size_gb"`
+		// DeleteBatchSize caps how many rows a single DELETE removes —
+		// large deletes are chunked into batches this size (with a short
+		// pause between) so a big backlog doesn't hold a long-running
+		// transaction/lock or spike load in one shot.
+		DeleteBatchSize int `mapstructure:"delete_batch_size"`
+	} `mapstructure:"database_retention"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -373,6 +407,14 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("sensors.check_interval", 20*time.Second)
 	v.SetDefault("vulnerability.enabled", false)
 	v.SetDefault("vulnerability.csv_path", "")
+	v.SetDefault("database_retention.enabled", true)
+	v.SetDefault("database_retention.interval", 6*time.Hour)
+	v.SetDefault("database_retention.telemetry_days", 30)
+	v.SetDefault("database_retention.alerts_days", 180)
+	v.SetDefault("database_retention.audit_days", 365)
+	v.SetDefault("database_retention.max_database_size_gb", 80)
+	v.SetDefault("database_retention.target_database_size_gb", 70)
+	v.SetDefault("database_retention.delete_batch_size", 10000)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)

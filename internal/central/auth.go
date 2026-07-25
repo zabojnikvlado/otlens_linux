@@ -29,6 +29,7 @@ const (
 	ViewUsers     = "users"
 	ViewSettings  = "settings"
 	ViewData      = "data"
+	ViewAudit     = "audit"
 )
 
 // Action keys — independent of view; a role could in principle see a tab
