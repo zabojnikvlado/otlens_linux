@@ -86,12 +86,19 @@ var ErrNotFound = errors.New("not found")
 var ErrBuiltInRole = errors.New("built-in roles cannot be deleted")
 var ErrRoleInUse = errors.New("role is assigned to at least one user")
 
-// EnsureAuthBootstrap seeds the three built-in roles (on every startup —
-// ON CONFLICT DO NOTHING, so an admin's later permission edits are never
-// clobbered by a restart) and, only if the users table is completely
-// empty, creates the initial "administrator" account with
-// must_change_password set — see cmd/otlens-central/main.go for the
-// actual username/password/hash used.
+// EnsureAuthBootstrap seeds/refreshes the three built-in roles on every
+// startup — ON CONFLICT DO UPDATE, so if a role was seeded by an older
+// version of this binary (missing a tab/action added since), it's
+// brought back in sync with the current code's defaults automatically
+// instead of silently staying stale forever. This only ever touches the
+// three built-in ids; any custom role an admin created via the Roles tab
+// is a completely separate row this loop never runs against, so it's
+// never affected. (An admin's own edits *to a built-in role* also don't
+// survive a restart under this scheme — built-ins are meant to track
+// the code, custom roles are where real customization should live.)
+// Also creates the initial "administrator" account, but only if the
+// users table is completely empty — see cmd/otlens-central/main.go for
+// the actual username/password/hash used.
 func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername, bootstrapPasswordHash string) error {
 	defaults := []Role{
 		{ID: "admin", Name: "Administrator", BuiltIn: true, Permissions: Permissions{View: allTabs, Actions: allActions}},
@@ -110,7 +117,8 @@ func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername,
 			return err
 		}
 		if _, err := r.db.ExecContext(ctx,
-			`INSERT INTO roles(id,name,built_in,permissions) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`,
+			`INSERT INTO roles(id,name,built_in,permissions) VALUES($1,$2,$3,$4)
+			 ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,built_in=EXCLUDED.built_in,permissions=EXCLUDED.permissions,updated_at=NOW()`,
 			role.ID, role.Name, role.BuiltIn, perms,
 		); err != nil {
 			return err
