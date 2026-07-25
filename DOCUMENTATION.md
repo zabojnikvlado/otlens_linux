@@ -269,6 +269,22 @@ full factory reset) on Central or on selected sensors. Destructive resets
 require typing `RESET` to confirm. Central backups are listed with
 download/delete actions.
 
+**Central resets and sensor resets are separate things that reset
+different copies of the data.** A Central-side reset (e.g. "Telemetry
+database") only clears what Central has cached in PostgreSQL — it does
+**not** touch the sensor's own local state, so if that sensor is still
+running, its very next sync re-uploads whatever it still has locally and
+the reset data reappears within one sync interval, looking like the reset
+did nothing. To actually clear the underlying data, reset the sensor
+itself (Sensors section of this tab) — "SQLite database" or "Assets and
+flows" clears the sensor's own live engines, not just Central's copy of
+them. "Telemetry database" on the Central side also clears the durable
+`topology_edges`/`topology_nodes` ledger (see
+[Why topology connections persist](#why-topology-connections-persist)) —
+without that, the Topology tab would keep showing every previously-seen
+connection regardless of any Central reset, since that ledger is
+deliberately designed to survive a sensor's own pruning.
+
 ---
 
 ## Setting up a honeypot

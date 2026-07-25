@@ -466,6 +466,31 @@ func (e *Engine) RestoreBaseline(snapshot BaselineSnapshot) {
 	}
 }
 
+// ResetBaseline actually clears learning state back to zero,
+// regardless of what it currently is — unlike calling
+// RestoreBaseline(BaselineSnapshot{}), which deliberately does
+// *nothing* when handed an empty snapshot (see that function's
+// comment: an empty snapshot means "nothing was ever persisted," so
+// leaving whatever's already in memory untouched is correct at
+// startup). That early-return makes RestoreBaseline the wrong tool
+// for an explicit "start learning over" request while the engine is
+// already running and possibly already in BaselineModeMonitoring —
+// it would silently no-op instead of resetting anything. This is
+// what Data Management's "learning" reset (and the "database"/
+// "factory" resets, which include a learning reset) actually need:
+// the next packet after this call restarts the learn-then-monitor
+// cycle from scratch, exactly like a brand-new sensor's first packet.
+func (e *Engine) ResetBaseline() {
+
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	e.baselineMode = ""
+	e.learningStarted = time.Time{}
+	e.learnedPatterns = make(map[string]bool)
+	e.learnedAssets = make(map[string]bool)
+}
+
 // KnownMACSnapshot captures the current confirmed IP->MAC mapping
 // used by ARP spoofing detection, for persistence. The in-progress
 // candidate/debounce state is deliberately not persisted — it's

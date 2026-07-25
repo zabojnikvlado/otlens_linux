@@ -363,7 +363,7 @@ func (s *Snapshotter) Reset(operation string) error {
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
 		s.detectEngine.RestoreAlerts(nil)
-		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.ResetBaseline()
 		s.detectEngine.RestoreKnownMAC(map[string]string{})
 	case "factory":
 		// Factory data reset additionally removes custom/managed rules.
@@ -375,7 +375,7 @@ func (s *Snapshotter) Reset(operation string) error {
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
 		s.detectEngine.RestoreAlerts(nil)
-		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.ResetBaseline()
 		s.detectEngine.RestoreKnownMAC(map[string]string{})
 		s.detectEngine.RestoreRules(nil)
 	case "assets":
@@ -388,7 +388,7 @@ func (s *Snapshotter) Reset(operation string) error {
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
 	case "learning":
-		s.detectEngine.RestoreBaseline(detect.BaselineSnapshot{})
+		s.detectEngine.ResetBaseline()
 		s.detectEngine.RestoreKnownMAC(map[string]string{})
 	case "analysis":
 		// Remove records that still originate exclusively from imported

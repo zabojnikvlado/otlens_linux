@@ -747,7 +747,17 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 	case "telemetry", "database":
 		// Telemetry reset must never remove configuration, rules, sensors,
 		// sites, pending management commands, SIEM data or backups.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry RESTART IDENTITY`)
+		// topology_edges/topology_nodes are included even though they're
+		// separate tables from sensor_telemetry — they're durable
+		// derived-from-telemetry history (see topology_edges.go), so a
+		// telemetry reset that left them alone would make the Topology
+		// tab keep showing everything exactly as before, which is
+		// confusing when the whole point was to clear things out. Note
+		// this only clears Central's copy: each sensor still has its own
+		// local state and will re-report it on its next sync unless that
+		// sensor is also reset (Sensors tab / Data Management's sensor
+		// reset operations).
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes RESTART IDENTITY`)
 	case "alerts":
 		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
 	case "siem":
@@ -763,7 +773,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// connected sensors to receive sensor.factory.reset. Deleting those
 		// rows here made the reset command disappear before the next sync and
 		// the sensor immediately uploaded all old telemetry again.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}
