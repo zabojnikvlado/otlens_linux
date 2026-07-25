@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,8 +17,24 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 )
 
+// defaultConfigPath is config.yaml next to wherever otlens-central.exe
+// actually is — not a fixed ProgramData path. This matches how
+// internal/central's centralWebDir() already resolves the web UI folder
+// (relative to the executable), so "drop the exe, its config, and web/
+// somewhere and run it" works as one self-contained unit regardless of
+// where that happens to be, rather than requiring a specific install
+// location. Falls back to the bare relative name only if the OS can't
+// even tell us our own executable's path.
+func defaultConfigPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "config.yaml"
+	}
+	return filepath.Join(filepath.Dir(exe), "config.yaml")
+}
+
 func main() {
-	configPath := flag.String("config", `C:\ProgramData\OTLens\config.yaml`, "path to the Central Management configuration file")
+	configPath := flag.String("config", defaultConfigPath(), "path to the Central Management configuration file")
 	flag.Parse()
 
 	cfg, err := config.LoadCentral(*configPath)

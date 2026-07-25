@@ -80,7 +80,7 @@ func New(cfg *config.Config) (*Application, error) {
 		deceptionScores[station.IP] = station.Score
 	}
 
-	assetEngine := asset.NewEngine(deceptionScores)
+	assetEngine := asset.NewEngine(deceptionScores, cfg.Deception.HoneypotThreshold)
 
 	eventBus := core.NewEventBus()
 

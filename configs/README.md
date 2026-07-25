@@ -18,10 +18,13 @@ otlens --config /path/to/config.yaml
 
 ## Central Management
 
-Use `central.config.example.yaml` as the template. The Central binary loads on Windows:
+Use `central.config.example.yaml` as the template. The Central binary
+loads `config.yaml` from the **same directory as the executable itself**
+by default (any OS — Central is cross-platform, typically deployed on
+Windows):
 
 ```text
-C:\ProgramData\OTLens\config.yaml
+<install-dir>\config.yaml
 ```
 
 Override with:

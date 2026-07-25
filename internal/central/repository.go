@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"github.com/zabojnikvlado/otlens_linux/internal/topology"
 )
 
 type Repository struct {
@@ -200,6 +201,33 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
+
+-- Sensors prune flows that have gone quiet for a while (see
+-- internal/flow/engine.go's Prune) to bound their own SQLite growth —
+-- that's correct and necessary on the sensor, but it means a connection
+-- that only happened once can disappear from a later telemetry sync's
+-- topology blob even though it genuinely occurred. This table is Central's
+-- own durable, ever-growing record of every asset pair a sensor has ever
+-- reported: PutTelemetry upserts into it on every sync (see
+-- upsertTopologyEdges), and the /topology handler reads from here instead
+-- of the live per-sensor snapshot, so a connection drawn once stays on the
+-- map even after the sensor's own copy of it has aged out.
+CREATE TABLE IF NOT EXISTS topology_edges (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ pair_key TEXT NOT NULL,
+ src_ip TEXT NOT NULL,
+ dst_ip TEXT NOT NULL,
+ protocols TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ from_honeypot BOOLEAN NOT NULL DEFAULT FALSE,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ flow_count INTEGER NOT NULL DEFAULT 1,
+ first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, pair_key)
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -394,6 +422,16 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NOW(),last_sync_success_at=NOW(),sync_status='healthy',pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=GREATEST(sync_sequence,$2) WHERE id=$1`, x.SensorID, x.Sequence); err != nil {
 		return err
+	}
+	// Fold this sync's edges into the durable per-sensor ledger (see
+	// topology_edges.go) before committing, so it's atomic with the rest
+	// of the sync — a failed upsert here rolls back the whole telemetry
+	// write rather than silently skipping just the topology history.
+	var graph topology.Graph
+	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
+		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

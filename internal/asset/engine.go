@@ -41,9 +41,15 @@ type Engine struct {
 	// Stations) — read-only after construction, so no lock needed to
 	// read it. See Asset.Score's doc comment.
 	deceptionScores map[string]int
+
+	// honeypotThreshold is config.Deception.HoneypotThreshold — used
+	// only to detect a honeypot->not-honeypot transition (see
+	// core.EventHoneypotCleared), not to gate anything in this engine
+	// directly.
+	honeypotThreshold int
 }
 
-func NewEngine(deceptionScores map[string]int) *Engine {
+func NewEngine(deceptionScores map[string]int, honeypotThreshold int) *Engine {
 
 	if deceptionScores == nil {
 		deceptionScores = make(map[string]int)
@@ -54,6 +60,7 @@ func NewEngine(deceptionScores map[string]int) *Engine {
 		knownFromBaseline: make(map[string]bool),
 		arpVerified:       make(map[string]bool),
 		deceptionScores:   deceptionScores,
+		honeypotThreshold: honeypotThreshold,
 	}
 
 }
@@ -95,6 +102,17 @@ func (e *Engine) Update(
 	defer e.mutex.Unlock()
 
 	asset, exists := e.assets[mac]
+
+	// Captured before any mutation below, so the honeypot-transition
+	// check after the Score recompute has something to compare
+	// against. Meaningless (and unused) when !exists — a brand-new
+	// asset has no prior state to have transitioned away from.
+	var previousIP string
+	var previousScore int
+	if exists {
+		previousIP = asset.IP
+		previousScore = asset.Score
+	}
 
 	if !exists {
 
@@ -190,6 +208,25 @@ func (e *Engine) Update(
 		asset.Score = score
 	} else {
 		asset.Score = 1
+	}
+
+	// The device that used to sit on a configured decoy IP just moved
+	// off it (or, less commonly, its score genuinely dropped) —
+	// previousIP is what actually appeared as SrcIP/DstIP on any
+	// lateral-movement/probed alert raised while it was a honeypot, so
+	// that's the identity internal/detect needs to clear those against,
+	// not asset.IP (which may already be the new, non-honeypot address).
+	if exists && e.eventBus != nil {
+		wasHoneypot := previousScore >= e.honeypotThreshold
+		isHoneypot := asset.Score >= e.honeypotThreshold
+		if wasHoneypot && (!isHoneypot || asset.IP != previousIP) {
+			e.eventBus.Publish(
+				core.Event{
+					Type: core.EventHoneypotCleared,
+					Data: core.HoneypotCleared{IP: previousIP},
+				},
+			)
+		}
 	}
 
 	asset.LastSeen = timestamp

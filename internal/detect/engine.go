@@ -159,6 +159,7 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startAssetUnconfirmedWatch(bus)
 	e.startValueOutOfRangeWatch(bus)
 	e.startHoneypotWatch(bus)
+	e.startHoneypotClearedWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }

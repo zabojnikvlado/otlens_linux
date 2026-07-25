@@ -26,6 +26,7 @@ const (
 	ViewAlerts    = "alerts"
 	ViewSensors   = "sensors"
 	ViewAnalysis  = "analysis"
+	ViewUsers     = "users"
 	ViewSettings  = "settings"
 	ViewData      = "data"
 )

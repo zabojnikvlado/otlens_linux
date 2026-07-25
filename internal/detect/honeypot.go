@@ -97,7 +97,73 @@ func (e *Engine) handleHoneypot(packet core.Packet) {
 	}
 }
 
-// raiseHoneypotAlert creates or updates the deduplicated Alert for
+// startHoneypotClearedWatch consumes core.EventHoneypotCleared —
+// published by internal/asset the moment a device that was sitting on a
+// configured decoy IP moves off it (or, less commonly, its configured
+// score genuinely drops below the honeypot threshold). See that event's
+// doc comment for why the IP it carries is the *previous* honeypot
+// identity, not wherever the device ended up.
+func (e *Engine) startHoneypotClearedWatch(bus *core.EventBus) {
+
+	ch := bus.Subscribe(core.EventHoneypotCleared)
+
+	go func() {
+
+		for event := range ch {
+
+			cleared, ok := event.Data.(core.HoneypotCleared)
+
+			if !ok {
+				continue
+			}
+
+			e.clearHoneypotAlerts(cleared.IP)
+
+		}
+
+	}()
+
+}
+
+// clearHoneypotAlerts removes every still-unreviewed
+// (AlertStatusNew) lateral-movement/probed alert for ip. Called once
+// internal/asset confirms ip is no longer a honeypot — continuing to
+// show "lateral movement" for a device that isn't a decoy anymore
+// would be actively misleading, not just stale.
+//
+// Alerts an operator already reviewed (AlertStatusApproved/Confirmed)
+// are deliberately left alone: that's a human judgment about
+// something that already happened on the network, and it shouldn't
+// be silently erased just because the live honeypot configuration
+// moved on. Only the not-yet-reviewed ones are cleared.
+func (e *Engine) clearHoneypotAlerts(ip string) {
+
+	if ip == "" {
+		return
+	}
+
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	for key, alert := range e.alerts {
+
+		if alert.IP != ip {
+			continue
+		}
+
+		if alert.Type != AlertHoneypotLateralMovement && alert.Type != AlertHoneypotProbed {
+			continue
+		}
+
+		if alert.Status != AlertStatusNew {
+			continue
+		}
+
+		delete(e.alerts, key)
+
+	}
+
+}
 // one specific (direction, src, dst) pair — repeated traffic on the
 // same pair updates Count/LastSeen on the same alert rather than
 // creating a new one each time, same as every other alert type here.

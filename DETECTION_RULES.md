@@ -32,6 +32,16 @@ normalizovaný alert cez telemetry pipeline, takže nové pravidlo nepotrebuje
 | `icscritical.go` | `ics_critical_operation` — kritická OT operácia (napr. S7 PLCStop) | `core.EventICSMessage` | protokol + funkcia + cieľové zariadenie |
 | `asset_unconfirmed.go` | `new_asset` — nové zariadenie po baseline learningu | `core.EventAssetUnconfirmed` (z `asset` enginu) | MAC zariadenia |
 | `value_out_of_range.go` | `value_out_of_range` — hodnota mimo naučeného rozsahu | `core.EventValueOutOfRange` (zo `store` enginu) | konkrétny Tag |
+| `honeypot.go` | `honeypot_lateral_movement` (critical) — honeypot iniciuje odchádzajúcu komunikáciu; `honeypot_probed` (medium) — niekto sa pripojil na honeypot | `core.EventPacketParsed` | smer + src + dst |
+
+`honeypot.go` je trochu iný než ostatné pravidlá — navyše odoberá aj
+`core.EventHoneypotCleared` (z `asset` enginu, publikovaný keď sa
+zariadenie na nakonfigurovanej honeypot IP odsťahuje na inú IP, napr.
+DHCP). Pri tomto evente `clearHoneypotAlerts()` zmaže všetky
+nepotvrdené (`AlertStatusNew`) honeypot alerty pre danú IP — už
+preverené (`approved`/`confirmed`) alerty ostávajú netknuté. Toto je
+jediné miesto v `internal/detect`, kde sa alert maže namiesto len
+vytvára/aktualizuje.
 
 Spoločné súbory (nie samostatné pravidlá):
 

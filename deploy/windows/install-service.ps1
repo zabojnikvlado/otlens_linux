@@ -1,16 +1,18 @@
 param(
     [string]$InstallDir = "C:\Program Files\OTLens",
-    [string]$ConfigDir = "C:\ProgramData\OTLens",
     [string]$ServiceName = "OTLensCentral"
 )
 
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $InstallDir "otlens-central.exe"
-$config = Join-Path $ConfigDir "config.yaml"
+# Central defaults to config.yaml next to its own executable — keeping the
+# config here (not a separate ProgramData path) means -BinaryPathName below
+# doesn't even need --config, though it's passed explicitly anyway so the
+# service still works correctly even if InstallDir is customized.
+$config = Join-Path $InstallDir "config.yaml"
 if (!(Test-Path $exe)) { throw "Missing $exe. Build/copy otlens-central.exe first." }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
 if (!(Test-Path $config)) {
     $template = Join-Path $InstallDir "central.config.example.yaml"

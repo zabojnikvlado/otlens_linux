@@ -38,8 +38,6 @@ CREATE TABLE IF NOT EXISTS sensors (
  sync_sequence BIGINT NOT NULL DEFAULT 0,
  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
-
 CREATE TABLE IF NOT EXISTS rule_sets (
  id TEXT PRIMARY KEY,
  name TEXT NOT NULL,
@@ -54,7 +52,6 @@ CREATE TABLE IF NOT EXISTS sensor_rule_sets (
  sensor_id TEXT PRIMARY KEY REFERENCES sensors(id) ON DELETE CASCADE,
  rule_set_id TEXT NOT NULL REFERENCES rule_sets(id) ON DELETE CASCADE
 );
-
 CREATE TABLE IF NOT EXISTS sensor_telemetry (
  sensor_id TEXT PRIMARY KEY REFERENCES sensors(id) ON DELETE CASCADE,
  captured_at TIMESTAMPTZ NOT NULL,
@@ -70,8 +67,32 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  checksum TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS go_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS libpcap_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS gopacket_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_backend TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_interface TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_snaplen INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS capture_promiscuous BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_attempt_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_success_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_data_received_at TIMESTAMPTZ;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS pending_records BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_sequence BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
-
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS alerts JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS baseline JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS sequence BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS sensor_commands (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -81,7 +102,6 @@ CREATE TABLE IF NOT EXISTS sensor_commands (
  delivered_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_sensor_commands_pending ON sensor_commands(sensor_id,id) WHERE delivered_at IS NULL;
-
 CREATE TABLE IF NOT EXISTS siem_outbox (
  id BIGSERIAL PRIMARY KEY,
  event_key TEXT NOT NULL UNIQUE,
@@ -94,7 +114,6 @@ CREATE TABLE IF NOT EXISTS siem_outbox (
  delivered_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_siem_outbox_pending ON siem_outbox(next_attempt_at,id) WHERE delivered_at IS NULL;
-
 CREATE TABLE IF NOT EXISTS analysis_jobs (
  id TEXT PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -116,7 +135,6 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
  completed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_sensor_status ON analysis_jobs(sensor_id,status,created_at);
-
 CREATE TABLE IF NOT EXISTS system_backups (
  id TEXT PRIMARY KEY,
  kind TEXT NOT NULL,
@@ -125,4 +143,63 @@ CREATE TABLE IF NOT EXISTS system_backups (
  size_bytes BIGINT NOT NULL DEFAULT 0,
  sha256 TEXT NOT NULL DEFAULT '',
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS roles (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ built_in BOOLEAN NOT NULL DEFAULT FALSE,
+ permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY,
+ username TEXT UNIQUE NOT NULL,
+ password_hash TEXT NOT NULL,
+ role_id TEXT NOT NULL REFERENCES roles(id),
+ display_name TEXT NOT NULL DEFAULT '',
+ enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+ password_expires_at TIMESTAMPTZ,
+ password_validity_days INTEGER,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ last_login_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS sessions (
+ id TEXT PRIMARY KEY,
+ user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ expires_at TIMESTAMPTZ NOT NULL,
+ last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ user_agent TEXT NOT NULL DEFAULT '',
+ ip TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
+
+-- Sensors prune flows that have gone quiet for a while (see
+-- internal/flow/engine.go's Prune) to bound their own SQLite growth —
+-- that's correct and necessary on the sensor, but it means a connection
+-- that only happened once can disappear from a later telemetry sync's
+-- topology blob even though it genuinely occurred. This table is Central's
+-- own durable, ever-growing record of every asset pair a sensor has ever
+-- reported: PutTelemetry upserts into it on every sync (see
+-- upsertTopologyEdges), and the /topology handler reads from here instead
+-- of the live per-sensor snapshot, so a connection drawn once stays on the
+-- map even after the sensor's own copy of it has aged out.
+CREATE TABLE IF NOT EXISTS topology_edges (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ pair_key TEXT NOT NULL,
+ src_ip TEXT NOT NULL,
+ dst_ip TEXT NOT NULL,
+ protocols TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ from_honeypot BOOLEAN NOT NULL DEFAULT FALSE,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ flow_count INTEGER NOT NULL DEFAULT 1,
+ first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, pair_key)
 );

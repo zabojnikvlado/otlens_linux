@@ -10,7 +10,7 @@
   </form>
 </div></div>
 <div id="app-shell" hidden>
-<header class="topbar"><div class="brand"><span class="brand-mark">OT</span>LENS <small>CENTRAL</small></div><nav class="tabs"><button class="tab active" data-tab="dashboard">Dashboard</button><button class="tab" data-tab="topology">Topology</button><button class="tab" data-tab="assets">Assets</button><button class="tab" data-tab="tags">OT Tags</button><button class="tab" data-tab="rules">Rules</button><button class="tab" data-tab="alerts">Alerts <span id="alert-badge"></span></button><button class="tab" data-tab="sensors">Sensors</button><button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="settings">Settings</button><button class="tab" data-tab="data">Data Management</button></nav><div class="status-cluster"><div class="baseline-badge"><span id="baseline-dot" class="dot"></span><span id="baseline-text">learning status</span></div><span id="current-user" class="current-user"></span><button id="logout-btn" class="ack-btn">Log out</button><div class="conn-badge"><span id="conn-dot" class="dot"></span><span id="conn-text">connecting</span></div></div></header>
+<header class="topbar"><div class="brand"><span class="brand-mark">OT</span>LENS <small>CENTRAL</small></div><nav class="tabs"><button class="tab active" data-tab="dashboard">Dashboard</button><button class="tab" data-tab="topology">Topology</button><button class="tab" data-tab="assets">Assets</button><button class="tab" data-tab="tags">OT Tags</button><button class="tab" data-tab="rules">Rules</button><button class="tab" data-tab="alerts">Alerts <span id="alert-badge"></span></button><button class="tab" data-tab="sensors">Sensors</button><button class="tab" data-tab="analysis">Analysis</button><button class="tab" data-tab="users">Users</button><button class="tab" data-tab="settings">Settings</button><button class="tab" data-tab="data">Data Management</button></nav><div class="status-cluster"><div class="baseline-badge"><span id="baseline-dot" class="dot"></span><span id="baseline-text">learning status</span></div><span id="current-user" class="current-user"></span><button id="logout-btn" class="ack-btn">Log out</button><div class="conn-badge"><span id="conn-dot" class="dot"></span><span id="conn-text">connecting</span></div></div></header>
 <main>
 
 <section class="view active" id="view-dashboard">
@@ -45,14 +45,26 @@
 <section class="view" id="view-analysis"><div class="panel"><div class="rules-toolbar"><div><h2>PCAP Analysis &amp; Import</h2><p class="rules-help">Upload a .pcap or .pcapng file to a selected Linux sensor. The sensor pauses live capture, replays the file through the same Modbus/S7 parsers and detection engine, then resumes capture.</p></div></div><form id="analysis-form" class="analysis-form"><label>Sensor<select id="analysis-sensor" required></select></label><label>PCAP file<input id="analysis-file" type="file" accept=".pcap,.pcapng,application/vnd.tcpdump.pcap" required></label><fieldset><legend>Protocols</legend><label class="check-label"><input type="checkbox" name="analysis-protocol" value="auto" checked> Auto detect</label><label class="check-label"><input type="checkbox" name="analysis-protocol" value="modbus" checked> Modbus/TCP</label><label class="check-label"><input type="checkbox" name="analysis-protocol" value="s7comm" checked> Siemens S7comm</label></fieldset><button type="submit" id="analysis-upload-submit" data-requires-action="analysis_manage" class="ack-btn">Upload and analyze</button><span id="analysis-upload-status"></span></form><div class="scrollable"><table class="data-table" id="table-analysis"><thead><tr><th>Created</th><th>Sensor</th><th>File</th><th>Status</th><th>Packets</th><th>Assets</th><th>Flows</th><th>OT tags</th><th>Alerts</th><th>Protocols</th><th>Error</th><th>Action</th></tr></thead><tbody></tbody></table></div></div></section>
 <section class="view" id="view-sensors"><div class="flows-toolbar"><button id="sensors-start" data-requires-action="sensor_start_stop" class="ack-btn bulk" hidden>Start selected</button><button id="sensors-stop" data-requires-action="sensor_start_stop" class="danger-btn bulk" hidden>Stop selected</button><span id="sensors-selection-count"></span></div><div class="panel scrollable"><table class="data-table" id="table-sensors"><thead><tr><th><input type="checkbox" id="sensors-all" aria-label="Select all sensors"></th><th>ID</th><th>Name</th><th>Site</th><th>Status</th><th>Hostname</th><th>OTLens</th><th>Go</th><th>libpcap</th><th>gopacket</th><th>Capture</th><th>Interface</th><th>Snaplen</th><th>Promiscuous</th><th>Last heartbeat</th><th>Last data</th><th>Sync</th><th>Pending</th><th>Last error</th></tr></thead><tbody></tbody></table></div></section>
 
-<section class="view" id="view-settings"><div class="panel"><h2>Settings</h2><p class="rules-help">Operational settings loaded from Central's config file at startup. Change them in <code>central.config.yaml</code> and restart Central to apply.</p>
-<h3>Change my password</h3>
+<section class="view" id="view-users">
+<div class="panel settings-panel"><h2>Change my password</h2>
 <form id="own-password-form">
   <label>Current password<input id="own-current-password" type="password" autocomplete="current-password" required></label>
   <label>New password (min. 8 characters)<input id="own-new-password" type="password" autocomplete="new-password" required minlength="8"></label>
   <button type="submit" class="ack-btn">Update password</button>
   <p id="own-password-status" class="form-error"></p>
 </form>
+</div>
+<div class="panel settings-panel">
+<div class="rules-toolbar"><h2>Users</h2><button id="user-add-open" data-requires-action="users_roles_manage" class="ack-btn">Add user</button></div>
+<div class="scrollable"><table class="data-table" id="table-users"><thead><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Password</th><th>Last login</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
+</div>
+<div class="panel settings-panel">
+<div class="rules-toolbar"><h2>Roles</h2><button id="role-add-open" data-requires-action="users_roles_manage" class="ack-btn">Add role</button></div>
+<p class="rules-help">Built-in roles (Administrator, Analyst, View only) can't be deleted, but their view/action grants below can be edited.</p>
+<div class="scrollable"><table class="data-table" id="table-roles"><thead><tr><th>Role</th><th>Views</th><th>Actions</th><th>Manage</th></tr></thead><tbody></tbody></table></div>
+</div>
+</section>
+<section class="view" id="view-settings"><div class="panel settings-panel"><h2>Settings</h2><p class="rules-help">Operational settings loaded from Central's config file at startup. Change them in <code>central.config.yaml</code> and restart Central to apply.</p>
 <h3>Sensor offline detection</h3>
 <dl class="status-list">
   <div><dt>Marks a sensor offline after</dt><dd id="settings-offline-after">—</dd></div>
@@ -69,15 +81,6 @@
   <div><dt>Web/Management API TLS</dt><dd id="settings-web-tls">—</dd></div>
   <div><dt>Sensor API TLS</dt><dd id="settings-sensor-tls">—</dd></div>
 </dl>
-</div>
-<div class="panel">
-<div class="rules-toolbar"><h2>Users</h2><button id="user-add-open" data-requires-action="users_roles_manage" class="ack-btn">Add user</button></div>
-<div class="scrollable"><table class="data-table" id="table-users"><thead><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Password</th><th>Last login</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
-</div>
-<div class="panel">
-<div class="rules-toolbar"><h2>Roles</h2><button id="role-add-open" data-requires-action="users_roles_manage" class="ack-btn">Add role</button></div>
-<p class="rules-help">Built-in roles (Administrator, Analyst, View only) can't be deleted, but their view/action grants below can be edited.</p>
-<div class="scrollable"><table class="data-table" id="table-roles"><thead><tr><th>Role</th><th>Views</th><th>Actions</th><th>Manage</th></tr></thead><tbody></tbody></table></div>
 </div>
 </section>
 <div id="user-modal" class="modal" hidden><div class="modal-card">

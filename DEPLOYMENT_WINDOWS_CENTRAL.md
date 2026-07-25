@@ -41,8 +41,10 @@ The sensor never connects directly to PostgreSQL.
 
 ## Recommended network policy
 
-- Sensor -> Central: outbound TCP 443 (TLS reverse proxy) or restricted TCP 9090 during internal testing.
-- Central -> PostgreSQL: localhost TCP 5432.
+- Sensor -> Central: outbound TCP to Central's Sensor API port (default
+  9443).
+- Central -> PostgreSQL: localhost TCP 5432 (or wherever `database.host`
+  points).
 - Sensor networks -> PostgreSQL: denied.
 - Internet -> PostgreSQL: denied.
 
@@ -53,9 +55,12 @@ The sensor never connects directly to PostgreSQL.
 3. Signed rule bundles.
 4. Persistent local rule state and transactional rollback.
 5. Central alert ingestion and incident correlation.
-6. RBAC and audit trail.
 
+RBAC and an audit trail already exist — see `DOCUMENTATION.md`'s
+"Roles and permissions" section.
 
-## Phase 3.7.0 – Data Management & Backup
+## Data management and backup
 
-Central now includes management-token-protected backup and reset controls. See `PHASE3_7_0_DATA_MANAGEMENT.md` for API, safety and recovery details.
+Central includes backup and reset controls under the Data Management tab
+(admin only) — see `DOCUMENTATION.md`'s "Data Management" section for
+what each operation does and its safety confirmations.

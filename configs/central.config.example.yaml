@@ -1,6 +1,7 @@
 # OTLens Central Management configuration.
-# Windows default deployment path:
-#   C:\ProgramData\OTLens\config.yaml
+# Default deployment path: config.yaml in the same directory as
+# otlens-central.exe — Central looks there automatically if you don't pass
+# --config. Put this file wherever you actually run the binary from.
 #
 # The Central process has two listeners:
 #   web        = management/web-facing listener (default 8443)

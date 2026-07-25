@@ -8,8 +8,9 @@ Type=simple
 User=otlens
 Group=otlens
 WorkingDirectory=/opt/otlens-central
-ExecStart=/opt/otlens-central/otlens-central
-Environment=OTLENS_CENTRAL_ADDR=:9090
+# Central's built-in default config path (C:\ProgramData\OTLens\config.yaml)
+# is Windows-only — --config is required when running on Linux.
+ExecStart=/opt/otlens-central/otlens-central --config /etc/otlens-central/config.yaml
 EnvironmentFile=-/etc/otlens-central/environment
 Restart=on-failure
 RestartSec=5

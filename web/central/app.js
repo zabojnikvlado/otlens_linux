@@ -378,7 +378,7 @@ async function refreshAll(){
   try{if(ok('/baseline'))renderBaseline()}catch(e){console.error('render baseline',e)}
   try{if(ok('/analysis/jobs'))renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
   try{if(ok('/settings'))renderSettings()}catch(e){console.error('render settings',e)}
-  try{if(canView('settings'))await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
+  try{if(canView('users'))await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
   try{renderDashboard()}catch(e){console.error('render dashboard',e)}
   const rejected=paths.map(p=>results[p].status==='rejected'?{path:p,reason:results[p].reason}:null).filter(Boolean);
   if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
@@ -442,15 +442,21 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',settings:'Settings',data:'Data Management'};
+const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server
 // still enforces this on every request — see requireView — this is only
 // so the UI doesn't dangle buttons that would just 403).
+// The Users tab holds content that used to live under Settings (self-
+// service password change, Users, Roles) — it's gated by the same
+// permission as Settings rather than a separate one, since splitting the
+// page into two tabs didn't change who's supposed to see it.
+const TAB_PERMISSION_ALIAS={users:'settings'};
 function applyNavFiltering(){
   document.querySelectorAll('.tab').forEach(btn=>{
-    btn.hidden=!canView(btn.dataset.tab);
+    const tab=btn.dataset.tab;
+    btn.hidden=!canView(TAB_PERMISSION_ALIAS[tab]||tab);
   });
   const active=document.querySelector('.tab.active');
   if(!active||active.hidden){

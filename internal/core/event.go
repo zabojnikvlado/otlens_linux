@@ -72,6 +72,19 @@ const (
 	// (whose job is tracking/persisting values, not deciding what's
 	// alert-worthy) raising alerts directly.
 	EventValueOutOfRange EventType = "value.out_of_range"
+
+	// EventHoneypotCleared carries a HoneypotCleared — published by
+	// internal/asset the moment it recomputes an asset's Score and
+	// finds it's dropped below config.Deception.HoneypotThreshold for
+	// an IP that was previously at or above it (typically because the
+	// device that was sitting on a configured decoy IP moved off it —
+	// DHCP renewal etc. — see Asset.Score's doc comment). internal/
+	// detect consumes this to stop treating that IP as a honeypot for
+	// alerting purposes: any still-unreviewed lateral-movement/probed
+	// alert for it is cleared, since the condition that justified it
+	// no longer holds. Alerts an operator already reviewed are left
+	// alone — see detect's clearHoneypotAlerts.
+	EventHoneypotCleared EventType = "honeypot.cleared"
 )
 
 // BaselineComplete is the payload for EventBaselineLearningComplete.
@@ -118,4 +131,10 @@ type Event struct {
 	Type      EventType
 	Timestamp time.Time
 	Data      any
+}
+
+// HoneypotCleared is the payload for EventHoneypotCleared — see that
+// event's doc comment.
+type HoneypotCleared struct {
+	IP string
 }

@@ -196,12 +196,12 @@ func (s *Server) WebRouter() *gin.Engine {
 	// Users & roles management — admin only (requireView(ViewSettings)
 	// gates the whole Settings tab these live on; requireAction gates the
 	// mutations specifically).
-	api.GET("/users", requireView(ViewSettings), s.listUsers)
+	api.GET("/users", requireView(ViewUsers), s.listUsers)
 	api.POST("/users", requireAction(ActionUsersRolesManage), s.createUser)
 	api.PATCH("/users/:id", requireAction(ActionUsersRolesManage), s.updateUser)
 	api.DELETE("/users/:id", requireAction(ActionUsersRolesManage), s.deleteUser)
 	api.POST("/users/:id/reset-password", requireAction(ActionUsersRolesManage), s.resetUserPassword)
-	api.GET("/roles", requireView(ViewSettings), s.listRoles)
+	api.GET("/roles", requireView(ViewUsers), s.listRoles)
 	api.PUT("/roles", requireAction(ActionUsersRolesManage), s.upsertRole)
 	api.DELETE("/roles/:id", requireAction(ActionUsersRolesManage), s.deleteRole)
 	return r
@@ -420,15 +420,38 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 				IsHoneypot:        n.Score >= sensorThreshold,
 			})
 		}
-		for _, edge := range aggregateEdges(graph.Edges) {
-			srcIP, dstIP := edge.SrcIP, edge.DstIP
-			edge.ID = prefix + edge.ID
+		// Edges are drawn from the durable per-sensor ledger (topology_edges),
+		// not graph.Edges directly — the sensor prunes flows that have gone
+		// quiet (internal/flow/engine.go's Prune) to bound its own SQLite
+		// growth, which is correct there but would otherwise make a
+		// connection that only happened once disappear from the map the
+		// next time it drops out of the live snapshot. PutTelemetry upserts
+		// into this ledger on every sync; once a pair is recorded here it
+		// stays on the map regardless of what the sensor currently still has.
+		persisted, err := s.Repo.ListTopologyEdges(c, row.SensorID)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range persisted {
+			pairKey := rec.PairKey()
 			edges = append(edges, topologyEdge{
-				Edge:      edge.Edge,
+				Edge: topology.Edge{
+					SrcIP:        rec.SrcIP,
+					DstIP:        rec.DstIP,
+					Protocol:     rec.Protocol,
+					IsOT:         rec.IsOT,
+					FromHoneypot: rec.FromHoneypot,
+					VLANID:       rec.VLANID,
+					Packets:      rec.Packets,
+					Bytes:        rec.Bytes,
+					FirstSeen:    rec.FirstSeen,
+					LastSeen:     rec.LastSeen,
+					ID:           prefix + "agg:" + pairKey,
+				},
 				SensorID:  row.SensorID,
-				SrcNodeID: prefix + srcIP,
-				DstNodeID: prefix + dstIP,
-				FlowCount: edge.FlowCount,
+				SrcNodeID: prefix + rec.SrcIP,
+				DstNodeID: prefix + rec.DstIP,
+				FlowCount: rec.FlowCount,
 			})
 		}
 	}
@@ -463,6 +486,19 @@ type aggregatedEdge struct {
 // so once we've seen a flow where it's true, its Src/DstIP (the honeypot as
 // SrcIP) is kept as the aggregated edge's direction rather than being
 // overwritten by some later, direction-arbitrary non-honeypot flow.
+// canonicalPair returns (lo, hi) — the two IPs of a conversation ordered
+// consistently regardless of which one happened to be recorded as
+// "source" for a given flow (flowKey on the sensor folds both directions
+// into one record already, but which side ends up as SrcIP is otherwise
+// arbitrary). Used to key both in-memory edge aggregation here and the
+// durable topology_edges table the same way.
+func canonicalPair(a, b string) (string, string) {
+	if b < a {
+		return b, a
+	}
+	return a, b
+}
+
 func aggregateEdges(flows []topology.Edge) []aggregatedEdge {
 	type bucket struct {
 		edge      topology.Edge
@@ -472,10 +508,7 @@ func aggregateEdges(flows []topology.Edge) []aggregatedEdge {
 	order := make([]string, 0, len(flows))
 	buckets := make(map[string]*bucket, len(flows))
 	for _, f := range flows {
-		lo, hi := f.SrcIP, f.DstIP
-		if hi < lo {
-			lo, hi = hi, lo
-		}
+		lo, hi := canonicalPair(f.SrcIP, f.DstIP)
 		key := lo + "|" + hi
 
 		b, ok := buckets[key]
