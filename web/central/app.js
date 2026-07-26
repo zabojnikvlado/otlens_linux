@@ -22,7 +22,9 @@ async function fetchTopology(){
   if(r.status===304)return{unchanged:true};
   if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;throw e}
   topologyETag=r.headers.get('ETag')||topologyETag;
-  return{unchanged:false,value:await r.json()};
+  const value=await r.json();
+  console.log(`Topology fetch: ${(value.Nodes||[]).length} nodes, ${(value.Edges||[]).length} edges, ETag=${topologyETag}`);
+  return{unchanged:false,value};
 }
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
 async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}return r.status===204||r.status===202?null:r.json()}
@@ -90,13 +92,16 @@ function renderTopology(){
   })),
         ip=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n.ID])),
         nodeByIP=new Map(rawNodes.map(n=>[n.SensorID+'::'+n.IP,n]));
-  const es=dedupeById(rawEdges.map(e=>{
+  const mappedEdges=rawEdges.map(e=>{
     const src=nodeByIP.get(e.SensorID+'::'+e.SrcIP),dst=nodeByIP.get(e.SensorID+'::'+e.DstIP),
           interVlan=!!src&&!!dst&&Number(src.VLANID||0)!==Number(dst.VLANID||0),lateral=!!e.FromHoneypot,
           label=lateral?'POTENTIAL LATERAL MOVEMENT':interVlan?`VLAN ${src.VLANID||'untagged'} → ${dst.VLANID||'untagged'}`:(!dense&&e.IsOT?e.Protocol:'');
     const flowNote=e.FlowCount>1?` (${e.FlowCount} flows aggregated, ${e.Packets||0} pkts)`:'';
-    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),label,title:(lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#5fd1c4':'#94a3b8',opacity:dense&&!lateral&&!interVlan?.55:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
-  }).filter(e=>e.from!=null&&e.to!=null));
+    return{id:e.ID,from:ip.get(e.SensorID+'::'+e.SrcIP),to:ip.get(e.SensorID+'::'+e.DstIP),_srcIP:e.SrcIP,_dstIP:e.DstIP,_sensorID:e.SensorID,label,title:(lateral?`Potential lateral movement: honeypot ${e.SrcIP} initiated communication to ${e.DstIP}`:interVlan?'Inter-VLAN communication':e.Protocol)+flowNote,font:{color:lateral?'#ff9f95':interVlan?'#fbbf24':'#d7e1ec',strokeWidth:2,strokeColor:'#0b1220',size:dense?10:14},color:{color:lateral?'#ef4444':interVlan?'#f59e0b':e.IsOT?'#5fd1c4':'#94a3b8',opacity:dense&&!lateral&&!interVlan?.55:1},dashes:lateral?false:interVlan?[10,6]:false,width:lateral?5:interVlan?3:e.IsOT?2:1,arrows:lateral?'to':undefined,smooth:false}
+  });
+  const unresolvedEdges=mappedEdges.filter(e=>e.from==null||e.to==null);
+  if(unresolvedEdges.length)console.warn(`Topology: ${unresolvedEdges.length} edge(s) from Central couldn't be attached to a node this poll (endpoint asset missing from the response's node list) — these are what "flicker" if it's not consistent poll-to-poll:`,unresolvedEdges.map(e=>({id:e.id,sensor:e._sensorID,srcIP:e._srcIP,dstIP:e._dstIP,srcResolved:e.from!=null,dstResolved:e.to!=null})));
+  const es=dedupeById(mappedEdges.filter(e=>e.from!=null&&e.to!=null));
   if(!network){
     ns.forEach(n=>topologyNodeSigCache.set(n.id,nodeSignature(n)));
     es.forEach(e=>topologyEdgeSigCache.set(e.id,edgeSignature(e)));
@@ -118,7 +123,9 @@ function renderTopology(){
   }else{
     const oldIds=new Set(nodesDS.getIds()),nextIds=new Set(ns.map(n=>n.id));
     const newIds=ns.filter(n=>!oldIds.has(n.id)).map(n=>n.id);
-    nodesDS.getIds().filter(id=>!nextIds.has(id)).forEach(id=>{nodesDS.remove(id);topologyPositionCache.delete(id);topologyNodeSigCache.delete(id)});
+    const removedNodeIds=nodesDS.getIds().filter(id=>!nextIds.has(id));
+    if(removedNodeIds.length)console.warn(`Topology: removing ${removedNodeIds.length} node(s) no longer in the response:`,removedNodeIds);
+    removedNodeIds.forEach(id=>{nodesDS.remove(id);topologyPositionCache.delete(id);topologyNodeSigCache.delete(id)});
     // Only push nodes whose visible properties actually changed (or are
     // brand new). An asset that's sitting there unchanged in the database
     // between polls costs nothing here — same principle as the edge diff
@@ -126,7 +133,9 @@ function renderTopology(){
     const changedNodes=ns.filter(n=>{const sig=nodeSignature(n),same=topologyNodeSigCache.get(n.id)===sig;topologyNodeSigCache.set(n.id,sig);return!same});
     if(changedNodes.length)nodesDS.update(changedNodes);
     const edgeIds=new Set(es.map(e=>e.id));
-    edgesDS.getIds().filter(id=>!edgeIds.has(id)).forEach(id=>{edgesDS.remove(id);topologyEdgeSigCache.delete(id)});
+    const removedEdgeIds=edgesDS.getIds().filter(id=>!edgeIds.has(id));
+    if(removedEdgeIds.length)console.warn(`Topology: removing ${removedEdgeIds.length} edge(s) no longer in the response (had ${edgesDS.length}, response now has ${es.length}):`,removedEdgeIds);
+    removedEdgeIds.forEach(id=>{edgesDS.remove(id);topologyEdgeSigCache.delete(id)});
     // This is the "draw a connection once, then leave it alone while it's
     // unchanged in the database" behavior: a conversation between two
     // assets that Central already knows about, with the same OT/VLAN/
