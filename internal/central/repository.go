@@ -486,6 +486,18 @@ func (r *Repository) MarkOffline(ctx context.Context, olderThan time.Duration) (
 	return ids, rows.Err()
 }
 
+// DeleteSensor removes a sensor's row and, via ON DELETE CASCADE on
+// every sensor-scoped table's foreign key, everything derived from it:
+// telemetry, topology history, alert history, analysis jobs, rule
+// assignments, and pending commands. This is NOT a permanent ban on the
+// sensor id — if that sensor is still running, its very next
+// register()/heartbeat() upsert just recreates the row from scratch
+// (with fresh, empty history), since those are ON CONFLICT DO UPDATE.
+func (r *Repository) DeleteSensor(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM sensors WHERE id=$1`, id)
+	return err
+}
+
 func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) error {
 	if x.CapturedAt.IsZero() {
 		x.CapturedAt = time.Now().UTC()

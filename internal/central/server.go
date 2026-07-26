@@ -60,6 +60,14 @@ type Server struct {
 	// so this handler never needs its own "feature disabled" branch.
 	Vuln      *vuln.Database
 	web       *http.Server
+	// loginFailures tracks consecutive failed login attempts per
+	// username, purely in-memory (reset on Central restart — that's
+	// fine, this is a detection signal, not an account lockout
+	// mechanism; it never blocks a login attempt). See recordLoginFailure.
+	loginFailures struct {
+		mu     sync.Mutex
+		counts map[string]int
+	}
 	sensorAPI *http.Server
 
 	// topoCache holds the last built /topology response keyed by a
@@ -225,6 +233,7 @@ func (s *Server) WebRouter() *gin.Engine {
 
 	api.GET("/sensors", requireView(ViewSensors), s.sensors)
 	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
+	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/settings", requireView(ViewSettings), s.settings)
@@ -1170,6 +1179,24 @@ func (s *Server) sensorActions(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"queued": queued, "action": request.Action})
 }
 
+// deleteSensor removes a sensor's row and everything derived from it —
+// see Repository.DeleteSensor's comment. Not a permanent ban: if the
+// sensor is still running, its next register()/heartbeat() just
+// recreates it with fresh history.
+func (s *Server) deleteSensor(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sensor id is required"})
+		return
+	}
+	if err := s.Repo.DeleteSensor(c, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("sensor deleted: %s", id), id)
+	c.Status(http.StatusOK)
+}
+
 func (s *Server) sensors(c *gin.Context) {
 	v, e := s.Repo.ListSensors(c)
 	if e != nil {
@@ -1437,6 +1464,7 @@ func (s *Server) resetData(c *gin.Context) {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
+		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: central/%s", op), "")
 		c.JSON(202, gin.H{"status": "reset_queued", "scope": "central", "operation": op, "sensors": queued})
 	case "sensors":
 		if len(req.SensorIDs) == 0 {
@@ -1453,6 +1481,7 @@ func (s *Server) resetData(c *gin.Context) {
 				return
 			}
 		}
+		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: sensors/%s (%s)", req.Operation, strings.Join(req.SensorIDs, ",")), "")
 		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs), "command": command})
 	default:
 		c.JSON(400, gin.H{"error": "scope must be central or sensors"})
@@ -1477,6 +1506,7 @@ func (s *Server) createBackup(c *gin.Context) {
 				return req.Name
 			}()})
 		}
+		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup created: sensors (%s)", strings.Join(req.SensorIDs, ",")), "")
 		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs)})
 		return
 	}
@@ -1486,6 +1516,7 @@ func (s *Server) createBackup(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup created: central (%s)", id), "")
 	c.JSON(201, b)
 }
 func (s *Server) listBackups(c *gin.Context) {
@@ -1497,10 +1528,12 @@ func (s *Server) listBackups(c *gin.Context) {
 	c.JSON(200, b)
 }
 func (s *Server) deleteBackup(c *gin.Context) {
-	if err := s.Repo.DeleteBackup(c, c.Param("backup")); err != nil {
+	backupID := c.Param("backup")
+	if err := s.Repo.DeleteBackup(c, backupID); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup deleted: %s", backupID), "")
 	c.Status(204)
 }
 func (s *Server) downloadBackup(c *gin.Context) {

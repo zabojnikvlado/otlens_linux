@@ -244,9 +244,16 @@ how "offline" is detected), version info, capture backend/interface,
 libpcap/Go/gopacket versions, last heartbeat/sync/data timestamps, and sync
 health. Select sensors to start/stop their live capture remotely (the
 sensor process and its sync link to Central stay up either way — only
-packet capture pauses). Needs `sensor_start_stop`, which — per the default
-Analyst role — is the one action even a full Analyst doesn't get; it's
-reserved for Admins.
+packet capture pauses), or to delete them entirely. Needs `sensor_start_stop`,
+which — per the default Analyst role — is the one action even a full
+Analyst doesn't get; it's reserved for Admins.
+
+Deleting a sensor removes its row and, via cascade, everything derived
+from it — telemetry, topology history, alert history, analysis jobs, rule
+assignments, pending commands. This is not a permanent ban: if that
+sensor is still running, its next heartbeat simply recreates the row from
+scratch, with fresh, empty history. Logged to the [Audit log](#audit) with
+the acting username.
 
 ### Analysis
 
@@ -326,14 +333,26 @@ Beyond the generic "method+path" entry every mutating request gets,
 several actions log a specific, human-readable line instead:
 
 - **Login / logout**, with the username.
-- **Sensor started** — logged once when a sensor transitions from
-  offline (or brand new) to online, not on every routine re-registration
-  (a sensor actually calls the registration endpoint on every sync cycle
-  as a keep-alive, so logging every call would flood this table).
+- **Login failed**, with the attempted username (not the password,
+  obviously) — logged for every failed attempt, whether the username
+  didn't exist or the password was wrong (those two cases are
+  deliberately indistinguishable in the response, so an attacker can't
+  enumerate valid usernames, but both still show up here).
+- **Brute force detected** — logged every 5th *consecutive* failed
+  login for a given username (5, 10, 15, ...), reset the moment that
+  username logs in successfully. Tracked in memory per username (not
+  per source IP), so it survives an attacker rotating IPs but won't
+  catch one IP spraying many different usernames — a different pattern
+  this isn't meant to catch. This is a detection signal only; it never
+  blocks or delays a login attempt.
 - **Sensor went offline** — logged once per actual transition, from the
   same background sweep that drives the Sensors tab's offline status
   (`sensors.offline_after`/`check_interval`), not repeated on every sweep
-  while a sensor stays down.
+  while a sensor stays down. (Deliberately no "sensor started" entry —
+  with a short sensor sync interval, that would log far too often to be
+  useful; the Sensors tab's own status is the place to check that.)
+- **Sensor deleted**, with the sensor ID and username — see
+  [Sensors](#sensors) for what this does and doesn't do.
 - **Asset confirmed / deleted**, **alert confirmed / approved**, with the
   username and a summary of which targets (a short list, or a count for
   a large bulk selection — approving thousands of alerts at once
@@ -343,6 +362,13 @@ several actions log a specific, human-readable line instead:
   username.
 - **Sensor capture started / stopped** (the Sensors tab action, not the
   process itself), with the username.
+- **Password changed** (self-service) and **password reset by admin**,
+  with the username — never the password itself.
+- **User created / modified / deleted**, **role changed / deleted**,
+  with the username performing the action and the target user/role.
+- **Data reset** (Data Management tab, both Central and per-sensor
+  scopes) and **backup created / deleted**, with the username and what
+  was reset/backed up.
 
 ### Database retention
 

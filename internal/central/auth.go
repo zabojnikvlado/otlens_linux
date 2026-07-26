@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -229,6 +230,28 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+// recordLoginFailure bumps the consecutive-failure count for username
+// and returns the new total. Deliberately in-memory only and per-
+// username (not per-IP): the concern here is "is someone hammering this
+// specific account," which survives the attacker rotating source IPs,
+// at the cost of not catching one IP spraying many different
+// usernames — a different pattern this isn't meant to catch.
+func (s *Server) recordLoginFailure(username string) int {
+	s.loginFailures.mu.Lock()
+	defer s.loginFailures.mu.Unlock()
+	if s.loginFailures.counts == nil {
+		s.loginFailures.counts = make(map[string]int)
+	}
+	s.loginFailures.counts[username]++
+	return s.loginFailures.counts[username]
+}
+
+func (s *Server) resetLoginFailures(username string) {
+	s.loginFailures.mu.Lock()
+	defer s.loginFailures.mu.Unlock()
+	delete(s.loginFailures.counts, username)
+}
+
 func (s *Server) login(c *gin.Context) {
 	var req loginRequest
 	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Username) == "" || req.Password == "" {
@@ -240,13 +263,19 @@ func (s *Server) login(c *gin.Context) {
 		// Deliberately identical error for "no such user" and "wrong
 		// password" — distinguishing them lets an attacker enumerate
 		// valid usernames.
+		s.logAudit(c, req.Username, "login failed", "")
+		if n := s.recordLoginFailure(req.Username); n > 0 && n%5 == 0 {
+			s.logAudit(c, req.Username, fmt.Sprintf("brute force detected: %d consecutive failed logins", n), "")
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
 		return
 	}
 	if !auth.Enabled {
+		s.logAudit(c, req.Username, "login failed: account disabled", "")
 		c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
 		return
 	}
+	s.resetLoginFailures(req.Username)
 	sessionID, err := newRandomToken(32)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
@@ -361,6 +390,7 @@ func (s *Server) changePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, identity.Username, fmt.Sprintf("password changed: %s", identity.Username), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -429,6 +459,7 @@ func (s *Server) createUser(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("user created: %s", req.Username), "")
 	c.JSON(http.StatusCreated, gin.H{"ok": true})
 }
 
@@ -460,6 +491,7 @@ func (s *Server) updateUser(c *gin.Context) {
 		// naturally expires.
 		_ = s.Repo.DeleteSessionsForUser(c, id)
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("user modified: %s (role=%s, enabled=%v)", id, req.RoleID, req.Enabled), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -469,11 +501,17 @@ func (s *Server) deleteUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete your own account while logged in as it"})
 		return
 	}
+	target, _ := s.Repo.GetUser(c, id)
 	_ = s.Repo.DeleteSessionsForUser(c, id)
 	if err := s.Repo.DeleteUser(c, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	label := id
+	if target != nil {
+		label = target.Username
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("user deleted: %s", label), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -515,6 +553,7 @@ func (s *Server) resetUserPassword(c *gin.Context) {
 		return
 	}
 	_ = s.Repo.DeleteSessionsForUser(c, id)
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("password reset by admin: %s", user.Username), "")
 	c.JSON(http.StatusOK, gin.H{"TemporaryPassword": temp})
 }
 
@@ -543,6 +582,7 @@ func (s *Server) upsertRole(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("role changed: %s (%s)", req.Name, req.ID), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -561,5 +601,6 @@ func (s *Server) deleteRole(c *gin.Context) {
 		}
 		return
 	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("role deleted: %s", id), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
