@@ -102,4 +102,16 @@ type Alert struct {
 	// one of the three valid states.
 	Status          AlertStatus
 	StatusChangedAt time.Time
+
+	// Synced is false whenever this alert has changed (new occurrence,
+	// Count/LastSeen bump, or a Status change) since it was last
+	// successfully reported to Central — see GetDirtyAlerts/
+	// MarkAlertsSynced. This is what lets telemetry sync send only
+	// what's actually new/changed instead of the entire alert set every
+	// time; without it, a sensor that's accumulated tens of thousands
+	// of distinct findings over time would re-serialize and re-upload
+	// all of them on every single sync, which is both wasteful and, at
+	// large enough scale, capable of exceeding PostgreSQL's per-JSONB-
+	// value size limit outright.
+	Synced bool
 }

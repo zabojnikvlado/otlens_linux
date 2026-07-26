@@ -498,6 +498,7 @@ func (e *Engine) raiseCustomRuleAlert(rule *Rule, key, message, ip string) {
 	}
 	a.LastSeen = now
 	a.Count++
+	a.Synced = false
 }
 func (e *Engine) ReplaceManagedRules(rules []*Rule) {
 	e.mutex.Lock()

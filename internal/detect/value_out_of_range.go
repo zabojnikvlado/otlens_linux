@@ -90,4 +90,5 @@ func (e *Engine) handleValueOutOfRange(ov core.OutOfRangeValue) {
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }

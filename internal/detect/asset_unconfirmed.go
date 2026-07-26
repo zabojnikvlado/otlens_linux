@@ -88,4 +88,5 @@ func (e *Engine) handleAssetUnconfirmed(ua core.UnconfirmedAsset) {
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }

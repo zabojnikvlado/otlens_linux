@@ -149,6 +149,18 @@ func (w *Worker) sync(ctx context.Context) {
 			cancel()
 			if uploadErr == nil {
 				w.markSuccess(nextSequence)
+				if w.Detect != nil && len(snapshot.Alerts) > 0 {
+					var sent []struct {
+						ID string `json:"ID"`
+					}
+					if json.Unmarshal(snapshot.Alerts, &sent) == nil {
+						ids := make([]string, 0, len(sent))
+						for _, a := range sent {
+							ids = append(ids, a.ID)
+						}
+						w.Detect.MarkAlertsSynced(ids)
+					}
+				}
 				break
 			}
 			w.markFailure(uploadErr)

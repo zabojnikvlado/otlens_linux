@@ -262,6 +262,7 @@ func (e *Engine) allowAlertOccurrenceLocked(alert *Alert) bool {
 	case AlertStatusConfirmed:
 		alert.Status = AlertStatusNew
 		alert.StatusChangedAt = time.Now()
+		alert.Synced = false
 	}
 	return true
 }
@@ -286,6 +287,7 @@ func (e *Engine) setAlertStatus(id string, status AlertStatus) bool {
 
 	alert.Status = status
 	alert.StatusChangedAt = time.Now()
+	alert.Synced = false
 
 	return true
 }
@@ -325,7 +327,79 @@ func (e *Engine) GetAlerts() []*Alert {
 	return result
 }
 
-// RestoreAlerts rehydrates the alert map from previously persisted
+// maxDirtyAlertsPerSync caps how many alerts a single GetDirtyAlerts
+// call returns. Matters most right after upgrading to a build that has
+// this dirty-tracking at all: every alert already on disk from before
+// this field existed comes back with Synced's zero value (false), so
+// without this cap a sensor that's accumulated a large backlog would
+// still try to send its entire alert set on the very first sync after
+// upgrading — the exact failure this change exists to prevent. Anything
+// left uncapped just stays dirty and goes out over the next several
+// sync cycles instead.
+const maxDirtyAlertsPerSync = 1000
+
+// GetDirtyAlerts returns a snapshot of only the alerts that have
+// changed (new, Count/LastSeen bumped, or a Status change) since they
+// were last successfully reported to Central — see MarkAlertsSynced.
+// This is what the periodic telemetry sync actually sends, instead of
+// GetAlerts' full set, so a sensor that's accumulated a large number of
+// distinct findings over time doesn't re-serialize and re-upload all of
+// them every single sync. Capped at maxDirtyAlertsPerSync per call —
+// see that constant's comment.
+func (e *Engine) GetDirtyAlerts() []*Alert {
+
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
+
+	result := make([]*Alert, 0)
+
+	for _, alert := range e.alerts {
+
+		if alert.Synced {
+			continue
+		}
+
+		clone := *alert
+
+		result = append(
+			result,
+			&clone,
+		)
+
+		if len(result) >= maxDirtyAlertsPerSync {
+			break
+		}
+
+	}
+
+	return result
+}
+
+// MarkAlertsSynced marks the given alert IDs as successfully reported —
+// call only after Central has acknowledged the sync that included them.
+// There's a narrow window where an alert changes again between
+// GetDirtyAlerts' snapshot and this call — that update just isn't
+// reflected in Central until the alert changes again and goes dirty
+// once more (at most one sync interval later), which is an acceptable
+// tradeoff for a monitoring field like Count/LastSeen, not silent data
+// loss: the alert itself is never dropped, only briefly slightly stale.
+func (e *Engine) MarkAlertsSynced(ids []string) {
+
+	if len(ids) == 0 {
+		return
+	}
+
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	for _, id := range ids {
+		if alert, ok := e.alerts[id]; ok {
+			alert.Synced = true
+		}
+	}
+}
+
+
 // Alerts, e.g. at startup after loading from disk.
 func (e *Engine) RestoreAlerts(alerts []*Alert) {
 

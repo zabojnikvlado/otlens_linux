@@ -772,12 +772,20 @@ func (s *Server) tagEvents(c *gin.Context) {
 	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.TagEvents })
 }
 func (s *Server) alerts(c *gin.Context) {
-	v, e := s.Repo.Telemetry(c)
-	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+	entries, err := s.Repo.ListAlertHistory(c, 2000)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.Alerts })
+	out := make([]gin.H, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, gin.H{
+			"SensorID": e.SensorID, "ID": e.AlertKey, "Type": e.Type, "Severity": e.Severity,
+			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count,
+			"ApprovedBy": e.ApprovedBy, "ApprovedAt": e.ApprovedAt, "FirstSeen": e.FirstSeen, "LastSeen": e.LastSeen,
+		})
+	}
+	c.JSON(http.StatusOK, out)
 }
 func (s *Server) rules(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)

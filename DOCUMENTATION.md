@@ -214,6 +214,17 @@ finding — a later recurrence can still alert again) or **Approve**
 (remember this alert pattern on the sensor and suppress future occurrences
 of the same alert ID). Needs `alert_confirm_approve`.
 
+Backed by `alert_history` in PostgreSQL (one row per alert, upserted by
+its dedup key), not the raw per-sync telemetry blob — a sensor only ever
+reports alerts that are new or changed since its last successful sync
+(capped per sync; a large backlog drains over several sync cycles rather
+than all at once), so Central has to accumulate that into a durable
+per-alert table rather than treating each sync as "here is the complete
+current set." This is also what stops an OT network with a very large
+number of distinct findings from ever producing a telemetry payload big
+enough to hit PostgreSQL's hard 256 MB per-JSONB-value limit — the
+failure mode this replaced.
+
 ### Sensors
 
 Every registered sensor: status (online/offline — see

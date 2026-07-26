@@ -111,4 +111,5 @@ func (e *Engine) raiseARPAlert(ip, previousMAC, newMAC string) {
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }

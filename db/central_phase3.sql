@@ -244,11 +244,13 @@ CREATE TABLE IF NOT EXISTS alert_history (
  status TEXT NOT NULL DEFAULT 'new',
  approved_by TEXT NOT NULL DEFAULT '',
  approved_at TIMESTAMPTZ,
+ count BIGINT NOT NULL DEFAULT 1,
  first_seen TIMESTAMPTZ NOT NULL,
  last_seen TIMESTAMPTZ NOT NULL,
  PRIMARY KEY (sensor_id, alert_key)
 );
 CREATE INDEX IF NOT EXISTS idx_alert_history_last_seen ON alert_history(last_seen);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS count BIGINT NOT NULL DEFAULT 1;
 
 -- Written unconditionally by auditMiddleware for every mutating
 -- Management API request, independent of whether SIEM export is

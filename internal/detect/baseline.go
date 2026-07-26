@@ -254,6 +254,7 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }
 
 // baselineKey builds a direction-independent identity for "asset A

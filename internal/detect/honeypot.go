@@ -202,4 +202,5 @@ func (e *Engine) raiseHoneypotAlert(alertType AlertType, severity, key, message,
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }

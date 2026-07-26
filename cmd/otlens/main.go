@@ -338,7 +338,7 @@ func main() {
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}
-			alertsJSON, err := marshal(application.DetectEngine.GetAlerts())
+			alertsJSON, err := marshal(application.DetectEngine.GetDirtyAlerts())
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}

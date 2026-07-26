@@ -269,11 +269,13 @@ CREATE TABLE IF NOT EXISTS alert_history (
  status TEXT NOT NULL DEFAULT 'new',
  approved_by TEXT NOT NULL DEFAULT '',
  approved_at TIMESTAMPTZ,
+ count BIGINT NOT NULL DEFAULT 1,
  first_seen TIMESTAMPTZ NOT NULL,
  last_seen TIMESTAMPTZ NOT NULL,
  PRIMARY KEY (sensor_id, alert_key)
 );
 CREATE INDEX IF NOT EXISTS idx_alert_history_last_seen ON alert_history(last_seen);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS count BIGINT NOT NULL DEFAULT 1;
 
 -- Written unconditionally by auditMiddleware for every mutating
 -- Management API request, independent of whether SIEM export is
@@ -594,20 +596,26 @@ func (r *Repository) TelemetryTopology(ctx context.Context) ([]TopologyRow, erro
 }
 
 func (r *Repository) QueueCommands(ctx context.Context, sensorID, typ string, targets []string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, target := range targets {
-		if target == "" {
-			continue
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO sensor_commands(sensor_id,command_type,target) VALUES($1,$2,$3)`, sensorID, typ, target); err != nil {
-			return err
+	clean := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t != "" {
+			clean = append(clean, t)
 		}
 	}
-	return tx.Commit()
+	if len(clean) == 0 {
+		return nil
+	}
+	// One round trip regardless of how many targets — unnest() expands
+	// the array into rows server-side. The naive "one INSERT per target"
+	// loop this replaced took whole seconds-to-minutes (visible as "did
+	// this even do anything?" in the UI) once someone selected a
+	// realistic bulk-action count (thousands of alerts, say), since each
+	// row was its own network round trip to Postgres.
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO sensor_commands(sensor_id,command_type,target) SELECT $1, $2, unnest($3::text[])`,
+		sensorID, typ, clean,
+	)
+	return err
 }
 func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]management.Command, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -631,8 +639,8 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 		ids = append(ids, c.ID)
 	}
 	rows.Close()
-	for _, id := range ids {
-		if _, err = tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE id=$1`, id); err != nil {
+	if len(ids) > 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE id = ANY($1)`, ids); err != nil {
 			return nil, err
 		}
 	}

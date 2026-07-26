@@ -73,4 +73,5 @@ func (e *Engine) handleICS(msg ics.Message) {
 
 	alert.LastSeen = now
 	alert.Count++
+	alert.Synced = false
 }
