@@ -66,6 +66,18 @@ func main() {
 		log.Fatalf("auth bootstrap failed: %v", err)
 	}
 
+	// Catch-up for edges written before upsertTopologyEdges started
+	// guaranteeing both endpoints have a node — see that function's
+	// comment. Not fatal if it fails: the Topology tab just keeps
+	// showing whatever gap already existed until the next successful
+	// run, same as any other startup task that isn't strictly required
+	// to serve traffic.
+	if n, err := repo.BackfillOrphanedEdgeNodes(context.Background()); err != nil {
+		log.Printf("topology node backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("topology node backfill: created %d missing node stub(s) for existing edges", n)
+	}
+
 	// vuln.New() alone is a working no-op — Lookup just returns an empty
 	// slice — so this is unconditional; LoadCSV only runs when configured,
 	// and a failed/missing snapshot logs a warning rather than crashing

@@ -60,6 +60,34 @@ func upsertTopologyEdges(ctx context.Context, x execer, sensorID string, edges [
 		if lastSeen.IsZero() {
 			lastSeen = firstSeen
 		}
+		// An edge is only ever drawable if both its endpoints resolve to
+		// a node in the same /topology response — and topology_nodes is
+		// only ever populated from a sensor's *asset* list (graph.Nodes),
+		// which isn't guaranteed to include every IP that ever shows up
+		// as a flow endpoint (a gateway, a DNS/NTP server, anything the
+		// asset engine didn't classify as a full asset, or a device that
+		// aged out of the sensor's own asset tracking after this pair
+		// was first recorded). Without this, such an edge sits in
+		// topology_edges forever with no node to attach to on either
+		// end — invisible, but still costing a full row in every
+		// /topology rebuild, and reappearing/vanishing as an "unresolved
+		// edge" depending on what else happens to be in the node ledger
+		// that poll. ON CONFLICT DO NOTHING means this never overwrites
+		// real asset data if a proper node already exists for the IP —
+		// it only fills the gap when nothing does.
+		for _, ip := range [2]string{e.SrcIP, e.DstIP} {
+			if ip == "" {
+				continue
+			}
+			if _, err := x.ExecContext(ctx, `
+				INSERT INTO topology_nodes(sensor_id,ip,first_seen,last_seen)
+				VALUES($1,$2,$3,$4)
+				ON CONFLICT(sensor_id,ip) DO NOTHING`,
+				sensorID, ip, firstSeen, lastSeen,
+			); err != nil {
+				return err
+			}
+		}
 		_, err := x.ExecContext(ctx, `
 			INSERT INTO topology_edges(sensor_id,pair_key,src_ip,dst_ip,protocols,is_ot,from_honeypot,vlan_id,packets,bytes,flow_count,first_seen,last_seen)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -107,6 +135,28 @@ func (r *Repository) ListTopologyEdges(ctx context.Context, sensorID string) ([]
 
 // topologyNodeRecord is one row of topology_nodes — see that table's
 // doc comment in the embedded schema.
+// BackfillOrphanedEdgeNodes creates minimal topology_nodes stubs for any
+// IP that already appears in topology_edges but has no matching node —
+// the one-time catch-up for upsertTopologyEdges' ongoing guarantee,
+// which only covers edges written *after* that guarantee existed. Safe
+// to call on every startup: ON CONFLICT DO NOTHING makes repeat runs a
+// no-op once caught up.
+func (r *Repository) BackfillOrphanedEdgeNodes(ctx context.Context) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO topology_nodes (sensor_id, ip, first_seen, last_seen)
+		SELECT sensor_id, ip, NOW(), NOW() FROM (
+			SELECT sensor_id, src_ip AS ip FROM topology_edges
+			UNION
+			SELECT sensor_id, dst_ip AS ip FROM topology_edges
+		) AS edge_ips
+		ON CONFLICT (sensor_id, ip) DO NOTHING`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 type topologyNodeRecord struct {
 	IP          string
 	MAC         string
