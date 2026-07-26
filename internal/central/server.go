@@ -51,6 +51,9 @@ type Server struct {
 	// SessionDuration is the sliding-expiry window for logged-in Central
 	// UI sessions — see authMiddleware. Defaults to 6h (auth.session_duration).
 	SessionDuration time.Duration
+	// Retention is shown read-only on the Settings tab — see
+	// retention.go for what it actually does.
+	Retention RetentionConfig
 	// Vuln is looked up by asset vendor only (see package vuln's doc
 	// comment for why that's a real precision limit, not an oversight) —
 	// never nil; main.go always sets it to at least an empty *vuln.Database
@@ -256,12 +259,12 @@ func (s *Server) WebRouter() *gin.Engine {
 	// Users & roles management — admin only (requireView(ViewSettings)
 	// gates the whole Settings tab these live on; requireAction gates the
 	// mutations specifically).
-	api.GET("/users", requireView(ViewUsers), s.listUsers)
+	api.GET("/users", requireAction(ActionUsersRolesManage), s.listUsers)
 	api.POST("/users", requireAction(ActionUsersRolesManage), s.createUser)
 	api.PATCH("/users/:id", requireAction(ActionUsersRolesManage), s.updateUser)
 	api.DELETE("/users/:id", requireAction(ActionUsersRolesManage), s.deleteUser)
 	api.POST("/users/:id/reset-password", requireAction(ActionUsersRolesManage), s.resetUserPassword)
-	api.GET("/roles", requireView(ViewUsers), s.listRoles)
+	api.GET("/roles", requireAction(ActionUsersRolesManage), s.listRoles)
 	api.PUT("/roles", requireAction(ActionUsersRolesManage), s.upsertRole)
 	api.DELETE("/roles/:id", requireAction(ActionUsersRolesManage), s.deleteRole)
 	return r
@@ -380,13 +383,50 @@ func (s *Server) settings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"SensorOfflineAfterSeconds":  int64(s.SensorOfflineAfter / time.Second),
 		"SensorCheckIntervalSeconds": int64(s.SensorCheckInterval / time.Second),
+		"SessionDurationSeconds":     int64(s.SessionDuration / time.Second),
 		"SIEMEnabled":                s.SIEMEnabled,
 		"AnalysisEnabled":            s.AnalysisEnabled,
 		"VulnerabilityLoaded":        vulnCount > 0,
 		"VulnerabilityCount":         vulnCount,
 		"WebTLSEnabled":              s.WebTLSEnabled,
 		"SensorAPITLSEnabled":        s.SensorAPITLSEnabled,
+		"RetentionEnabled":           s.Retention.Enabled,
+		"RetentionIntervalHours":     s.Retention.Interval.Hours(),
+		"TelemetryRetentionDays":     s.Retention.TelemetryDays,
+		"AlertsRetentionDays":        s.Retention.AlertsDays,
+		"AuditRetentionDays":         s.Retention.AuditDays,
+		"MaxDatabaseSizeGB":          s.Retention.MaxDatabaseSizeGB,
+		"TargetDatabaseSizeGB":       s.Retention.TargetDatabaseSizeGB,
 	})
+}
+
+// logAudit is for explicit, richer audit entries beyond what
+// auditMiddleware captures generically (method+path only) — e.g. which
+// specific asset/rule/sensor was affected. Best-effort: a logging
+// failure is written to the server log, never fails the request it's
+// attached to, since the actual action already happened either way.
+func (s *Server) logAudit(c *gin.Context, actor, action, sensorID string) {
+	if s.Repo == nil {
+		return
+	}
+	if err := s.Repo.InsertAuditLog(c, AuditEntry{
+		Actor: actor, Action: action, Method: c.Request.Method, Path: c.Request.URL.Path,
+		Status: http.StatusOK, Success: true, SourceIP: c.ClientIP(), SensorID: sensorID,
+	}); err != nil {
+		log.Printf("audit_log insert failed: %v", err)
+	}
+}
+
+// summarizeTargets renders a short, human-readable summary of a bulk
+// action's targets for the audit log — the full list for a handful, just
+// a count for a large bulk action (someone approving thousands of alerts
+// at once shouldn't turn one audit row into a multi-KB string).
+func summarizeTargets(targets []string) string {
+	const max = 5
+	if len(targets) <= max {
+		return strings.Join(targets, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more (%d total)", strings.Join(targets[:max], ", "), len(targets)-max, len(targets))
 }
 
 func (s *Server) auditLog(c *gin.Context) {
@@ -963,11 +1003,21 @@ func (s *Server) updateRule(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "enabled is required"})
 		return
 	}
-	payload, _ := json.Marshal(map[string]interface{}{"id": c.Param("rule"), "enabled": *req.Enabled})
-	if err := s.Repo.QueueCommands(c, c.Param("id"), "rule.toggle", []string{string(payload)}); err != nil {
+	sensorID, ruleID := c.Param("id"), c.Param("rule")
+	payload, _ := json.Marshal(map[string]interface{}{"id": ruleID, "enabled": *req.Enabled})
+	if err := s.Repo.QueueCommands(c, sensorID, "rule.toggle", []string{string(payload)}); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	state := "disabled"
+	if *req.Enabled {
+		state = "enabled"
+	}
+	label := ruleID
+	if name, ok := s.Repo.RuleName(c, sensorID, ruleID); ok {
+		label = fmt.Sprintf("%s (%s)", name, ruleID)
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("rule %s: %s", state, label), sensorID)
 	c.Status(http.StatusAccepted)
 }
 
@@ -1004,10 +1054,16 @@ func (s *Server) assetActions(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid action"})
 		return
 	}
-	if err := s.Repo.QueueCommands(c, c.Param("id"), "asset."+req.Action, req.Targets); err != nil {
+	sensorID := c.Param("id")
+	if err := s.Repo.QueueCommands(c, sensorID, "asset."+req.Action, req.Targets); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	verb := "asset confirmed"
+	if req.Action == "delete" {
+		verb = "asset deleted"
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("%s: %s", verb, summarizeTargets(req.Targets)), sensorID)
 	c.Status(202)
 }
 func (s *Server) alertActions(c *gin.Context) {
@@ -1037,6 +1093,11 @@ func (s *Server) alertActions(c *gin.Context) {
 	if err := s.Repo.MarkAlertsReviewed(c, sensorID, req.Targets, status, actor); err != nil {
 		log.Printf("mark alert_history reviewed: %v", err)
 	}
+	verb := "alert confirmed"
+	if req.Action == "approve" {
+		verb = "alert approved (pattern remembered as known)"
+	}
+	s.logAudit(c, actor, fmt.Sprintf("%s: %s", verb, summarizeTargets(req.Targets)), sensorID)
 	c.Status(202)
 }
 func (s *Server) register(c *gin.Context) {
@@ -1045,9 +1106,13 @@ func (s *Server) register(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid registration"})
 		return
 	}
-	if err := s.Repo.RegisterSensor(c, x); err != nil {
+	wasOffline, err := s.Repo.RegisterSensor(c, x)
+	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+	}
+	if wasOffline {
+		s.logAudit(c, "", "sensor started", x.ID)
 	}
 	c.JSON(200, gin.H{"sensor_id": x.ID, "status": "registered"})
 }
@@ -1085,6 +1150,7 @@ func (s *Server) sensorActions(c *gin.Context) {
 	}
 	queued := 0
 	seen := make(map[string]struct{}, len(request.SensorIDs))
+	actor := identityFromContext(c).Username
 	for _, sensorID := range request.SensorIDs {
 		sensorID = strings.TrimSpace(sensorID)
 		if sensorID == "" {
@@ -1098,6 +1164,7 @@ func (s *Server) sensorActions(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		s.logAudit(c, actor, fmt.Sprintf("sensor capture %s: %s", strings.ToLower(strings.TrimSpace(request.Action)), sensorID), sensorID)
 		queued++
 	}
 	if queued == 0 {

@@ -103,11 +103,11 @@ func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername,
 	defaults := []Role{
 		{ID: "admin", Name: "Administrator", BuiltIn: true, Permissions: Permissions{View: allTabs, Actions: allActions}},
 		{ID: "analyst", Name: "Analyst", BuiltIn: true, Permissions: Permissions{
-			View:    []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis"},
+			View:    []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis", "users"},
 			Actions: []string{"asset_confirm_delete", "alert_confirm_approve", "rule_manage", "analysis_manage"},
 		}},
 		{ID: "view", Name: "View only", BuiltIn: true, Permissions: Permissions{
-			View:    []string{"dashboard", "topology", "alerts"},
+			View:    []string{"dashboard", "topology", "alerts", "users"},
 			Actions: []string{},
 		}},
 	}

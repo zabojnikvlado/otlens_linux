@@ -248,19 +248,23 @@ Analysis tab's view permission.
 
 ### Users
 
-*(Admin only — `users_roles_manage`.)* Your own password change, plus full
-account and role management:
+Every role can open this tab — everyone needs somewhere to change their
+own password. What's on it beyond that depends on `users_roles_manage`:
 
 - **Change my password** — self-service, requires your current password.
-- **Users table** — create/edit/disable/delete accounts, and reset a
-  user's password (generates a random temporary password shown exactly
-  once — copy it before closing the dialog, it can't be retrieved again;
-  the affected user must set a real password at next login, and their
-  existing sessions are all signed out immediately).
-- **Roles table** — edit which tabs (View) and actions (Actions) each role
-  grants, including the three built-in roles' permissions (their `id`s just
-  can't be deleted). Add custom roles beyond Admin/Analyst/View if your
-  team needs a different split.
+  Visible to everyone, on any role.
+- **Users table** and **Roles table** — *(admin only.)* Create/edit/
+  disable/delete accounts, reset a user's password (generates a random
+  temporary password shown exactly once — copy it before closing the
+  dialog, it can't be retrieved again; the affected user must set a real
+  password at next login, and their existing sessions are all signed out
+  immediately), and edit which tabs (View) and actions (Actions) each
+  role grants — including the three built-in roles' permissions (their
+  `id`s just can't be deleted). Add custom roles beyond Admin/Analyst/
+  View if your team needs a different split. An Analyst or View-only
+  user sees only the password-change form on this tab; the tables
+  themselves aren't rendered for them, and the underlying `GET /v1/users`/
+  `/v1/roles` endpoints reject their requests server-side too.
 
 ### Settings
 
@@ -296,15 +300,38 @@ without that, the Topology tab would keep showing every previously-seen
 connection regardless of any Central reset, since that ledger is
 deliberately designed to survive a sensor's own pruning.
 
-### Audit
+### Audit log
 
 *(Admin only.)* Every mutating Management API request, newest first — who
 did what, when, source IP, and whether it succeeded. Written
 unconditionally to `audit_log`, independent of whether SIEM export is
-configured (`siem.enabled`/`export_audit` only additionally *forwards* a
-copy to SIEM; it was never what determined whether an audit trail existed
-at all). Pruned by `database_retention.audit_days`, same as everything
-else — see below.
+configured (`siem.export_audit` only additionally *forwards* a copy to
+SIEM — `siem.export_alerts` does the same for alerts, independently;
+neither one determines whether the underlying record exists at all,
+just whether it's also sent onward). Pruned by
+`database_retention.audit_days`, same as everything else — see below.
+
+Beyond the generic "method+path" entry every mutating request gets,
+several actions log a specific, human-readable line instead:
+
+- **Login / logout**, with the username.
+- **Sensor started** — logged once when a sensor transitions from
+  offline (or brand new) to online, not on every routine re-registration
+  (a sensor actually calls the registration endpoint on every sync cycle
+  as a keep-alive, so logging every call would flood this table).
+- **Sensor went offline** — logged once per actual transition, from the
+  same background sweep that drives the Sensors tab's offline status
+  (`sensors.offline_after`/`check_interval`), not repeated on every sweep
+  while a sensor stays down.
+- **Asset confirmed / deleted**, **alert confirmed / approved**, with the
+  username and a summary of which targets (a short list, or a count for
+  a large bulk selection — approving thousands of alerts at once
+  shouldn't turn into a multi-KB audit row).
+- **Rule enabled / disabled**, with the rule's name (looked up from the
+  sensor's current reported rule list) alongside its ID, and the
+  username.
+- **Sensor capture started / stopped** (the Sensors tab action, not the
+  process itself), with the username.
 
 ### Database retention
 
@@ -382,8 +409,8 @@ Three built-in roles ship by default:
 | Role | Can view | Can do |
 |---|---|---|
 | **Administrator** | everything | everything |
-| **Analyst** | everything except Users, Settings, Data Management, Audit | everything except starting/stopping sensors |
-| **View only** | Dashboard, Topology, Alerts | nothing (read-only) |
+| **Analyst** | everything except Settings, Data Management, Audit (Users tab is visible to everyone, for self-service password change — see below) | everything except starting/stopping sensors |
+| **View only** | Dashboard, Topology, Alerts, Users (password change only) | nothing (read-only) |
 
 Both the tabs a role can see and the actions it can perform are stored in
 PostgreSQL and fully editable from the **Users → Roles** table (admin

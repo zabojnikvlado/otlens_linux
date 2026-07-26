@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -309,16 +310,28 @@ func (r *Repository) ConfigureSIEM(alertsEnabled bool) {
 	r.siemAlertsEnabled = alertsEnabled
 }
 
-func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) error {
+// RegisterSensor upserts a sensor's registration and reports whether it
+// was *not* already online beforehand (brand new sensor, or one that had
+// gone offline/stopped) — register() uses that to audit a genuine
+// start/reconnect event without logging on every routine call, since a
+// sensor actually calls this on every single sync cycle as a keep-alive,
+// not just once at its own startup.
+func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) (wasOffline bool, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
+	var previousStatus string
+	statusErr := tx.QueryRowContext(ctx, `SELECT status FROM sensors WHERE id=$1 FOR UPDATE`, s.ID).Scan(&previousStatus)
+	if statusErr != nil && !errors.Is(statusErr, sql.ErrNoRows) {
+		return false, statusErr
+	}
+	wasOffline = errors.Is(statusErr, sql.ErrNoRows) || previousStatus != "online"
 	var site interface{}
 	if s.SiteID != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO sites(id,name) VALUES($1,$1) ON CONFLICT(id) DO NOTHING`, s.SiteID); err != nil {
-			return err
+			return false, err
 		}
 		site = s.SiteID
 	}
@@ -326,9 +339,37 @@ func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegi
 VALUES($1,$2,$3,'online',$4,$5,$6,NOW())
 ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,version=EXCLUDED.version,hostname=EXCLUDED.hostname,certificate_fingerprint=EXCLUDED.certificate_fingerprint,last_seen=NOW(),status='online'`, s.ID, s.Name, site, s.Version, s.Hostname, s.CertificateFingerprint)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return wasOffline, nil
+}
+
+// RuleName looks up a rule's human-readable Name from a sensor's current
+// reported rule list, for audit logging (an ID alone in the Audit log
+// isn't very readable). Best-effort: returns ok=false if the sensor or
+// rule isn't found — not an error condition, the caller falls back to
+// showing the ID.
+func (r *Repository) RuleName(ctx context.Context, sensorID, ruleID string) (name string, ok bool) {
+	var rulesJSON []byte
+	if err := r.db.QueryRowContext(ctx, `SELECT rules FROM sensor_telemetry WHERE sensor_id=$1`, sensorID).Scan(&rulesJSON); err != nil {
+		return "", false
+	}
+	var rules []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(rulesJSON, &rules) != nil {
+		return "", false
+	}
+	for _, rule := range rules {
+		if rule.ID == ruleID {
+			return rule.Name, rule.Name != ""
+		}
+	}
+	return "", false
 }
 func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	status := "online"
@@ -435,9 +476,30 @@ func (r *Repository) AssignRuleSet(ctx context.Context, sensorID, ruleSetID stri
 	_, err := r.db.ExecContext(ctx, `INSERT INTO sensor_rule_sets(sensor_id,rule_set_id) VALUES($1,$2) ON CONFLICT(sensor_id) DO UPDATE SET rule_set_id=EXCLUDED.rule_set_id`, sensorID, ruleSetID)
 	return err
 }
-func (r *Repository) MarkOffline(ctx context.Context, olderThan time.Duration) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE sensors SET status='offline' WHERE last_seen < NOW() - ($1 * INTERVAL '1 second')`, int64(olderThan/time.Second))
-	return err
+// MarkOffline flips status to 'offline' for any sensor whose last_seen
+// is older than olderThan — but only ones not already offline, and
+// returns exactly those ids. Both matter for auditing this: without the
+// status!='offline' guard, a sensor that's been down for days would get
+// "marked offline" (and audited) again on every single sweep interval,
+// not just the one time it actually went down.
+func (r *Repository) MarkOffline(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`UPDATE sensors SET status='offline' WHERE status != 'offline' AND last_seen < NOW() - ($1 * INTERVAL '1 second') RETURNING id`,
+		int64(olderThan/time.Second),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) error {

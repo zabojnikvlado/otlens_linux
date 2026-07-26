@@ -80,6 +80,13 @@ func main() {
 		}
 	}
 
+	retentionCfg := central.RetentionConfig{
+		Enabled: cfg.DatabaseRetention.Enabled, TelemetryDays: cfg.DatabaseRetention.TelemetryDays,
+		AlertsDays: cfg.DatabaseRetention.AlertsDays, AuditDays: cfg.DatabaseRetention.AuditDays,
+		MaxDatabaseSizeGB: cfg.DatabaseRetention.MaxDatabaseSizeGB, TargetDatabaseSizeGB: cfg.DatabaseRetention.TargetDatabaseSizeGB,
+		DeleteBatchSize: cfg.DatabaseRetention.DeleteBatchSize, Interval: cfg.DatabaseRetention.Interval,
+	}
+
 	srv := &central.Server{
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
 		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
@@ -91,6 +98,7 @@ func main() {
 		WebTLSEnabled:        cfg.Web.TLS.Enabled,
 		SensorAPITLSEnabled:  cfg.SensorAPI.TLS.Enabled,
 		SessionDuration:      cfg.Auth.SessionDuration,
+		Retention:            retentionCfg,
 	}
 	exporter, err := siem.New(siem.Config{
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,
@@ -120,8 +128,17 @@ func main() {
 			case <-workerCtx.Done():
 				return
 			case <-ticker.C:
-				if err := repo.MarkOffline(workerCtx, cfg.Sensors.OfflineAfter); err != nil {
+				offlineIDs, err := repo.MarkOffline(workerCtx, cfg.Sensors.OfflineAfter)
+				if err != nil {
 					log.Printf("mark stale sensors offline: %v", err)
+					continue
+				}
+				for _, id := range offlineIDs {
+					if err := repo.InsertAuditLog(workerCtx, central.AuditEntry{
+						Action: "sensor went offline", Success: true, SensorID: id,
+					}); err != nil {
+						log.Printf("audit_log insert failed: %v", err)
+					}
 				}
 			}
 		}
@@ -132,12 +149,6 @@ func main() {
 	// Central doesn't wait a full interval before its first sweep), then
 	// on cfg.DatabaseRetention.Interval from there.
 	go func() {
-		retentionCfg := central.RetentionConfig{
-			Enabled: cfg.DatabaseRetention.Enabled, TelemetryDays: cfg.DatabaseRetention.TelemetryDays,
-			AlertsDays: cfg.DatabaseRetention.AlertsDays, AuditDays: cfg.DatabaseRetention.AuditDays,
-			MaxDatabaseSizeGB: cfg.DatabaseRetention.MaxDatabaseSizeGB, TargetDatabaseSizeGB: cfg.DatabaseRetention.TargetDatabaseSizeGB,
-			DeleteBatchSize: cfg.DatabaseRetention.DeleteBatchSize,
-		}
 		if !retentionCfg.Enabled {
 			return
 		}

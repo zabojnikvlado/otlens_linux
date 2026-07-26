@@ -358,8 +358,16 @@ document.getElementById('view-dashboard').addEventListener('click',e=>{const tar
 function renderBaseline(){const learning=baselines.filter(b=>b.mode==='learning'),d=document.getElementById('baseline-dot'),t=document.getElementById('baseline-text');if(learning.length){d.className='dot learning';const ends=learning.map(x=>new Date(x.learning_ends_at)).filter(x=>!isNaN(x)).sort((a,b)=>a-b)[0];t.textContent=`Learning ${learning.length}/${baselines.length}${ends?' · until '+ends.toLocaleTimeString():''} · alerts suppressed`}else{d.className='dot monitoring';t.textContent=baselines.length?'Monitoring':'No baseline data'}}
 function renderSettings(){
   const onOff=v=>v?'Enabled':'Disabled';
+  const days=n=>n>0?`${n} days`:'kept indefinitely';
   document.getElementById('settings-offline-after').textContent=settings.SensorOfflineAfterSeconds!=null?`${settings.SensorOfflineAfterSeconds}s of silence`:'—';
   document.getElementById('settings-check-interval').textContent=settings.SensorCheckIntervalSeconds!=null?`${settings.SensorCheckIntervalSeconds}s`:'—';
+  document.getElementById('settings-session-duration').textContent=settings.SessionDurationSeconds!=null?`${Math.round(settings.SessionDurationSeconds/3600*10)/10}h`:'—';
+  document.getElementById('settings-retention-enabled').textContent=onOff(settings.RetentionEnabled);
+  document.getElementById('settings-retention-interval').textContent=settings.RetentionIntervalHours!=null?`${settings.RetentionIntervalHours}h`:'—';
+  document.getElementById('settings-retention-telemetry').textContent=days(settings.TelemetryRetentionDays);
+  document.getElementById('settings-retention-alerts').textContent=days(settings.AlertsRetentionDays);
+  document.getElementById('settings-retention-audit').textContent=days(settings.AuditRetentionDays);
+  document.getElementById('settings-retention-size').textContent=(settings.MaxDatabaseSizeGB!=null)?`${settings.MaxDatabaseSizeGB}GB → ${settings.TargetDatabaseSizeGB}GB`:'—';
   document.getElementById('settings-siem').textContent=onOff(settings.SIEMEnabled);
   document.getElementById('settings-analysis').textContent=onOff(settings.AnalysisEnabled);
   document.getElementById('settings-vuln').textContent=settings.VulnerabilityLoaded?`Loaded — ${settings.VulnerabilityCount} advisories`:'Not loaded';
@@ -433,7 +441,7 @@ async function refreshAll(){
   try{if(ok('/analysis/jobs'))renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
   try{if(ok('/settings'))renderSettings()}catch(e){console.error('render settings',e)}
   try{if(ok('/audit'))renderAudit()}catch(e){console.error('render audit',e)}
-  try{if(canView('users'))await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
+  try{if(can('users_roles_manage'))await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
   try{renderDashboard()}catch(e){console.error('render dashboard',e)}
   const rejected=paths.map(p=>results[p].status==='rejected'?{path:p,reason:results[p].reason}:null).filter(Boolean);
   if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
@@ -497,7 +505,7 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit'};
+const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server

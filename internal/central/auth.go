@@ -265,6 +265,7 @@ func (s *Server) login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	s.logAudit(c, user.Username, "login", "")
 	c.JSON(http.StatusOK, gin.H{
 		"User":               user,
 		"Role":               role,
@@ -275,6 +276,14 @@ func (s *Server) login(c *gin.Context) {
 
 func (s *Server) logout(c *gin.Context) {
 	if cookie, err := c.Cookie(sessionCookieName); err == nil && cookie != "" {
+		// /logout is on the unauthenticated router group (a session
+		// that's already invalid should still be able to log out), so
+		// there's no identityFromContext here — look the username up
+		// from the session directly, before it's deleted, purely for
+		// the audit entry.
+		if session, err := s.Repo.GetSession(c, cookie); err == nil {
+			s.logAudit(c, session.Username, "logout", "")
+		}
 		_ = s.Repo.DeleteSession(c, cookie)
 	}
 	s.clearSessionCookie(c)
