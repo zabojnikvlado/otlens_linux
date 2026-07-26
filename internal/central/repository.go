@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -310,28 +309,16 @@ func (r *Repository) ConfigureSIEM(alertsEnabled bool) {
 	r.siemAlertsEnabled = alertsEnabled
 }
 
-// RegisterSensor upserts a sensor's registration and reports whether it
-// was *not* already online beforehand (brand new sensor, or one that had
-// gone offline/stopped) — register() uses that to audit a genuine
-// start/reconnect event without logging on every routine call, since a
-// sensor actually calls this on every single sync cycle as a keep-alive,
-// not just once at its own startup.
-func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) (wasOffline bool, err error) {
+func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer tx.Rollback()
-	var previousStatus string
-	statusErr := tx.QueryRowContext(ctx, `SELECT status FROM sensors WHERE id=$1 FOR UPDATE`, s.ID).Scan(&previousStatus)
-	if statusErr != nil && !errors.Is(statusErr, sql.ErrNoRows) {
-		return false, statusErr
-	}
-	wasOffline = errors.Is(statusErr, sql.ErrNoRows) || previousStatus != "online"
 	var site interface{}
 	if s.SiteID != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO sites(id,name) VALUES($1,$1) ON CONFLICT(id) DO NOTHING`, s.SiteID); err != nil {
-			return false, err
+			return err
 		}
 		site = s.SiteID
 	}
@@ -339,12 +326,9 @@ func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegi
 VALUES($1,$2,$3,'online',$4,$5,$6,NOW())
 ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,version=EXCLUDED.version,hostname=EXCLUDED.hostname,certificate_fingerprint=EXCLUDED.certificate_fingerprint,last_seen=NOW(),status='online'`, s.ID, s.Name, site, s.Version, s.Hostname, s.CertificateFingerprint)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return wasOffline, nil
+	return tx.Commit()
 }
 
 // RuleName looks up a rule's human-readable Name from a sensor's current

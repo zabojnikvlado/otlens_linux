@@ -1106,13 +1106,9 @@ func (s *Server) register(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid registration"})
 		return
 	}
-	wasOffline, err := s.Repo.RegisterSensor(c, x)
-	if err != nil {
+	if err := s.Repo.RegisterSensor(c, x); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
-	}
-	if wasOffline {
-		s.logAudit(c, "", "sensor started", x.ID)
 	}
 	c.JSON(200, gin.H{"sensor_id": x.ID, "status": "registered"})
 }
