@@ -32,7 +32,8 @@ normalizovaný alert cez telemetry pipeline, takže nové pravidlo nepotrebuje
 | `icscritical.go` | `ics_critical_operation` — kritická OT operácia (napr. S7 PLCStop) | `core.EventICSMessage` | protokol + funkcia + cieľové zariadenie |
 | `asset_unconfirmed.go` | `new_asset` — nové zariadenie po baseline learningu | `core.EventAssetUnconfirmed` (z `asset` enginu) | MAC zariadenia |
 | `value_out_of_range.go` | `value_out_of_range` — hodnota mimo naučeného rozsahu | `core.EventValueOutOfRange` (zo `store` enginu) | konkrétny Tag |
-| `honeypot.go` | `honeypot_lateral_movement` (critical) — honeypot iniciuje odchádzajúcu komunikáciu; `honeypot_probed` (medium) — niekto sa pripojil na honeypot | `core.EventPacketParsed` | smer + src + dst |
+| `honeypot.go` | `honeypot_lateral_movement` (critical) — honeypot iniciuje odchádzajúcu komunikáciu **smerom na inú internú (private) adresu**; `honeypot_probed` (medium) — niekto sa pripojil na honeypot | `core.EventPacketParsed` | smer + src + dst |
+| `external_communication.go` | `external_communication` (medium) — private adresa komunikuje s verejnou (internetovou) adresou. Dedup podľa internej IP (nie podľa cieľa) — jedno zariadenie hovoriace s mnohými externými IP je jeden alert, nie záplava | `core.EventPacketParsed` | interná IP |
 
 `honeypot.go` je trochu iný než ostatné pravidlá — navyše odoberá aj
 `core.EventHoneypotCleared` (z `asset` enginu, publikovaný keď sa

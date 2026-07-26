@@ -160,6 +160,7 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startValueOutOfRangeWatch(bus)
 	e.startHoneypotWatch(bus)
 	e.startHoneypotClearedWatch(bus)
+	e.startExternalCommunicationWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }

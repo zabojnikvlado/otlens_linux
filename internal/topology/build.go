@@ -8,11 +8,31 @@
 package topology
 
 import (
+	"net"
+
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
 	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
 	"github.com/zabojnikvlado/otlens_linux/internal/store"
 )
+
+// isPrivateIP reports whether ip is an RFC 1918 / RFC 4193 private
+// address (or loopback). The Topology map only ever shows the
+// monitored network, not the wider internet — an internet-facing flow
+// endpoint has no stable identity here anyway (rotating CDN/cloud IPs
+// would otherwise make the ledger in internal/central/topology_edges.go
+// grow without bound, the same class of problem alert history had
+// before delta-sync). An internal asset genuinely talking externally is
+// still worth surfacing — just as a detection alert, not a map node;
+// see internal/detect's external-communication rule. Malformed/
+// unparseable input is treated as not-private (fails safe).
+func isPrivateIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsPrivate() || parsed.IsLoopback()
+}
 
 // Build combines the independently-tracked asset/flow/tag data into
 // a single node+edge graph for visualization. This is deliberately
@@ -99,6 +119,10 @@ func Build(
 		// actually means: traffic leaving the honeypot.
 		if f.HoneypotInitiated && scoreByIP[srcIP] < honeypotThreshold && scoreByIP[dstIP] >= honeypotThreshold {
 			srcIP, dstIP = dstIP, srcIP
+		}
+
+		if !isPrivateIP(srcIP) || !isPrivateIP(dstIP) {
+			continue
 		}
 
 		edges = append(

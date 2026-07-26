@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
@@ -53,6 +54,21 @@ func (e *Engine) startHoneypotWatch(bus *core.EventBus) {
 // represent genuinely different situations (something scanning the
 // network vs. an actual compromise), and collapsing them would lose
 // that distinction in the Alerts tab.
+// isPrivateIP reports whether ip is an RFC 1918 / RFC 4193 private
+// address (or loopback) — used to scope "lateral movement" to actual
+// movement within the network, not a honeypot's ordinary outbound
+// internet traffic (Windows Update, NTP, DNS, telemetry, etc., if the
+// honeypot happens to be a real OS rather than a bare decoy). Malformed/
+// unparseable input is treated as not-private (fails safe: an
+// unrecognized address doesn't get waved through as "internal").
+func isPrivateIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsPrivate() || parsed.IsLoopback()
+}
+
 func (e *Engine) handleHoneypot(packet core.Packet) {
 
 	if packet.SrcIP == "" || packet.DstIP == "" {
@@ -65,7 +81,7 @@ func (e *Engine) handleHoneypot(packet core.Packet) {
 	srcIsHoneypot := srcIsStation && srcScore >= e.honeypotThreshold
 	dstIsHoneypot := dstIsStation && dstScore >= e.honeypotThreshold
 
-	if srcIsHoneypot && e.isRuleEnabled(string(AlertHoneypotLateralMovement)) {
+	if srcIsHoneypot && isPrivateIP(packet.DstIP) && e.isRuleEnabled(string(AlertHoneypotLateralMovement)) {
 		e.raiseHoneypotAlert(
 			AlertHoneypotLateralMovement,
 			"critical",

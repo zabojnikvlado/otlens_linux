@@ -140,15 +140,26 @@ through to its full tab.
 
 ### Topology
 
-A live network map: nodes are discovered assets, edges are observed
-connections between them. Colors/styles mean:
+A live network map of the monitored network: nodes are discovered assets,
+edges are observed connections between them. **Only private (RFC 1918)
+addresses ever appear here** — a flow to/from a public internet address
+never becomes a node or edge, since internet endpoints have no stable
+identity to track (rotating CDN/cloud IPs) and would otherwise make the
+map grow without bound. An internal asset that does talk externally is
+still surfaced — as the `external_communication` alert (see
+`DETECTION_RULES.md`), not a map node.
+
+Colors/styles mean:
 
 - **Amber dashed edge** — inter-VLAN communication (the two endpoints have
   different VLAN tags).
 - **Thick red edge with an arrow** — potential lateral movement: a
-  configured honeypot initiated outbound traffic (see
-  [Setting up a honeypot](#setting-up-a-honeypot) below). This is always
-  worth investigating immediately.
+  configured honeypot initiated outbound traffic **to another private
+  address** (see [Setting up a honeypot](#setting-up-a-honeypot) below).
+  Ordinary outbound internet traffic from the honeypot host itself
+  (Windows Update, NTP, DNS, etc., if it's a real OS rather than a bare
+  decoy) doesn't count as this — see the private-address note above. This
+  is always worth investigating immediately.
 - **Purple/highlighted node** — an asset whose score is at or above the
   configured honeypot threshold.
 - **Red node** — a newly-discovered, unconfirmed asset (see

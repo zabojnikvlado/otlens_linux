@@ -100,6 +100,7 @@ func builtinRules() map[string]*Rule {
 		{ID: string(AlertValueOutOfRange), Name: "Value Out of Range", Category: "ot_tag", AlertType: AlertValueOutOfRange},
 		{ID: string(AlertHoneypotProbed), Name: "Honeypot Probed", Category: "security", AlertType: AlertHoneypotProbed},
 		{ID: string(AlertHoneypotLateralMovement), Name: "Honeypot Lateral Movement", Category: "security", AlertType: AlertHoneypotLateralMovement},
+		{ID: string(AlertExternalCommunication), Name: "Internal Asset External Communication", Category: "security", AlertType: AlertExternalCommunication},
 	}
 	out := map[string]*Rule{}
 	for _, r := range seed {

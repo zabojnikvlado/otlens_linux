@@ -49,6 +49,14 @@ const (
 	// compromised and whatever compromised it is pivoting outward.
 	// See honeypot.go.
 	AlertHoneypotLateralMovement AlertType = "honeypot_lateral_movement"
+
+	// AlertExternalCommunication fires when a private/internal address
+	// exchanges traffic with a public one — see
+	// handleExternalCommunication's doc comment. Deduplicated per
+	// internal IP (not per external target), so one chatty device
+	// contacting many different external addresses is still a single
+	// alert whose Count climbs, not one alert per destination.
+	AlertExternalCommunication AlertType = "external_communication"
 )
 
 // AlertStatus is an operator's review verdict on an Alert.
