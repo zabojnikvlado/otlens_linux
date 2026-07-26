@@ -13,6 +13,7 @@ import (
 // internal/config just for these seven fields.
 type RetentionConfig struct {
 	Enabled              bool
+	Interval             time.Duration
 	TelemetryDays        int
 	AlertsDays           int
 	AuditDays            int
