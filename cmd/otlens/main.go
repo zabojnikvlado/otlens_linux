@@ -139,7 +139,7 @@ func main() {
 			b, err := json.Marshal(v)
 			return json.RawMessage(b), err
 		}
-		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, ApplyCommand: func(command management.Command) {
+		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, Flow: application.FlowEngine, ApplyCommand: func(command management.Command) {
 			switch command.Type {
 			case "sensor.capture.stop":
 				if application.CaptureEngine != nil {
@@ -321,7 +321,7 @@ func main() {
 				log.Printf("OTLens analysis result upload failed: %v", err)
 			}
 		}, Snapshot: func() (management.TelemetrySnapshot, error) {
-			graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetAll(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
+			graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetDirtyFlows(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
 			graphJSON, err := marshal(graph)
 			if err != nil {
 				return management.TelemetrySnapshot{}, err

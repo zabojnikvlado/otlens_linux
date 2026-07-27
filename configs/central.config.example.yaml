@@ -170,6 +170,42 @@ database_retention:
   # load in one shot.
   delete_batch_size: 10000
 
+# Out-of-band notification when a new alert at or above min_severity is
+# recorded — independent of SIEM export (see siem.export_alerts above),
+# this is for "someone should look at this now," not a compliance trail.
+notifications:
+  enabled: false
+  min_severity: high # low | medium | high | critical
+  email:
+    # Off even when notifications.enabled is true — needs real SMTP
+    # credentials below to do anything useful, and shipping with it
+    # silently active would mean a fresh install occasionally tries
+    # (and fails) to send mail through unconfigured settings.
+    enabled: false
+    smtp_host: ""
+    smtp_port: 587
+    username: ""
+    password: ""
+    from: ""
+    to: []
+    use_tls: true
+  webhook:
+    enabled: false
+    url: ""
+    headers: {}
+
+# Weekly summary (new assets, alert counts by severity, incidents, sensor
+# health) — generated and saved to report_history regardless of whether
+# email delivery is configured; viewable from the Reports tab either way.
+# Uses notifications.email above for the actual SMTP connection when
+# recipients are set here — there's no separate SMTP config for reports.
+reports:
+  enabled: false
+  schedule: weekly
+  day_of_week: monday
+  hour_utc: 8
+  recipients: []
+
 analysis:
   enabled: true
   upload_directory: "./data/pcap-uploads"

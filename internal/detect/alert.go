@@ -57,6 +57,25 @@ const (
 	// contacting many different external addresses is still a single
 	// alert whose Count climbs, not one alert per destination.
 	AlertExternalCommunication AlertType = "external_communication"
+
+	// AlertSegmentationViolation fires when two VLANs whose configured
+	// Purdue Model levels are more than the configured MaxLevelJump
+	// apart communicate directly — see handleSegmentation's doc
+	// comment in segmentation.go. Off unless
+	// config.SensorConfig.Detect.Segmentation.Enabled and VLANLevels
+	// are both configured.
+	AlertSegmentationViolation AlertType = "segmentation_violation"
+
+	// AlertReconnaissance fires when a source IP contacts an unusually
+	// large number of distinct hosts (network/host scan) or distinct
+	// ports on one host (port scan) within a short window — see
+	// reconnaissance.go.
+	AlertReconnaissance AlertType = "reconnaissance"
+
+	// AlertC2Beacon fires when a source IP's outbound TCP connections
+	// to one external destination+port happen at a suspiciously
+	// regular interval — see c2beacon.go's doc comment.
+	AlertC2Beacon AlertType = "c2_beacon"
 )
 
 // AlertStatus is an operator's review verdict on an Alert.

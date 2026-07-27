@@ -179,3 +179,31 @@ func (db *Database) Count() int {
 
 	return total
 }
+
+// All returns every loaded advisory across every vendor, each tagged
+// with the vendor key it's filed under (Advisory.Vendor is the
+// original CSV value, which may differ in case/whitespace from the
+// normalized map key used for Lookup) — used by the Vulnerability
+// Management tab's CVE-to-assets view, which needs to enumerate every
+// advisory rather than look one vendor up at a time.
+func (db *Database) All() []Advisory {
+
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	out := make([]Advisory, 0, db.countLocked())
+
+	for _, advisories := range db.byVendor {
+		out = append(out, advisories...)
+	}
+
+	return out
+}
+
+func (db *Database) countLocked() int {
+	total := 0
+	for _, advisories := range db.byVendor {
+		total += len(advisories)
+	}
+	return total
+}

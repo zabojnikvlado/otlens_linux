@@ -39,6 +39,7 @@ func (e topologyEdgeRecord) PairKey() string {
 // rest of that sync) without needing its own connection.
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
 }
 
 // upsertTopologyEdges folds a sensor's just-received, already-aggregated
@@ -239,6 +240,40 @@ func (r *Repository) ListTopologyNodes(ctx context.Context, sensorID string) ([]
 			n.Protocols = protocols
 		}
 		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// IPHistoryEntry is one IP an asset has been observed with, and when.
+type IPHistoryEntry struct {
+	IP        string
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+// ListIPHistory returns every IP a given asset (identified by its MAC)
+// has ever been recorded with on a sensor, oldest first — straight from
+// topology_nodes, which already tracks exactly this. Useful for a
+// device that's changed IP over time (DHCP renewal, static
+// reassignment, etc.) — the Assets tab only ever shows whichever IP is
+// *currently* reported; this is the timeline behind it.
+func (r *Repository) ListIPHistory(ctx context.Context, sensorID, mac string) ([]IPHistoryEntry, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT ip, first_seen, last_seen FROM topology_nodes
+		WHERE sensor_id=$1 AND mac=$2 ORDER BY first_seen ASC`,
+		sensorID, mac,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]IPHistoryEntry, 0)
+	for rows.Next() {
+		var e IPHistoryEntry
+		if err := rows.Scan(&e.IP, &e.FirstSeen, &e.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

@@ -72,6 +72,49 @@ type Engine struct {
 	// read them.
 	deceptionScores   map[string]int
 	honeypotThreshold int
+
+	// segmentationEnabled/vlanLevels/maxLevelJump — see
+	// config.SensorConfig.Detect.Segmentation and segmentation.go.
+	// Read-only after construction, plus ipVLAN (mutable, its own
+	// lock) tracking the last VLAN observed per IP.
+	segmentationEnabled bool
+	vlanLevels          map[uint16]float64
+	maxLevelJump        float64
+	ipVLANMutex         sync.RWMutex
+	ipVLAN              map[string]uint16
+
+	// reconnaissanceEnabled/reconWindow/hostScanThreshold/
+	// portScanThreshold — see config.SensorConfig.Detect.
+	// Reconnaissance and reconnaissance.go. scanMutex guards
+	// hostScanSeen/portScanSeen, both pruned to reconWindow on access
+	// (see reconnaissance.go) rather than by a separate background
+	// sweep, so memory use tracks actual recent activity without
+	// needing its own goroutine.
+	reconnaissanceEnabled bool
+	reconWindow           time.Duration
+	hostScanThreshold     int
+	portScanThreshold     int
+	scanMutex             sync.Mutex
+	hostScanSeen          map[string]map[string]time.Time            // srcIP -> dstIP -> last seen
+	portScanSeen          map[string]map[string]map[int]time.Time    // srcIP -> dstIP -> port -> last seen
+
+	// c2BeaconEnabled/*/beaconMutex/beaconHistory/beaconLastTouch — see
+	// config.SensorConfig.Detect.C2Beacon and c2beacon.go.
+	// beaconHistory holds, per "srcIP|dstIP|dstPort" key, the most
+	// recent MinSamples-ish SYN timestamps (bounded, see
+	// c2beacon.go's maxBeaconSamplesPerKey); beaconLastTouch tracks
+	// when each key was last updated, purely so
+	// MaxTrackedDestinations eviction has something to evict by
+	// (oldest-touched first) when the map grows too large.
+	c2BeaconEnabled           bool
+	c2BeaconMinSamples        int
+	c2BeaconMaxCV             float64
+	c2BeaconMinInterval       time.Duration
+	c2BeaconMaxInterval       time.Duration
+	c2BeaconMaxTrackedDests   int
+	beaconMutex               sync.Mutex
+	beaconHistory             map[string][]time.Time
+	beaconLastTouch           map[string]time.Time
 }
 
 // NewEngine creates a detection engine. learningDuration controls
@@ -95,6 +138,19 @@ func NewEngine(
 	baselineEnabled bool,
 	deceptionScores map[string]int,
 	honeypotThreshold int,
+	segmentationEnabled bool,
+	vlanLevels map[uint16]float64,
+	maxLevelJump float64,
+	reconnaissanceEnabled bool,
+	reconWindow time.Duration,
+	hostScanThreshold int,
+	portScanThreshold int,
+	c2BeaconEnabled bool,
+	c2BeaconMinSamples int,
+	c2BeaconMaxCV float64,
+	c2BeaconMinInterval time.Duration,
+	c2BeaconMaxInterval time.Duration,
+	c2BeaconMaxTrackedDests int,
 ) *Engine {
 
 	if arpConfirmThreshold <= 0 {
@@ -103,6 +159,14 @@ func NewEngine(
 
 	if deceptionScores == nil {
 		deceptionScores = make(map[string]int)
+	}
+
+	if vlanLevels == nil {
+		vlanLevels = make(map[uint16]float64)
+	}
+
+	if maxLevelJump <= 0 {
+		maxLevelJump = 1
 	}
 
 	e := &Engine{
@@ -122,6 +186,53 @@ func NewEngine(
 
 		deceptionScores:   deceptionScores,
 		honeypotThreshold: honeypotThreshold,
+
+		segmentationEnabled: segmentationEnabled,
+		vlanLevels:           vlanLevels,
+		maxLevelJump:         maxLevelJump,
+		ipVLAN:                make(map[string]uint16),
+
+		reconnaissanceEnabled: reconnaissanceEnabled,
+		reconWindow:           reconWindow,
+		hostScanThreshold:     hostScanThreshold,
+		portScanThreshold:     portScanThreshold,
+		hostScanSeen:          make(map[string]map[string]time.Time),
+		portScanSeen:          make(map[string]map[string]map[int]time.Time),
+
+		c2BeaconEnabled:         c2BeaconEnabled,
+		c2BeaconMinSamples:      c2BeaconMinSamples,
+		c2BeaconMaxCV:           c2BeaconMaxCV,
+		c2BeaconMinInterval:     c2BeaconMinInterval,
+		c2BeaconMaxInterval:     c2BeaconMaxInterval,
+		c2BeaconMaxTrackedDests: c2BeaconMaxTrackedDests,
+		beaconHistory:           make(map[string][]time.Time),
+		beaconLastTouch:         make(map[string]time.Time),
+	}
+
+	if e.reconWindow <= 0 {
+		e.reconWindow = 60 * time.Second
+	}
+	if e.hostScanThreshold <= 0 {
+		e.hostScanThreshold = 15
+	}
+	if e.portScanThreshold <= 0 {
+		e.portScanThreshold = 15
+	}
+
+	if e.c2BeaconMinSamples <= 0 {
+		e.c2BeaconMinSamples = 6
+	}
+	if e.c2BeaconMaxCV <= 0 {
+		e.c2BeaconMaxCV = 0.15
+	}
+	if e.c2BeaconMinInterval <= 0 {
+		e.c2BeaconMinInterval = 5 * time.Second
+	}
+	if e.c2BeaconMaxInterval <= 0 {
+		e.c2BeaconMaxInterval = time.Hour
+	}
+	if e.c2BeaconMaxTrackedDests <= 0 {
+		e.c2BeaconMaxTrackedDests = 5000
 	}
 
 	if !baselineEnabled {
@@ -161,6 +272,9 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startHoneypotWatch(bus)
 	e.startHoneypotClearedWatch(bus)
 	e.startExternalCommunicationWatch(bus)
+	e.startSegmentationWatch(bus)
+	e.startReconnaissanceWatch(bus)
+	e.startC2BeaconWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }

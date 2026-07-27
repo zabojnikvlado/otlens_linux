@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"database/sql"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,10 @@ type Server struct {
 	// Retention is shown read-only on the Settings tab — see
 	// retention.go for what it actually does.
 	Retention RetentionConfig
+	// Notifications drives dispatchNotifications — see notify.go.
+	Notifications NotificationConfig
+	// Reports drives the scheduled report pipeline — see reports.go.
+	Reports ReportsConfig
 	// Vuln is looked up by asset vendor only (see package vuln's doc
 	// comment for why that's a real precision limit, not an oversight) —
 	// never nil; main.go always sets it to at least an empty *vuln.Database
@@ -235,7 +240,15 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
 	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
+	api.GET("/devices", requireView(ViewAssets), s.devices)
+	api.POST("/sensors/:id/assets/:mac/category", requireAction(ActionAssetConfirmDelete), s.setDeviceCategory)
+	api.POST("/sensors/:id/devices/import", requireAction(ActionAssetConfirmDelete), s.importDeviceList)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
+	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
+	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
+	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
+	api.GET("/sensors/:id/vlans/:vlanid/assets", requireView(ViewTopology), s.listVLANAssets)
+	api.GET("/sensors/:id/assets/:mac/ip-history", requireView(ViewAssets), s.assetIPHistory)
 	api.GET("/settings", requireView(ViewSettings), s.settings)
 	api.GET("/audit", requireView(ViewAudit), s.auditLog)
 	api.GET("/topology", requireView(ViewTopology), s.topology)
@@ -243,7 +256,12 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
 	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
 	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
+	api.GET("/incidents", requireView(ViewAlerts), s.incidents)
 	api.GET("/baseline", requireView(ViewDashboard), s.baseline)
+	api.GET("/dashboard/trends", requireView(ViewDashboard), s.dashboardTrends)
+	api.GET("/reports", requireView(ViewDashboard), s.listReports)
+	api.GET("/reports/:id", requireView(ViewDashboard), s.getReport)
+	api.POST("/reports/generate", requireAction(ActionDataManagement), s.generateReportNow)
 	api.GET("/rules", requireView(ViewRules), s.rules)
 	api.GET("/rules/export", requireView(ViewRules), s.exportRules)
 	api.POST("/sensors/:id/rules", requireAction(ActionRuleManage), s.createRule)
@@ -322,9 +340,19 @@ func (s *Server) telemetry(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "telemetry checksum mismatch"})
 		return
 	}
-	if err := s.Repo.PutTelemetry(c, x); err != nil {
+	newAlerts, err := s.Repo.PutTelemetry(c, x)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	// Fire-and-forget: notification delivery (SMTP/webhook, both
+	// involving network I/O to a third party) must never make the
+	// sensor's telemetry upload wait on it or fail because of it. Runs
+	// after the response is written, on a background context, not
+	// gin's per-request one (which is canceled the moment this handler
+	// returns).
+	if len(newAlerts) > 0 {
+		go s.dispatchNotifications(context.Background(), newAlerts)
 	}
 	c.JSON(http.StatusOK, management.TelemetryAck{Accepted: true, BatchID: x.BatchID, AcceptedSequence: x.Sequence, StoredAt: time.Now().UTC()})
 }
@@ -359,7 +387,124 @@ func (s *Server) assets(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// assetVulnerabilities looks up known advisories for an asset's vendor.
+// devices backs the Devices tab: the same live asset data as
+// /assets, plus a Category (Rogue/Unknown, IT, OT, Mobile, Network) —
+// classifyDeviceCategory's automatic guess, or an asset_overrides row
+// if one exists for that device (always wins over the guess). See
+// devices.go's doc comments for exactly how the guess is made and why
+// it's only best-effort.
+func (s *Server) devices(c *gin.Context) {
+	snapshots, err := s.Repo.Telemetry(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]interface{}, 0)
+	for _, snapshot := range snapshots {
+		var graph struct {
+			Nodes             []map[string]interface{} `json:"Nodes"`
+			HoneypotThreshold int                      `json:"HoneypotThreshold"`
+		}
+		if json.Unmarshal(snapshot.Topology, &graph) != nil {
+			continue
+		}
+		overrides, err := s.Repo.ListAssetOverrides(c, snapshot.SensorID)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		threshold := graph.HoneypotThreshold
+		if threshold <= 0 {
+			threshold = 100
+		}
+		for _, node := range graph.Nodes {
+			node["SensorID"] = snapshot.SensorID
+			score, _ := strconv.Atoi(fmt.Sprint(node["Score"]))
+			node["HoneypotThreshold"] = threshold
+			node["IsHoneypot"] = score >= threshold
+			mac := fmt.Sprint(node["MAC"])
+			isOT, _ := node["IsOT"].(bool)
+			confirmed := true
+			if v, ok := node["Confirmed"].(bool); ok {
+				confirmed = v
+			}
+			category := classifyDeviceCategory(fmt.Sprint(node["Vendor"]), isOT, confirmed)
+			if o, ok := overrides[mac]; ok && o.Category != "" {
+				category = o.Category
+			}
+			node["Category"] = category
+			if o, ok := overrides[mac]; ok && o.Name != "" {
+				node["OverrideName"] = o.Name
+			}
+			out = append(out, node)
+		}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// setDeviceCategory is the Devices tab's single-device "set category"
+// action.
+func (s *Server) setDeviceCategory(c *gin.Context) {
+	var req struct {
+		Category string `json:"category"`
+		Name     string `json:"name"`
+	}
+	if c.ShouldBindJSON(&req) != nil || req.Category == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "category is required"})
+		return
+	}
+	sensorID, mac := c.Param("id"), c.Param("mac")
+	if err := s.Repo.SetAssetCategory(c, sensorID, mac, req.Category, req.Name, identityFromContext(c).Username); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device category set: %s (%s) -> %s", mac, sensorID, req.Category), sensorID)
+	c.Status(http.StatusOK)
+}
+
+// importDeviceList is the Devices tab's "Import asset list" CSV upload
+// — mac,category,name per row, no header. Malformed rows are skipped,
+// not fatal to the rest of the import — see ImportAssetOverrides.
+func (s *Server) importDeviceList(c *gin.Context) {
+	sensorID := c.Param("id")
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required (multipart form field 'file')"})
+		return
+	}
+	defer file.Close()
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = -1
+	rows := make([]AssetOverride, 0)
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid CSV: " + err.Error()})
+			return
+		}
+		if len(record) < 1 {
+			continue
+		}
+		o := AssetOverride{MAC: record[0]}
+		if len(record) > 1 {
+			o.Category = record[1]
+		}
+		if len(record) > 2 {
+			o.Name = record[2]
+		}
+		rows = append(rows, o)
+	}
+	applied, err := s.Repo.ImportAssetOverrides(c, sensorID, rows, identityFromContext(c).Username)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device list imported: %d row(s) for %s", applied, sensorID), sensorID)
+	c.JSON(http.StatusOK, gin.H{"applied": applied})
+}
 // Matching is vendor-only — see package vuln's doc comment for why OTLens
 // has no passive way to fingerprint a device's exact product/firmware, so
 // this narrows to "known issues affecting this vendor," not "known issues
@@ -376,6 +521,132 @@ func (s *Server) assetVulnerabilities(c *gin.Context) {
 		advisories = s.Vuln.Lookup(vendor)
 	}
 	c.JSON(http.StatusOK, gin.H{"Vendor": vendor, "Advisories": advisories, "Loaded": s.Vuln != nil && s.Vuln.Count() > 0})
+}
+
+// vulnerabilities backs the Vulnerability Management tab: every loaded
+// advisory, each with the list of currently-known assets whose vendor
+// matches — the reverse direction of assetVulnerabilities (which goes
+// asset -> advisories for one device at a time). Same vendor-only
+// matching limitation applies here, at larger scale: a widely-used
+// vendor (Siemens, Rockwell) will show *every* asset from that vendor
+// against *every* advisory for it, which is expected given how
+// approximate this matching is, not a bug — the frontend says so
+// explicitly rather than letting the list read as confirmed findings.
+func (s *Server) vulnerabilities(c *gin.Context) {
+	if s.Vuln == nil || s.Vuln.Count() == 0 {
+		c.JSON(http.StatusOK, gin.H{"Loaded": false, "Advisories": []gin.H{}})
+		return
+	}
+	snapshots, err := s.Repo.Telemetry(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	assetsByVendor := make(map[string][]gin.H)
+	for _, snapshot := range snapshots {
+		var graph struct {
+			Nodes []map[string]interface{} `json:"Nodes"`
+		}
+		if json.Unmarshal(snapshot.Topology, &graph) != nil {
+			continue
+		}
+		for _, node := range graph.Nodes {
+			vendor := strings.ToLower(strings.TrimSpace(fmt.Sprint(node["Vendor"])))
+			if vendor == "" || vendor == "<nil>" {
+				continue
+			}
+			assetsByVendor[vendor] = append(assetsByVendor[vendor], gin.H{
+				"SensorID": snapshot.SensorID, "IP": node["IP"], "MAC": node["MAC"], "Hostname": node["Hostname"],
+			})
+		}
+	}
+	advisories := s.Vuln.All()
+	out := make([]gin.H, 0, len(advisories))
+	for _, adv := range advisories {
+		matched := assetsByVendor[strings.ToLower(strings.TrimSpace(adv.Vendor))]
+		out = append(out, gin.H{
+			"CVEID": adv.CVEID, "Vendor": adv.Vendor, "Product": adv.Product, "Severity": adv.Severity,
+			"Title": adv.Title, "PublishedDate": adv.PublishedDate, "URL": adv.URL,
+			"AffectedAssets": matched, "AffectedCount": len(matched),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		si, sj := severityRank[strings.ToLower(fmt.Sprint(out[i]["Severity"]))], severityRank[strings.ToLower(fmt.Sprint(out[j]["Severity"]))]
+		if si != sj {
+			return si > sj
+		}
+		return out[i]["AffectedCount"].(int) > out[j]["AffectedCount"].(int)
+	})
+	c.JSON(http.StatusOK, gin.H{"Loaded": true, "Advisories": out})
+}
+
+// listVLANConfig backs the Network Segmentation tab: every VLAN
+// currently observed for a sensor, with whatever name/Purdue level has
+// been assigned to it (see Repository.ListVLANConfig).
+func (s *Server) listVLANConfig(c *gin.Context) {
+	vlans, err := s.Repo.ListVLANConfig(c, c.Param("id"))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, vlans)
+}
+
+// setVLANConfig names a VLAN and/or assigns it a Purdue Model level.
+// Level: null clears it (unclassified again), a number sets it.
+//
+// This only affects Central's own naming/visualization/grouping (the
+// Network Segmentation tab, and the Topology map's VLAN labels) — the
+// sensor's own live segmentation_violation detection rule still reads
+// its *own* detect.segmentation.vlanlevels from its local config file,
+// which this does not currently update. Keep the two in sync manually
+// for now if the live rule matters; see DOCUMENTATION.md.
+func (s *Server) setVLANConfig(c *gin.Context) {
+	vlanID, err := strconv.Atoi(c.Param("vlanid"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer"})
+		return
+	}
+	var req struct {
+		Name        string   `json:"name"`
+		PurdueLevel *float64 `json:"purdue_level"`
+	}
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	sensorID := c.Param("id")
+	if err := s.Repo.SetVLANConfig(c, sensorID, vlanID, req.Name, req.PurdueLevel, identityFromContext(c).Username); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("VLAN %d configured: %s (level %v)", vlanID, req.Name, req.PurdueLevel), sensorID)
+	c.Status(http.StatusOK)
+}
+
+func (s *Server) listVLANAssets(c *gin.Context) {
+	vlanID, err := strconv.Atoi(c.Param("vlanid"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer"})
+		return
+	}
+	assets, err := s.Repo.ListVLANAssets(c, c.Param("id"), vlanID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, assets)
+}
+
+// assetIPHistory returns every IP a given asset has ever been recorded
+// with — see Repository.ListIPHistory.
+func (s *Server) assetIPHistory(c *gin.Context) {
+	entries, err := s.Repo.ListIPHistory(c, c.Param("id"), c.Param("mac"))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 // settings exposes the operational (non-secret) config values the
@@ -406,6 +677,10 @@ func (s *Server) settings(c *gin.Context) {
 		"AuditRetentionDays":         s.Retention.AuditDays,
 		"MaxDatabaseSizeGB":          s.Retention.MaxDatabaseSizeGB,
 		"TargetDatabaseSizeGB":       s.Retention.TargetDatabaseSizeGB,
+		"NotificationsEnabled":       s.Notifications.Enabled,
+		"NotificationsMinSeverity":   s.Notifications.MinSeverity,
+		"NotificationsEmailEnabled":  s.Notifications.Email.Enabled,
+		"NotificationsWebhookEnabled": s.Notifications.Webhook.Enabled,
 	})
 }
 
@@ -836,6 +1111,22 @@ func (s *Server) alerts(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+func (s *Server) incidents(c *gin.Context) {
+	incidents, err := s.Repo.ListIncidents(c, 24*time.Hour, 2)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(incidents))
+	for _, inc := range incidents {
+		out = append(out, gin.H{
+			"SensorID": inc.SensorID, "IP": inc.IP, "Types": inc.Types, "AlertKeys": inc.AlertKeys,
+			"Severity": inc.Severity, "AlertCount": inc.AlertCount, "FirstSeen": inc.FirstSeen, "LastSeen": inc.LastSeen,
+		})
+	}
+	c.JSON(http.StatusOK, out)
+}
 func (s *Server) rules(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)
 	if e != nil {
@@ -1054,6 +1345,55 @@ func (s *Server) baseline(c *gin.Context) {
 	}
 	c.JSON(200, out)
 }
+
+// dashboardTrends backs the Dashboard tab's trend charts — 30 days of
+// daily new-alert and new-asset counts, see AlertsByDay/NewAssetsByDay.
+func (s *Server) dashboardTrends(c *gin.Context) {
+	alertsByDay, err := s.Repo.AlertsByDay(c, 30)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	assetsByDay, err := s.Repo.NewAssetsByDay(c, 30)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"AlertsByDay": alertsByDay, "NewAssetsByDay": assetsByDay})
+}
+
+func (s *Server) listReports(c *gin.Context) {
+	reports, err := s.Repo.ListReports(c, 50)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, reports)
+}
+
+func (s *Server) getReport(c *gin.Context) {
+	rep, err := s.Repo.GetReport(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "report not found"})
+		return
+	}
+	c.JSON(200, rep)
+}
+
+// generateReportNow is the manual "Generate now" trigger on the Reports
+// tab — covers the 7 days immediately before this call, same window a
+// scheduled run would use, rather than needing to wait for the next
+// scheduled time just to see what a report looks like.
+func (s *Server) generateReportNow(c *gin.Context) {
+	now := time.Now().UTC()
+	if err := s.GenerateAndDispatchReport(c, now.AddDate(0, 0, -7), now); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, "report generated manually", "")
+	c.Status(202)
+}
+
 func (s *Server) assetActions(c *gin.Context) {
 	var req struct {
 		Action  string   `json:"action"`

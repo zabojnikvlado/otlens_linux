@@ -56,4 +56,15 @@ type Flow struct {
 	// conversation — 0 means untagged. Drives the Topology tab's
 	// VLAN filter — see topology.Edge.VLANID.
 	VLANID uint16
+
+	// Synced is false whenever this flow has changed (new, or
+	// Packets/Bytes/LastSeen bumped) since it was last successfully
+	// reported to Central — see Engine.GetDirtyFlows/MarkFlowsSynced.
+	// Same reasoning as detect.Alert.Synced: without this, telemetry
+	// would re-serialize and re-upload *every* tracked flow as a
+	// topology edge on every single sync, and unlike alerts (which
+	// have delta-sync already), flows have no size cap at all beyond
+	// persist.retention's time-based pruning — a busy network can
+	// accumulate far more of these than fit in one JSONB value.
+	Synced bool
 }

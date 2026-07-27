@@ -39,7 +39,7 @@ func (p Permissions) HasAction(action string) bool {
 // allTabs/allActions are what the built-in "admin" role gets. Named
 // slices rather than scattering the literal list across the file — a tab
 // or action added later only needs to be added here to reach admin.
-var allTabs = []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis", "users", "settings", "data", "audit"}
+var allTabs = []string{"dashboard", "topology", "segmentation", "assets", "devices", "vulnerabilities", "tags", "rules", "alerts", "incidents", "sensors", "analysis", "users", "settings", "data", "audit", "reports"}
 var allActions = []string{"sensor_start_stop", "asset_confirm_delete", "alert_confirm_approve", "rule_manage", "analysis_manage", "data_management", "users_roles_manage"}
 
 // Role is one row of the roles table.
@@ -103,11 +103,11 @@ func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername,
 	defaults := []Role{
 		{ID: "admin", Name: "Administrator", BuiltIn: true, Permissions: Permissions{View: allTabs, Actions: allActions}},
 		{ID: "analyst", Name: "Analyst", BuiltIn: true, Permissions: Permissions{
-			View:    []string{"dashboard", "topology", "assets", "tags", "rules", "alerts", "sensors", "analysis", "users"},
+			View:    []string{"dashboard", "topology", "segmentation", "assets", "devices", "vulnerabilities", "tags", "rules", "alerts", "incidents", "sensors", "analysis", "users", "reports"},
 			Actions: []string{"asset_confirm_delete", "alert_confirm_approve", "rule_manage", "analysis_manage"},
 		}},
 		{ID: "view", Name: "View only", BuiltIn: true, Permissions: Permissions{
-			View:    []string{"dashboard", "topology", "alerts", "users"},
+			View:    []string{"dashboard", "topology", "alerts", "incidents", "users", "reports"},
 			Actions: []string{},
 		}},
 	}

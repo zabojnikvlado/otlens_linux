@@ -106,6 +106,19 @@ func New(cfg *config.Config) (*Application, error) {
 		cfg.Baseline.Enabled,
 		deceptionScores,
 		cfg.Deception.HoneypotThreshold,
+		cfg.Detect.Segmentation.Enabled,
+		cfg.Detect.Segmentation.VLANLevels,
+		cfg.Detect.Segmentation.MaxLevelJump,
+		cfg.Detect.Reconnaissance.Enabled,
+		cfg.Detect.Reconnaissance.Window,
+		cfg.Detect.Reconnaissance.HostScanThreshold,
+		cfg.Detect.Reconnaissance.PortScanThreshold,
+		cfg.Detect.C2Beacon.Enabled,
+		cfg.Detect.C2Beacon.MinSamples,
+		cfg.Detect.C2Beacon.MaxCoefficientOfVariation,
+		cfg.Detect.C2Beacon.MinInterval,
+		cfg.Detect.C2Beacon.MaxInterval,
+		cfg.Detect.C2Beacon.MaxTrackedDestinations,
 	)
 
 	parserEngine := parser.New(eventBus)

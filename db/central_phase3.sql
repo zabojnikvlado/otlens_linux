@@ -271,3 +271,49 @@ CREATE TABLE IF NOT EXISTS audit_log (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+-- One row per generated report (see internal/central/reports.go). Kept
+-- regardless of whether email delivery is configured or succeeds — the
+-- Reports tab reads this table directly, so a report is always viewable
+-- even on a fully offline/air-gapped Central with no SMTP configured at
+-- all.
+CREATE TABLE IF NOT EXISTS report_history (
+ id TEXT PRIMARY KEY,
+ period_start TIMESTAMPTZ NOT NULL,
+ period_end TIMESTAMPTZ NOT NULL,
+ html TEXT NOT NULL,
+ recipients TEXT NOT NULL DEFAULT '',
+ email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+ email_error TEXT NOT NULL DEFAULT '',
+ generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(generated_at);
+-- Manual/imported category+name overrides for the Devices tab — see
+-- internal/central/devices.go. Never touched by any sensor sync; this
+-- is purely operator input (either one-by-one from the Devices tab, or
+-- bulk via CSV import) and always wins over the automatic vendor-based
+-- category guess for a given (sensor_id, mac).
+CREATE TABLE IF NOT EXISTS asset_overrides (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ mac TEXT NOT NULL,
+ category TEXT NOT NULL DEFAULT '',
+ name TEXT NOT NULL DEFAULT '',
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, mac)
+);
+-- VLAN display name + assigned Purdue Model level, managed from the
+-- Network Segmentation tab — see internal/central/segmentation.go. This
+-- is Central's copy for naming/visualization; the sensor's own
+-- detect.segmentation.vlanlevels (its config file) is what the live
+-- segmentation_violation detection rule actually runs against — see
+-- that tab's own notes on why the two aren't automatically the same
+-- thing yet.
+CREATE TABLE IF NOT EXISTS vlan_config (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ vlan_id INTEGER NOT NULL,
+ name TEXT NOT NULL DEFAULT '',
+ purdue_level REAL,
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, vlan_id)
+);

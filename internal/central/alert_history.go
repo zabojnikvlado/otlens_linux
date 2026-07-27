@@ -36,14 +36,22 @@ type telemetryAlert struct {
 // recorded via MarkAlertsReviewed — an operator's "confirmed"/
 // "approved" verdict shouldn't flip back to "new" just because the
 // sensor's own copy hasn't caught up yet on this particular sync.
-func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJSON []byte) error {
+//
+// Returns the entries that were genuinely new this call (xmax=0 is
+// Postgres's standard idiom for "this row was just inserted, not
+// updated" — a system column set to 0 only by INSERT, non-zero once any
+// UPDATE has touched the row) — see notify.go, which uses this to
+// dispatch a notification only for something that just started
+// happening, not on every routine re-report of an already-known alert.
+func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJSON []byte) ([]AlertHistoryEntry, error) {
 	if len(alertsJSON) == 0 {
-		return nil
+		return nil, nil
 	}
 	var alerts []telemetryAlert
 	if err := json.Unmarshal(alertsJSON, &alerts); err != nil {
-		return nil // malformed/empty — nothing to record, not a sync failure
+		return nil, nil // malformed/empty — nothing to record, not a sync failure
 	}
+	var newlyCreated []AlertHistoryEntry
 	for _, a := range alerts {
 		if a.ID == "" {
 			continue
@@ -64,7 +72,7 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 		if count == 0 {
 			count = 1
 		}
-		if _, err := x.ExecContext(ctx, `
+		rows, err := x.QueryContext(ctx, `
 			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
@@ -76,11 +84,25 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				count = GREATEST(alert_history.count, EXCLUDED.count),
 				first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
 				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen)
-		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen); err != nil {
-			return err
+			RETURNING (xmax = 0) AS inserted
+		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen)
+		if err != nil {
+			return newlyCreated, err
+		}
+		var wasInserted bool
+		if rows.Next() {
+			_ = rows.Scan(&wasInserted)
+		}
+		rows.Close()
+		if wasInserted {
+			newlyCreated = append(newlyCreated, AlertHistoryEntry{
+				SensorID: sensorID, AlertKey: a.ID, Type: a.Type, Severity: a.Severity,
+				Message: a.Message, IP: a.IP, Status: status, Count: count,
+				FirstSeen: firstSeen, LastSeen: lastSeen,
+			})
 		}
 	}
-	return nil
+	return newlyCreated, nil
 }
 
 // MarkAlertsReviewed records an operator's confirm/approve verdict

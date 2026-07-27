@@ -125,7 +125,7 @@ no self-service "forgot password" flow (deliberately — see
 
 ## Using the Central UI
 
-The nav bar along the top has 12 tabs. Which ones you see depends on your
+The sidebar on the left has 17 tabs. Which ones you see depends on your
 role (see [Roles and permissions](#roles-and-permissions)) — a tab you
 can't view is simply not shown, and the same permission is enforced again
 on the server, not just hidden client-side.
@@ -166,12 +166,22 @@ Colors/styles mean:
   [Assets](#assets)).
 
 Once a connection has been observed, it stays on the map even if the
-sensor's own (memory-bounded) flow tracking later ages it out — see
-[Architecture](#architecture) for why. A pair of assets is drawn as **one**
-edge regardless of how many distinct flows (ports/sessions) exist between
-them; hover an edge to see the combined flow count and traffic. Node
-positions are stable across refreshes — dragging a node keeps it there,
-and new assets are the only thing that triggers a brief re-layout.
+sensor's own flow tracking later ages it out (`persist.retention`,
+time-based only — flow count itself has no upper bound beyond that) —
+see [Architecture](#architecture) for why. A pair of assets is drawn as
+**one** edge regardless of how many distinct flows (ports/sessions) exist
+between them; hover an edge to see the combined flow count and traffic.
+Node positions are stable across refreshes — dragging a node keeps it
+there, and new assets are the only thing that triggers a brief re-layout.
+
+A sensor only ever reports flows that are new or changed as topology
+edges since its last successful sync — not its entire tracked flow set —
+capped per sync, with a large backlog draining over several sync cycles
+rather than all at once. Same reasoning and mechanism as
+[Alerts](#alerts)' delta sync: flow count has no cap beyond time-based
+retention, so a busy network can accumulate far more flows than fit in
+one telemetry payload, and this is what stops that from ever exceeding
+PostgreSQL's 256 MB per-JSONB-value limit.
 
 Above the map, a row of VLAN chips (one per distinct VLAN currently on the
 map, plus "Untagged") lets you toggle assets from a given VLAN on or off —
@@ -195,7 +205,60 @@ vendor — see [Configuration reference](#configuration-reference)'s
 `vulnerability` section for enabling this. Matching is vendor-only (OTLens
 has no way to passively fingerprint exact firmware), so results mean
 "known issues affecting this vendor," not confirmed for this specific
-device.
+device. The same view also lists **every IP that device has ever been
+recorded with**, oldest first — useful for a device that's changed IP
+over time (DHCP renewal, static reassignment). Straight from the
+`topology_nodes` ledger; the Assets tab itself only ever shows whichever
+IP is currently reported.
+
+### Devices
+
+The same assets as the Assets tab, grouped by an automatic category
+guess: **OT** (a device that's spoken a recognized OT protocol — the
+same signal Assets' Class column uses, and the most reliable of the
+four), **IT** (the default for anything confirmed and not otherwise
+classified), **Mobile**/**Network** (vendor-name heuristics — Apple,
+Samsung etc. for Mobile; Cisco, Ubiquiti, Netgear etc. for Network — a
+vendor making both phone and network gear will sometimes guess wrong),
+and **Rogue/Unknown** (unconfirmed, regardless of vendor). **None of
+this is authoritative** — it's a starting point, not a fingerprint.
+
+Click a device's category to correct it by hand, or use **Import asset
+list** to bulk-apply corrections from a CSV (`mac,category,name` per
+row, no header) — useful for seeding a whole sensor's inventory at
+first deployment instead of confirming/categorizing one device at a
+time. A manual or imported category always overrides the automatic
+guess and persists independently of it (`asset_overrides` table) — it's
+never touched by anything a sensor reports.
+
+### Vulnerability Management
+
+The reverse of Assets' per-device CVE lookup: every advisory in the
+loaded snapshot, with the list of currently-known assets whose vendor
+matches. Same vendor-only matching limitation, at larger scale — a
+widely-used vendor (Siemens, Rockwell) will show *every* asset from
+that vendor against *every* advisory for it, which is expected given how
+approximate this matching is, not a bug. Click an advisory to see its
+affected assets and the advisory link. See [Configuration
+reference](#configuration-reference)'s `vulnerability` section for
+loading a snapshot.
+
+### Network Segmentation
+
+VLAN names and Purdue Model levels, per sensor — drives the Topology
+map's VLAN labels/grouping and this tab's own asset-by-segment
+drill-down. **This currently only affects Central's own
+naming/visualization** — the sensor's own live "Purdue Model
+Segmentation Violation" detection rule (see `DETECTION_RULES.md`) still
+reads its *own* `detect.segmentation.vlanlevels` from that sensor's
+local config file, which editing here does not update. Keep the two in
+sync by hand for now if the live rule matters to you.
+
+Worth knowing going in: a VLAN-to-level mapping is an approximation, not
+a precise boundary. An engineering workstation is conceptually Level 3
+but often sits on the same physical VLAN as the Level 1 PLCs it
+programs — there's no way to represent "this one device on this VLAN is
+actually a different level" here yet; the whole VLAN gets one level.
 
 ### OT Tags
 
@@ -235,6 +298,46 @@ current set." This is also what stops an OT network with a very large
 number of distinct findings from ever producing a telemetry payload big
 enough to hit PostgreSQL's hard 256 MB per-JSONB-value limit — the
 failure mode this replaced.
+
+**Out-of-band notifications** (`notifications` in `central.config.yaml`)
+send an email and/or webhook when a new alert at or above
+`min_severity` is recorded. Off by default; email is off even when
+`notifications.enabled` is true (needs real SMTP settings filled in to
+do anything). Independent of SIEM export — see
+[Configuration reference](#configuration-reference).
+
+### Incidents
+
+Groups alert_history rows that share a sensor+IP and include at least
+two *different* alert types within the last 24 hours — an ARP spoof
+followed by a new communication pattern followed by lateral movement
+against the same address, say, surfaced as one likely-related event
+instead of three unrelated rows in the Alerts tab. Computed fresh from
+`alert_history` on every request, not its own stored table. Same view
+permission as Alerts.
+
+### Reports
+
+A weekly HTML summary — new assets, open alerts by severity, new
+incidents, topology growth, sensor health — covering the 7 days before
+each generation. Not a true PDF (no PDF library in this codebase); it's
+a self-contained HTML document instead, which most email clients render
+directly and which the recipient can print/save as PDF if they want one.
+
+Configured via `reports` in `central.config.yaml`: off by default,
+weekly on a configurable day/hour (UTC). Every generated report is saved
+to `report_history` and viewable from the Reports tab **regardless of
+whether email delivery is configured or succeeds** — so this still works
+on a fully offline/air-gapped Central with no SMTP set up at all, and a
+failed send doesn't lose the report. Recipients here are deliberately
+separate from `notifications.email.to` (a weekly management summary and
+a real-time alert ping often go to different people), but both share the
+same SMTP connection settings (`notifications.email.smtp_host` etc.) —
+there's no second copy of those for reports specifically.
+
+Click **Generate now** (needs `data_management`) to produce one
+immediately, covering the 7 days before that click, instead of waiting
+for the next scheduled slot.
 
 ### Sensors
 

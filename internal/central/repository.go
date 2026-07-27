@@ -296,6 +296,52 @@ CREATE TABLE IF NOT EXISTS audit_log (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+-- One row per generated report (see internal/central/reports.go). Kept
+-- regardless of whether email delivery is configured or succeeds — the
+-- Reports tab reads this table directly, so a report is always viewable
+-- even on a fully offline/air-gapped Central with no SMTP configured at
+-- all.
+CREATE TABLE IF NOT EXISTS report_history (
+ id TEXT PRIMARY KEY,
+ period_start TIMESTAMPTZ NOT NULL,
+ period_end TIMESTAMPTZ NOT NULL,
+ html TEXT NOT NULL,
+ recipients TEXT NOT NULL DEFAULT '',
+ email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+ email_error TEXT NOT NULL DEFAULT '',
+ generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(generated_at);
+-- Manual/imported category+name overrides for the Devices tab — see
+-- internal/central/devices.go. Never touched by any sensor sync; this
+-- is purely operator input (either one-by-one from the Devices tab, or
+-- bulk via CSV import) and always wins over the automatic vendor-based
+-- category guess for a given (sensor_id, mac).
+CREATE TABLE IF NOT EXISTS asset_overrides (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ mac TEXT NOT NULL,
+ category TEXT NOT NULL DEFAULT '',
+ name TEXT NOT NULL DEFAULT '',
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, mac)
+);
+-- VLAN display name + assigned Purdue Model level, managed from the
+-- Network Segmentation tab — see internal/central/segmentation.go. This
+-- is Central's copy for naming/visualization; the sensor's own
+-- detect.segmentation.vlanlevels (its config file) is what the live
+-- segmentation_violation detection rule actually runs against — see
+-- that tab's own notes on why the two aren't automatically the same
+-- thing yet.
+CREATE TABLE IF NOT EXISTS vlan_config (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ vlan_id INTEGER NOT NULL,
+ name TEXT NOT NULL DEFAULT '',
+ purdue_level REAL,
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY (sensor_id, vlan_id)
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -498,7 +544,7 @@ func (r *Repository) DeleteSensor(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) error {
+func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) ([]AlertHistoryEntry, error) {
 	if x.CapturedAt.IsZero() {
 		x.CapturedAt = time.Now().UTC()
 	}
@@ -510,14 +556,14 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,batch_id,sequence,checksum,updated_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
 WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var alerts []map[string]interface{}
 	if r.siemAlertsEnabled && len(x.Alerts) > 0 && json.Unmarshal(x.Alerts, &alerts) == nil {
@@ -539,15 +585,15 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 			}
 			payload, marshalErr := json.Marshal(envelope)
 			if marshalErr != nil {
-				return marshalErr
+				return nil, marshalErr
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO siem_outbox(event_key,kind,payload) VALUES($1,'alert',$2) ON CONFLICT(event_key) DO NOTHING`, eventKey, payload); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NOW(),last_sync_success_at=NOW(),sync_status='healthy',pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=GREATEST(sync_sequence,$2) WHERE id=$1`, x.SensorID, x.Sequence); err != nil {
-		return err
+		return nil, err
 	}
 	// Fold this sync's nodes/edges into the durable per-sensor ledgers
 	// (see topology_edges.go) before committing, so it's atomic with the
@@ -562,16 +608,20 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	var graph topology.Graph
 	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
 		if err := upsertTopologyNodes(ctx, tx, x.SensorID, graph.Nodes); err != nil {
-			return err
+			return nil, err
 		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts); err != nil {
-		return err
+	newAlerts, err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return newAlerts, nil
 }
 
 func firstValue(m map[string]interface{}, keys ...string) interface{} {

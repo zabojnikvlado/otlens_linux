@@ -1,4 +1,4 @@
-const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[];let network,nodesDS,edgesDS;const topologyPositionCache=new Map();const selected=new Set();
+const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilities=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[],incidents=[],reports=[],trends={AlertsByDay:[],NewAssetsByDay:[]};let network,nodesDS,edgesDS;const topologyPositionCache=new Map();const selected=new Set();
 // Auth state — populated from GET /v1/me on boot and again right after
 // login. permissions.view drives which nav tabs are shown (server-side
 // requireView enforces the same thing, this just reflects it in the UI);
@@ -27,9 +27,9 @@ async function fetchTopology(){
   return{unchanged:false,value};
 }
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
-async function api(path,opt={}){const h={'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}return r.status===204||r.status===202?null:r.json()}
+async function api(path,opt={}){const isFormData=typeof FormData!=='undefined'&&opt.body instanceof FormData;const h=isFormData?{...(opt.headers||{})}:{'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}return r.status===204||r.status===202?null:r.json()}
 function setConn(ok,t){document.getElementById('conn-dot').className='dot '+(ok?'ok':'down');document.getElementById('conn-text').textContent=t}
-document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;const enteringTopology=b.dataset.tab==='topology'&&!document.getElementById('view-topology').classList.contains('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30);if(enteringTopology)refreshAll()};
+document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;const enteringTopology=b.dataset.tab==='topology'&&!document.getElementById('view-topology').classList.contains('active');const enteringSegmentation=b.dataset.tab==='segmentation'&&!document.getElementById('view-segmentation').classList.contains('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='topology'&&network)setTimeout(()=>network.redraw(),30);if(enteringTopology)refreshAll();if(enteringSegmentation)loadSegmentation()};
 function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false;return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}\nIP: ${n.IP}\nMAC: ${n.MAC}\nVendor: ${n.Vendor||'—'}\nScore: ${score}/100${honey?' (honeypot)':''}\nProtocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:{background:honey?'#a855f7':bad?'#e85d4c':n.IsOT?'#3fbfb0':'#64748b',border:honey?'#7c3aed':bad?'#ff9f95':n.IsOT?'#2a7d74':'#334155'},size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase(),_vlan:Number(n.VLANID||0)}}
 function topologyHash(value){
   let h=2166136261;
@@ -187,20 +187,142 @@ document.getElementById('vlan-filter-all').onclick=()=>{hiddenVlans.clear();rend
 document.getElementById('vlan-filter-none').onclick=()=>{if(!nodesDS)return;nodesDS.get().forEach(n=>hiddenVlans.add(n._vlan??0));renderVlanFilter();applyVlanFilter()};
 document.getElementById('topology-search-input').oninput=applySearch;document.getElementById('topology-search-clear').onclick=()=>{document.getElementById('topology-search-input').value='';applySearch()};
 function renderAssets(){const q=document.getElementById('assets-filter').value.toLowerCase(),data=assets.filter(a=>JSON.stringify(a).toLowerCase().includes(q));document.getElementById('assets-count').textContent=data.length+' assets';document.querySelector('#table-assets tbody').innerHTML=data.map(a=>`<tr class="asset-row ${a.Confirmed===false?'row-unconfirmed':''}" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}" data-vendor="${esc(a.Vendor||'')}" data-ip="${esc(a.IP||'')}"><td><input class="asset-check" type="checkbox" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}" ${selected.has(a.SensorID+'::'+a.MAC)?'checked':''}></td><td>${esc(a.SensorID)}</td><td>${esc(a.IP)}</td><td>${esc(a.MAC)}</td><td>${esc(a.Vendor)}</td><td>${esc(a.Hostname)}</td><td class="${a.Confirmed===false?'state-new':'state-ok'}">${a.Confirmed===false?'NEW / UNCONFIRMED':'confirmed'}</td><td>${a.IsOT?'OT':'IT'}</td><td>${esc((a.Protocols||[]).join(', '))}</td><td>${esc(a.VLANID||'untagged')}</td><td>${esc(a.Score??1)}</td><td>${(a.IsHoneypot===true||Number(a.Score??1)>=Number(a.HoneypotThreshold??100))?'<span class="pill honeypot">HONEYPOT</span>':Number(a.Score??1)>=75?'<span class="pill severity-high">CRITICAL</span>':Number(a.Score??1)>=40?'<span class="pill severity-medium">ELEVATED</span>':'standard'}</td><td>${esc(a.PacketCount)}</td><td>${time(a.LastSeen)}</td><td>${a.Confirmed===false&&can('asset_confirm_delete')?`<button class="ack-btn confirm-one" data-sensor="${esc(a.SensorID)}" data-mac="${esc(a.MAC)}">Confirm</button>`:a.Confirmed===false?'pending':'—'}</td></tr>`).join('');updateBulk()}
+const deviceCategoryFilter=new Set();
+function renderDevices(){
+  const sel=document.getElementById('devices-import-sensor');
+  if(sel&&sel.dataset.populated!==String(sensors.length)){
+    sel.innerHTML=sensors.map(s=>`<option value="${esc(s.ID||s.id)}">${esc(s.Name||s.name||s.ID||s.id)}</option>`).join('');
+    sel.dataset.populated=String(sensors.length);
+  }
+  const cats=[...new Set(devices.map(d=>d.Category||'IT'))].sort();
+  document.getElementById('devices-category-chips').innerHTML=cats.map(cat=>{
+    const off=deviceCategoryFilter.has(cat);
+    return `<label class="vlan-chip ${off?'off':''}" data-cat="${esc(cat)}"><input type="checkbox" ${off?'':'checked'}> ${esc(cat)}</label>`;
+  }).join('');
+  const q=(document.getElementById('devices-filter').value||'').toLowerCase();
+  const data=devices.filter(d=>!deviceCategoryFilter.has(d.Category||'IT')&&JSON.stringify(d).toLowerCase().includes(q));
+  document.getElementById('devices-count').textContent=data.length+' devices';
+  document.querySelector('#table-devices tbody').innerHTML=data.map(d=>`<tr><td>${esc(d.SensorID)}</td><td>${esc(d.IP)}</td><td>${esc(d.MAC)}</td><td>${esc(d.OverrideName||d.Hostname||'—')}</td><td>${esc(d.Vendor||'—')}</td><td class="device-category" data-sensor="${esc(d.SensorID)}" data-mac="${esc(d.MAC)}" title="Click to change">${esc(d.Category||'IT')}</td><td class="${d.Confirmed===false?'state-new':'state-ok'}">${d.Confirmed===false?'NEW / UNCONFIRMED':'confirmed'}</td><td>${time(d.LastSeen)}</td></tr>`).join('');
+}
+document.getElementById('devices-filter').addEventListener('input',renderDevices);
+document.getElementById('devices-category-chips').addEventListener('click',e=>{
+  const chip=e.target.closest('.vlan-chip');if(!chip)return;e.preventDefault();
+  const cat=chip.dataset.cat;
+  if(deviceCategoryFilter.has(cat))deviceCategoryFilter.delete(cat);else deviceCategoryFilter.add(cat);
+  renderDevices();
+});
+document.querySelector('#table-devices tbody').addEventListener('click',async e=>{
+  const cell=e.target.closest('.device-category');if(!cell||!can('asset_confirm_delete'))return;
+  const next=prompt('Category (IT, OT, Mobile, Network, Rogue/Unknown):',cell.textContent.trim());
+  if(!next)return;
+  try{
+    await api(`/sensors/${encodeURIComponent(cell.dataset.sensor)}/assets/${encodeURIComponent(cell.dataset.mac)}/category`,{method:'POST',body:JSON.stringify({category:next})});
+    refreshAll();
+  }catch(err){alert(`Failed to set category: ${err.message}`)}
+});
+document.getElementById('devices-import-file').addEventListener('change',async e=>{
+  const file=e.target.files[0];if(!file)return;
+  const sensorID=document.getElementById('devices-import-sensor').value;
+  if(!sensorID){alert('Select a sensor to import into first.');e.target.value='';return}
+  const form=new FormData();form.append('file',file);
+  try{
+    const r=await api(`/sensors/${encodeURIComponent(sensorID)}/devices/import`,{method:'POST',body:form});
+    alert(`Imported ${r.applied} row(s).`);
+    refreshAll();
+  }catch(err){alert(`Import failed: ${err.message}`)}
+  finally{e.target.value=''}
+});
+let segmentationSensorID=null;
+function renderSegmentationSensorList(){
+  const sel=document.getElementById('segmentation-sensor');if(!sel)return;
+  if(sel.dataset.populated===String(sensors.length))return;
+  sel.innerHTML=sensors.map(s=>`<option value="${esc(s.ID||s.id)}">${esc(s.Name||s.name||s.ID||s.id)}</option>`).join('');
+  sel.dataset.populated=String(sensors.length);
+  if(!segmentationSensorID&&sensors.length){segmentationSensorID=sensors[0].ID||sensors[0].id;sel.value=segmentationSensorID;loadSegmentation()}
+}
+async function loadSegmentation(){
+  if(!segmentationSensorID)return;
+  const tbody=document.querySelector('#table-segmentation tbody');
+  try{
+    const vlans=await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/vlans`);
+    tbody.innerHTML=(vlans||[]).map(v=>`<tr><td>${v.VLANID===0?'Untagged':v.VLANID}</td><td>${esc(v.Name||'—')}</td><td>${v.PurdueLevel==null?'—':esc(v.PurdueLevel)}</td><td class="segmentation-assets" data-vlan="${v.VLANID}">${esc(v.AssetCount)} <span class="rules-help" style="display:inline">(view)</span></td><td><button class="secondary-btn segmentation-edit" data-vlan="${v.VLANID}" data-name="${esc(v.Name||'')}" data-level="${v.PurdueLevel==null?'':v.PurdueLevel}">Edit</button></td></tr>`).join('')||'<tr><td colspan="5">No VLANs observed yet for this sensor.</td></tr>';
+  }catch(err){tbody.innerHTML=`<tr><td colspan="5">Failed to load: ${esc(err.message)}</td></tr>`}
+}
+document.getElementById('segmentation-sensor').addEventListener('change',e=>{segmentationSensorID=e.target.value;loadSegmentation()});
+document.querySelector('#table-segmentation tbody').addEventListener('click',async e=>{
+  const editBtn=e.target.closest('.segmentation-edit');
+  if(editBtn){
+    const name=prompt('VLAN name:',editBtn.dataset.name||'');
+    if(name===null)return;
+    const levelStr=prompt('Purdue level (0-5, blank to clear):',editBtn.dataset.level||'');
+    if(levelStr===null)return;
+    const purdue_level=levelStr.trim()===''?null:Number(levelStr);
+    try{
+      await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/vlans/${editBtn.dataset.vlan}`,{method:'PUT',body:JSON.stringify({name,purdue_level})});
+      loadSegmentation();
+    }catch(err){alert(`Failed to save: ${err.message}`)}
+    return;
+  }
+  const assetsCell=e.target.closest('.segmentation-assets');
+  if(assetsCell){
+    try{
+      const assets=await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/vlans/${assetsCell.dataset.vlan}/assets`);
+      document.getElementById('vuln-modal-title').textContent=`VLAN ${assetsCell.dataset.vlan==='0'?'Untagged':assetsCell.dataset.vlan} — assets`;
+      const rows=assets||[];
+      document.getElementById('vuln-modal-body').innerHTML=rows.length?`<table class="data-table"><thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>Vendor</th></tr></thead><tbody>${rows.map(a=>`<tr><td>${esc(a.IP)}</td><td>${esc(a.MAC)}</td><td>${esc(a.Hostname||'—')}</td><td>${esc(a.Vendor||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty-dashboard">No assets currently on this VLAN.</div>';
+      document.getElementById('vuln-modal').hidden=false;
+    }catch(err){alert(`Failed to load assets: ${err.message}`)}
+  }
+});
+function renderVulnerabilities(){
+  const q=(document.getElementById('vuln-mgmt-filter').value||'').toLowerCase();
+  const data=vulnerabilities.filter(v=>JSON.stringify(v).toLowerCase().includes(q));
+  document.getElementById('vuln-mgmt-count').textContent=data.length+' advisories';
+  document.querySelector('#table-vulnerabilities tbody').innerHTML=data.map((v,i)=>`<tr class="vuln-row" data-index="${data.indexOf(v)}"><td>${esc(v.CVEID)}</td><td><span class="severity ${esc(String(v.Severity||'').toLowerCase())}">${esc(v.Severity||'—')}</span></td><td>${esc(v.Vendor)}</td><td>${esc(v.Product||'—')}</td><td>${esc(v.Title)}</td><td>${esc(v.PublishedDate||'—')}</td><td>${esc(v.AffectedCount||0)}</td></tr>`).join('');
+  window.__vulnRows=data;
+}
+document.getElementById('vuln-mgmt-filter').addEventListener('input',renderVulnerabilities);
+document.querySelector('#table-vulnerabilities tbody').addEventListener('click',e=>{
+  const row=e.target.closest('.vuln-row');if(!row)return;
+  const v=(window.__vulnRows||[])[Number(row.dataset.index)];if(!v)return;
+  const assetsList=v.AffectedAssets||[];
+  document.getElementById('vuln-modal-title').textContent=`${esc(v.CVEID)} — ${esc(v.Vendor)}`;
+  document.getElementById('vuln-modal-body').innerHTML=`
+    <div class="modal-history"><b>${esc(v.Title)}</b><br><span class="severity ${esc(String(v.Severity||'').toLowerCase())}">${esc(v.Severity||'—')}</span> · ${esc(v.Product||'—')} · ${esc(v.PublishedDate||'—')}${v.URL?` · <a href="${esc(v.URL)}" target="_blank" rel="noopener">advisory</a>`:''}</div>
+    <h3>Affected assets (${assetsList.length})</h3>
+    ${assetsList.length?`<table class="data-table"><thead><tr><th>Sensor</th><th>IP</th><th>MAC</th><th>Hostname</th></tr></thead><tbody>${assetsList.map(a=>`<tr><td>${esc(a.SensorID)}</td><td>${esc(a.IP)}</td><td>${esc(a.MAC)}</td><td>${esc(a.Hostname||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty-dashboard">No currently-known assets from this vendor.</div>'}`;
+  document.getElementById('vuln-modal').hidden=false;
+});
 function updateBulk(){const on=selected.size>0;document.querySelectorAll('.bulk').forEach(b=>b.hidden=!on)}
 document.getElementById('assets-filter').oninput=renderAssets;document.querySelector('#table-assets tbody').onclick=e=>{const c=e.target.closest('.asset-check');if(c){const k=c.dataset.sensor+'::'+c.dataset.mac;c.checked?selected.add(k):selected.delete(k);updateBulk();return}const b=e.target.closest('.confirm-one');if(b){sendAssetAction('confirm',[b.dataset.sensor+'::'+b.dataset.mac]);return}const row=e.target.closest('.asset-row');if(row)openAssetVulnerabilities(row.dataset.sensor,row.dataset.vendor,row.dataset.mac,row.dataset.ip)};document.getElementById('assets-all').onchange=e=>{assets.forEach(a=>e.target.checked?selected.add(a.SensorID+'::'+a.MAC):selected.delete(a.SensorID+'::'+a.MAC));renderAssets()};
 async function openAssetVulnerabilities(sensor,vendor,mac,ip){
   const title=document.getElementById('vuln-modal-title'),body=document.getElementById('vuln-modal-body');
-  title.textContent=`Known vulnerabilities — ${vendor||'Unknown vendor'} (${ip||mac||sensor})`;
+  title.textContent=`${vendor||'Unknown vendor'} — ${ip||mac||sensor}`;
   document.getElementById('vuln-modal').hidden=false;
-  if(!vendor){body.innerHTML='<div class="empty-dashboard">No vendor identified for this device (OUI lookup found no match) — vendor-based vulnerability matching needs one.</div>';return}
-  body.innerHTML='<div class="empty-dashboard">Loading…</div>';
+  const sections=[];
+  if(vendor){
+    try{
+      const r=await api('/assets/vulnerabilities?vendor='+encodeURIComponent(vendor));
+      if(!r.Loaded){
+        sections.push('<h3>Known vulnerabilities</h3><div class="empty-dashboard">No vulnerability snapshot loaded on Central — set vulnerability.csv_path in central.config.yaml.</div>');
+      }else{
+        const list=Array.isArray(r.Advisories)?r.Advisories:[];
+        sections.push('<h3>Known vulnerabilities</h3>'+(list.length?list.map(v=>`<div class="modal-history"><b>${esc(v.CVEID)}</b> <span class="severity ${esc(String(v.Severity||'').toLowerCase())}">${esc(v.Severity||'—')}</span><br>${esc(v.Title)}<br><small>${esc(v.Product||'—')} · ${esc(v.PublishedDate||'—')}</small>${v.URL?` · <a href="${esc(v.URL)}" target="_blank" rel="noopener">advisory</a>`:''}</div>`).join(''):'<div class="empty-dashboard">No known advisories for this vendor in the loaded snapshot.</div>'));
+      }
+    }catch(err){sections.push(`<h3>Known vulnerabilities</h3><div class="empty-dashboard">Failed to load: ${esc(err.message)}</div>`)}
+  }else{
+    sections.push('<h3>Known vulnerabilities</h3><div class="empty-dashboard">No vendor identified for this device (OUI lookup found no match) — vendor-based vulnerability matching needs one.</div>');
+  }
+  sections.push('<h3>IP history</h3><div id="vuln-modal-ip-history" class="empty-dashboard">Loading…</div>');
+  body.innerHTML=sections.join('');
   try{
-    const r=await api('/assets/vulnerabilities?vendor='+encodeURIComponent(vendor));
-    if(!r.Loaded){body.innerHTML='<div class="empty-dashboard">No vulnerability snapshot loaded on Central — set vulnerability.csv_path in central.config.yaml.</div>';return}
-    const list=Array.isArray(r.Advisories)?r.Advisories:[];
-    body.innerHTML=list.length?list.map(v=>`<div class="modal-history"><b>${esc(v.CVEID)}</b> <span class="severity ${esc(String(v.Severity||'').toLowerCase())}">${esc(v.Severity||'—')}</span><br>${esc(v.Title)}<br><small>${esc(v.Product||'—')} · ${esc(v.PublishedDate||'—')}</small>${v.URL?` · <a href="${esc(v.URL)}" target="_blank" rel="noopener">advisory</a>`:''}</div>`).join(''):'<div class="empty-dashboard">No known advisories for this vendor in the loaded snapshot.</div>';
-  }catch(err){body.innerHTML=`<div class="empty-dashboard">Failed to load: ${esc(err.message)}</div>`}
+    const hist=await api(`/sensors/${encodeURIComponent(sensor)}/assets/${encodeURIComponent(mac)}/ip-history`);
+    const rows=Array.isArray(hist)?hist:[];
+    document.getElementById('vuln-modal-ip-history').outerHTML=rows.length?`<table class="data-table"><thead><tr><th>IP</th><th>First seen</th><th>Last seen</th></tr></thead><tbody>${rows.map(h=>`<tr><td>${esc(h.IP)}</td><td>${time(h.FirstSeen)}</td><td>${time(h.LastSeen)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty-dashboard">No recorded IP history for this device yet.</div>';
+  }catch(err){
+    const el=document.getElementById('vuln-modal-ip-history');
+    if(el)el.textContent=`Failed to load: ${err.message}`;
+  }
 }
 document.getElementById('vuln-modal-close').onclick=()=>document.getElementById('vuln-modal').hidden=true;
 async function sendAssetAction(action,keys=[...selected]){const groups={};keys.forEach(k=>{const i=k.indexOf('::'),s=k.slice(0,i),m=k.slice(i+2);(groups[s]??=[]).push(m)});for(const [s,targets] of Object.entries(groups))await api(`/sensors/${encodeURIComponent(s)}/assets/actions`,{method:'POST',body:JSON.stringify({action,targets})});selected.clear();updateBulk();setTimeout(refreshAll,1000)}document.getElementById('assets-confirm').onclick=()=>sendAssetAction('confirm');document.getElementById('assets-delete').onclick=()=>confirm('Delete selected assets?')&&sendAssetAction('delete');
@@ -246,10 +368,71 @@ function drawChart(rows){
   x.fillStyle='#3fbfb0';
   points.forEach((p,i)=>{const px=xAt(i),py=yAt(p.v);x.beginPath();x.arc(px,py,2.5,0,Math.PI*2);x.fill()});
 }
+// drawDailyBarChart renders a simple bar chart of one count per day —
+// used for both dashboard trend panels. Zero-fills every day in the
+// window (not just days that had data) so the x-axis stays continuous
+// and a quiet stretch reads as "nothing happened," not as a gap.
+function drawDailyBarChart(canvasId,dayCounts,days){
+  const c=document.getElementById(canvasId);if(!c)return;
+  const x=c.getContext('2d');
+  x.clearRect(0,0,c.width,c.height);
+  const byDay=new Map((dayCounts||[]).map(d=>[new Date(d.Day).toDateString(),Number(d.Count)||0]));
+  const series=[];
+  const today=new Date();today.setHours(0,0,0,0);
+  for(let i=days-1;i>=0;i--){
+    const d=new Date(today);d.setDate(d.getDate()-i);
+    series.push({date:d,count:byDay.get(d.toDateString())||0});
+  }
+  const mx=Math.max(1,...series.map(s=>s.count));
+  const padL=32,padR=10,padT=10,padB=20,plotW=c.width-padL-padR,plotH=c.height-padT-padB;
+  const barW=plotW/series.length;
+  x.strokeStyle='#2a3648';x.lineWidth=1;
+  x.beginPath();x.moveTo(padL,padT);x.lineTo(padL,padT+plotH);x.lineTo(padL+plotW,padT+plotH);x.stroke();
+  x.font='10px monospace';x.textAlign='right';x.textBaseline='middle';x.fillStyle='#8393ab';
+  x.fillText(String(mx),padL-6,padT+4);
+  x.fillText('0',padL-6,padT+plotH);
+  x.fillStyle='#3fbfb0';
+  series.forEach((s,i)=>{
+    const h=s.count/mx*plotH,bx=padL+i*barW+1,by=padT+plotH-h;
+    x.fillRect(bx,by,Math.max(1,barW-2),h);
+  });
+  x.textAlign='center';x.textBaseline='top';x.fillStyle='#8393ab';
+  [0,Math.floor(series.length/2),series.length-1].forEach(i=>{
+    const label=series[i].date.toLocaleDateString([],{month:'short',day:'numeric'});
+    x.fillText(label,padL+i*barW+barW/2,padT+plotH+4);
+  });
+}
 function openTag(sensor,key){const t=currentTags().find(x=>x.SensorID===sensor&&(x.Key||[x.DeviceIP,x.DevicePort,x.Protocol,x.AddressSpace,x.Address].join('|'))===key);if(!t)return;const h=(Array.isArray(changes)?changes:[]).filter(x=>x.SensorID===sensor&&x.TagKey===key).sort((a,b)=>new Date(a.Timestamp)-new Date(b.Timestamp)),ev=(Array.isArray(events)?events:[]).filter(x=>x.SensorID===sensor&&x.TagKey===key);document.getElementById('tag-modal-title').textContent=`${t.Protocol} ${t.DeviceIP} — ${t.AddressSpace} ${t.Address}`;document.getElementById('tag-modal-details').innerHTML=`<p>Current: <b>${esc(val(t.LastValue))}</b> · Previous: ${esc(val(t.PreviousValue))} · learned range: ${esc(val(t.MinValue))} … ${esc(val(t.MaxValue))}</p>`;document.getElementById('tag-history').innerHTML=h.length?h.slice().reverse().map(x=>`<div>${time(x.Timestamp)}: ${esc(val(x.OldValue))} → <b>${esc(val(x.NewValue))}</b></div>`).join(''):'No changes';document.getElementById('tag-events').innerHTML=ev.length?ev.slice().reverse().map(x=>`<div>${time(x.Timestamp)}: ${esc(x.FunctionName)} ${esc(x.SrcIP)} → ${esc(x.DstIP)}</div>`).join(''):'No control events';document.getElementById('tag-modal').hidden=false;drawChart(h)}document.getElementById('tag-modal-close').onclick=()=>document.getElementById('tag-modal').hidden=true;
 const selectedAlerts=new Set();
 function updateAlertBulkBar(){const count=selectedAlerts.size;document.getElementById('alerts-approve').hidden=!count;document.getElementById('alerts-confirm').hidden=!count;document.getElementById('alerts-selection-count').textContent=count?`${count} selected`:'';const selectable=alerts.filter(a=>(a.Status||'new')==='new');const all=document.getElementById('alerts-all');all.checked=selectable.length>0&&selectable.every(a=>selectedAlerts.has(`${a.SensorID}::${a.ID}`));all.indeterminate=selectable.some(a=>selectedAlerts.has(`${a.SensorID}::${a.ID}`))&&!all.checked}
-function renderAlerts(){const valid=new Set(alerts.filter(a=>(a.Status||'new')==='new').map(a=>`${a.SensorID}::${a.ID}`));for(const key of [...selectedAlerts])if(!valid.has(key))selectedAlerts.delete(key);document.querySelector('#table-alerts tbody').innerHTML=alerts.map(a=>{const key=`${a.SensorID}::${a.ID}`,isNew=(a.Status||'new')==='new';return `<tr class="${isNew?'alert-new':'alert-reviewed'}"><td>${isNew?`<input type="checkbox" class="alert-select" data-key="${esc(key)}" ${selectedAlerts.has(key)?'checked':''} aria-label="Select alert ${esc(a.ID)}">`:'—'}</td><td>${esc(a.SensorID)}</td><td><span class="severity ${esc(a.Severity)}">${esc(a.Severity)}</span></td><td>${esc(a.Type)}</td><td>${esc(a.Message)}</td><td>${esc(a.IP)}</td><td>${esc(a.Count)}</td><td>${esc(a.Status)}</td><td>${time(a.LastSeen)}</td></tr>`}).join('');const n=alerts.filter(a=>(a.Status||'new')==='new').length;document.getElementById('alert-badge').textContent=n?String(n):'';updateAlertBulkBar()}
+function renderAlerts(){const valid=new Set(alerts.filter(a=>(a.Status||'new')==='new').map(a=>`${a.SensorID}::${a.ID}`));for(const key of [...selectedAlerts])if(!valid.has(key))selectedAlerts.delete(key);document.querySelector('#table-alerts tbody').innerHTML=alerts.map(a=>{const key=`${a.SensorID}::${a.ID}`,status=(a.Status||'new'),isNew=status==='new';return `<tr class="alert-status-${esc(status)}"><td>${isNew?`<input type="checkbox" class="alert-select" data-key="${esc(key)}" ${selectedAlerts.has(key)?'checked':''} aria-label="Select alert ${esc(a.ID)}">`:'—'}</td><td>${esc(a.SensorID)}</td><td><span class="severity ${esc(a.Severity)}">${esc(a.Severity)}</span></td><td>${esc(a.Type)}</td><td>${esc(a.Message)}</td><td>${esc(a.IP)}</td><td>${esc(a.Count)}</td><td>${esc(a.Status)}</td><td>${time(a.LastSeen)}</td></tr>`}).join('');const n=alerts.filter(a=>(a.Status||'new')==='new').length;document.getElementById('alert-badge').textContent=n?String(n):'';updateAlertBulkBar()}
+function renderIncidents(){
+  const tbody=document.querySelector('#table-incidents tbody');if(!tbody)return;
+  tbody.innerHTML=incidents.map(inc=>`<tr><td>${esc(inc.SensorID)}</td><td>${esc(inc.IP)}</td><td><span class="severity ${esc(inc.Severity)}">${esc(inc.Severity)}</span></td><td>${esc((inc.Types||[]).join(', '))}</td><td>${esc(inc.AlertCount)}</td><td>${time(inc.FirstSeen)}</td><td>${time(inc.LastSeen)}</td></tr>`).join('');
+}
+function renderReports(){
+  const tbody=document.querySelector('#table-reports tbody');if(!tbody)return;
+  tbody.innerHTML=reports.map(r=>{
+    const status=r.EmailSent?'Sent':(r.Recipients&&r.Recipients.length?`Failed: ${esc(r.EmailError||'unknown error')}`:'Not emailed (no recipients configured)');
+    return `<tr class="report-row" data-id="${esc(r.ID)}"><td>${time(r.GeneratedAt)}</td><td>${time(r.PeriodStart)} – ${time(r.PeriodEnd)}</td><td>${esc((r.Recipients||[]).join(', ')||'—')}</td><td class="${r.EmailSent?'state-ok':''}">${status}</td></tr>`;
+  }).join('');
+  document.getElementById('reports-generate').hidden=!can('data_management');
+}
+document.querySelector('#table-reports tbody').addEventListener('click',async e=>{
+  const row=e.target.closest('.report-row');if(!row)return;
+  try{
+    const rep=await api(`/reports/${encodeURIComponent(row.dataset.id)}`);
+    document.getElementById('report-modal-frame').srcdoc=rep.HTML||'';
+    document.getElementById('report-modal').hidden=false;
+  }catch(err){alert(`Failed to load report: ${err.message}`)}
+});
+document.getElementById('report-modal-close').onclick=()=>document.getElementById('report-modal').hidden=true;
+document.getElementById('reports-generate').onclick=async()=>{
+  const btn=document.getElementById('reports-generate');btn.disabled=true;
+  try{await api('/reports/generate',{method:'POST'});alert('Report generated.');refreshAll()}
+  catch(err){alert(`Report generation failed: ${err.message}`)}
+  finally{btn.disabled=false}
+};
 document.querySelector('#table-alerts tbody').onchange=e=>{const c=e.target.closest('.alert-select');if(!c)return;c.checked?selectedAlerts.add(c.dataset.key):selectedAlerts.delete(c.dataset.key);updateAlertBulkBar()};
 document.getElementById('alerts-all').onchange=e=>{for(const a of alerts.filter(a=>(a.Status||'new')==='new')){const key=`${a.SensorID}::${a.ID}`;e.target.checked?selectedAlerts.add(key):selectedAlerts.delete(key)}renderAlerts()};
 async function runAlertBulkAction(action){const grouped=new Map();for(const key of selectedAlerts){const split=key.indexOf('::'),sensor=key.slice(0,split),id=key.slice(split+2);if(!grouped.has(sensor))grouped.set(sensor,[]);grouped.get(sensor).push(id)}if(!grouped.size)return;const label=action==='approve'?'approve and remember':'confirm';if(!confirm(`Really ${label} ${selectedAlerts.size} selected alert(s)?`))return;await Promise.all([...grouped].map(([sensor,targets])=>api(`/sensors/${encodeURIComponent(sensor)}/alerts/actions`,{method:'POST',body:JSON.stringify({action,targets})})));selectedAlerts.clear();updateAlertBulkBar();setTimeout(refreshAll,1000)}
@@ -284,7 +467,7 @@ document.querySelector('#table-analysis tbody').onclick=async e=>{const b=e.targ
 
 function sensorSelection(){return [...document.querySelectorAll('.sensor-select:checked')].map(x=>x.dataset.id)}
 function updateSensorBulk(){const ids=sensorSelection(),all=document.getElementById('sensors-all'),boxes=[...document.querySelectorAll('.sensor-select')];document.getElementById('sensors-start').hidden=!ids.length;document.getElementById('sensors-stop').hidden=!ids.length;document.getElementById('sensors-delete').hidden=!ids.length;document.getElementById('sensors-selection-count').textContent=ids.length?`${ids.length} selected`:'';if(all){all.checked=boxes.length>0&&ids.length===boxes.length;all.indeterminate=ids.length>0&&ids.length<boxes.length}}
-function renderSensors(){sensors=Array.isArray(sensors)?sensors:[];populateRuleSensors();populateAnalysisSensors();document.querySelector('#table-sensors tbody').innerHTML=sensors.map(s=>{const id=s.id??s.ID,status=String(s.status??s.Status??'unknown').toLowerCase();return `<tr><td><input type="checkbox" class="sensor-select" data-id="${esc(id)}" aria-label="Select sensor ${esc(id)}"></td><td>${esc(id)}</td><td>${esc(s.name??s.Name)}</td><td>${esc(s.site_id??s.SiteID)}</td><td><span class="sensor-state sensor-state-${esc(status)}">${esc(status)}</span></td><td>${esc(s.hostname??s.Hostname)}</td><td>${esc(s.version??s.Version)}</td><td>${esc(s.go_version??s.GoVersion??'—')}</td><td>${esc(s.libpcap_version??s.LibpcapVersion??'—')}</td><td>${esc(s.gopacket_version??s.GopacketVersion??'—')}</td><td>${esc(s.capture_backend??s.CaptureBackend??'—')}</td><td>${esc(s.capture_interface??s.CaptureInterface??'—')}</td><td>${esc(s.capture_snaplen??s.CaptureSnaplen??'—')}</td><td>${(s.capture_promiscuous??s.CapturePromiscuous)?'yes':'no'}</td><td>${time(s.last_heartbeat_at??s.LastHeartbeatAt??s.last_seen??s.LastSeen)}</td><td>${time(s.last_data_received_at??s.LastDataReceivedAt)}</td><td><span class="sensor-state sensor-state-${esc(String(s.sync_status??s.SyncStatus??'unknown').toLowerCase())}">${esc(s.sync_status??s.SyncStatus??'unknown')}</span></td><td>${esc(s.pending_records??s.PendingRecords??0)}</td><td title="${esc(s.last_sync_error??s.LastSyncError??'')}">${esc((s.last_sync_error??s.LastSyncError??'—').slice(0,60))}</td></tr>`}).join('');updateSensorBulk()}
+function renderSensors(){sensors=Array.isArray(sensors)?sensors:[];populateRuleSensors();populateAnalysisSensors();renderSegmentationSensorList();document.querySelector('#table-sensors tbody').innerHTML=sensors.map(s=>{const id=s.id??s.ID,status=String(s.status??s.Status??'unknown').toLowerCase();return `<tr><td><input type="checkbox" class="sensor-select" data-id="${esc(id)}" aria-label="Select sensor ${esc(id)}"></td><td>${esc(id)}</td><td>${esc(s.name??s.Name)}</td><td>${esc(s.site_id??s.SiteID)}</td><td><span class="sensor-state sensor-state-${esc(status)}">${esc(status)}</span></td><td>${esc(s.hostname??s.Hostname)}</td><td>${esc(s.version??s.Version)}</td><td>${esc(s.go_version??s.GoVersion??'—')}</td><td>${esc(s.libpcap_version??s.LibpcapVersion??'—')}</td><td>${esc(s.gopacket_version??s.GopacketVersion??'—')}</td><td>${esc(s.capture_backend??s.CaptureBackend??'—')}</td><td>${esc(s.capture_interface??s.CaptureInterface??'—')}</td><td>${esc(s.capture_snaplen??s.CaptureSnaplen??'—')}</td><td>${(s.capture_promiscuous??s.CapturePromiscuous)?'yes':'no'}</td><td>${time(s.last_heartbeat_at??s.LastHeartbeatAt??s.last_seen??s.LastSeen)}</td><td>${time(s.last_data_received_at??s.LastDataReceivedAt)}</td><td><span class="sensor-state sensor-state-${esc(String(s.sync_status??s.SyncStatus??'unknown').toLowerCase())}">${esc(s.sync_status??s.SyncStatus??'unknown')}</span></td><td>${esc(s.pending_records??s.PendingRecords??0)}</td><td title="${esc(s.last_sync_error??s.LastSyncError??'')}">${esc((s.last_sync_error??s.LastSyncError??'—').slice(0,60))}</td></tr>`}).join('');updateSensorBulk()}
 async function sensorAction(action){const ids=sensorSelection();if(!ids.length)return;const verb=action==='stop'?'stop capture on':'start capture on';if(!confirm(`${verb} ${ids.length} selected sensor(s)?`))return;const start=document.getElementById('sensors-start'),stop=document.getElementById('sensors-stop');start.disabled=stop.disabled=true;try{await api('/sensors/actions',{method:'POST',body:JSON.stringify({action,sensor_ids:ids})});document.getElementById('sensors-selection-count').textContent=`${action} queued for ${ids.length} sensor(s)`;setTimeout(refreshAll,1200)}catch(err){alert(`Sensor ${action} failed: ${err.message}`)}finally{start.disabled=stop.disabled=false}}
 async function deleteSensors(){
   const ids=sensorSelection();if(!ids.length)return;
@@ -364,6 +547,8 @@ function renderDashboard(){
   if(sensorCounts.offline||criticalOpen){title.textContent='Critical';detail.textContent=[sensorCounts.offline?`${sensorCounts.offline} sensor(s) offline`:'',criticalOpen?`${criticalOpen} critical alert(s)`:'' ].filter(Boolean).join(' · ')}
   else if(sensorCounts.stopped||openAlerts.length){title.textContent='Warning';detail.textContent=[sensorCounts.stopped?`${sensorCounts.stopped} sensor(s) stopped`:'',openAlerts.length?`${openAlerts.length} open alert(s)`:'' ].filter(Boolean).join(' · ')}
   else{title.textContent='Healthy';detail.textContent='Sensors running and no open alerts'}
+  drawDailyBarChart('dashboard-alerts-trend',trends.AlertsByDay,30);
+  drawDailyBarChart('dashboard-assets-trend',trends.NewAssetsByDay,30);
 }
 document.getElementById('view-dashboard').addEventListener('click',e=>{const target=e.target.closest('[data-dashboard-tab]');if(target)openDashboardTab(target.dataset.dashboardTab)});
 
@@ -383,13 +568,37 @@ function renderSettings(){
   document.getElementById('settings-siem').textContent=onOff(settings.SIEMEnabled);
   document.getElementById('settings-analysis').textContent=onOff(settings.AnalysisEnabled);
   document.getElementById('settings-vuln').textContent=settings.VulnerabilityLoaded?`Loaded — ${settings.VulnerabilityCount} advisories`:'Not loaded';
+  document.getElementById('settings-notifications').textContent=settings.NotificationsEnabled?`On (min. ${settings.NotificationsMinSeverity}) — email ${onOff(settings.NotificationsEmailEnabled)}, webhook ${onOff(settings.NotificationsWebhookEnabled)}`:'Off';
   document.getElementById('settings-web-tls').textContent=onOff(settings.WebTLSEnabled);
   document.getElementById('settings-sensor-tls').textContent=onOff(settings.SensorAPITLSEnabled);
 }
 function renderAudit(){
   const tbody=document.querySelector('#table-audit tbody');if(!tbody)return;
-  tbody.innerHTML=audit.map(a=>`<tr><td>${time(a.CreatedAt)}</td><td>${esc(a.Actor||'—')}</td><td>${esc(a.Action)}</td><td class="${a.Success?'state-ok':'state-new'}">${a.Status}</td><td>${esc(a.SensorID||'—')}</td><td>${esc(a.SourceIP||'—')}</td></tr>`).join('');
+  tbody.innerHTML=audit.map(a=>`<tr data-id="${esc(a.ID)}"><td>${time(a.CreatedAt)}</td><td>${esc(a.Actor||'—')}</td><td>${esc(a.Action)}</td><td class="${a.Success?'state-ok':'state-new'}">${a.Status}</td><td>${esc(a.SensorID||'—')}</td><td>${esc(a.SourceIP||'—')}</td></tr>`).join('');
 }
+function openAuditModal(id){
+  const entry=audit.find(a=>String(a.ID)===String(id));
+  if(!entry)return;
+  const rows=[
+    ['Time',time(entry.CreatedAt)],
+    ['Actor',entry.Actor||'—'],
+    ['Action',entry.Action||'—'],
+    ['Method',entry.Method||'—'],
+    ['Path',entry.Path||'—'],
+    ['Status',String(entry.Status)],
+    ['Success',entry.Success?'yes':'no'],
+    ['Sensor',entry.SensorID||'—'],
+    ['Source IP',entry.SourceIP||'—'],
+  ];
+  document.getElementById('audit-modal-body').innerHTML='<dl>'+rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')+'</dl>';
+  document.getElementById('audit-modal').hidden=false;
+}
+document.querySelector('#table-audit tbody').addEventListener('click',e=>{
+  const row=e.target.closest('tr[data-id]');
+  if(row)openAuditModal(row.dataset.id);
+});
+document.getElementById('audit-modal-close').onclick=()=>{document.getElementById('audit-modal').hidden=true};
+document.getElementById('audit-modal').addEventListener('click',e=>{if(e.target.id==='audit-modal')e.target.hidden=true});
 document.getElementById('own-password-form').addEventListener('submit',async e=>{
   e.preventDefault();
   const status=document.getElementById('own-password-status');status.textContent='';
@@ -413,7 +622,7 @@ async function refreshAll(){
   // server-side (see requireView in internal/central/server.go) — a role
   // that can't see a tab never even requests its data, instead of
   // spamming 403s into the "partial failure" indicator every 10s.
-  const pathView={'/assets':'assets','/tags':'tags','/tags/changes':'tags','/tags/events':'tags','/sensors':'sensors','/alerts':'alerts','/rules':'rules','/baseline':'dashboard','/analysis/jobs':'analysis','/data/backups':'data','/settings':'settings','/audit':'audit'};
+  const pathView={'/assets':'assets','/devices':'devices','/vulnerabilities':'vulnerabilities','/tags':'tags','/tags/changes':'tags','/tags/events':'tags','/sensors':'sensors','/alerts':'alerts','/incidents':'incidents','/rules':'rules','/baseline':'dashboard','/dashboard/trends':'dashboard','/reports':'dashboard','/analysis/jobs':'analysis','/data/backups':'data','/settings':'settings','/audit':'audit'};
   const paths=Object.keys(pathView).filter(p=>canView(pathView[p]));
   const topoPromise=topologyActive
     ?fetchTopology().then(v=>({status:'fulfilled',value:v})).catch(reason=>({status:'rejected',reason}))
@@ -427,9 +636,13 @@ async function refreshAll(){
     graph=(v&&Array.isArray(v.Nodes)&&Array.isArray(v.Edges))?v:{Nodes:[],Edges:[],HoneypotThreshold:100};
   }
   if(ok('/assets'))assets=list('/assets');
+  if(ok('/devices'))devices=list('/devices');
+  if(ok('/vulnerabilities')&&results['/vulnerabilities'].value&&typeof results['/vulnerabilities'].value==='object')vulnerabilities=results['/vulnerabilities'].value.Advisories||[];
   if(ok('/tags'))tags=list('/tags');
   if(ok('/sensors'))sensors=list('/sensors');
   if(ok('/alerts'))alerts=list('/alerts');
+  if(ok('/incidents'))incidents=list('/incidents');
+  if(ok('/reports'))reports=list('/reports');
   if(ok('/rules'))rules=list('/rules').map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));
   if(ok('/baseline'))baselines=list('/baseline');
   if(ok('/tags/changes'))changes=list('/tags/changes');
@@ -437,6 +650,7 @@ async function refreshAll(){
   if(ok('/analysis/jobs'))analysisJobs=list('/analysis/jobs');
   if(ok('/data/backups'))backups=list('/data/backups');
   if(ok('/settings')&&results['/settings'].value&&typeof results['/settings'].value==='object')settings=results['/settings'].value;
+  if(ok('/dashboard/trends')&&results['/dashboard/trends'].value&&typeof results['/dashboard/trends'].value==='object')trends=results['/dashboard/trends'].value;
   if(ok('/audit'))audit=list('/audit');
   // Render whenever the tab is active and the fetch didn't fail — including
   // the "unchanged" (304) case, since a freshly-opened tab or a
@@ -445,9 +659,13 @@ async function refreshAll(){
   // cheap when there's genuinely nothing new to draw.
   try{if(topologyActive&&topo.status==='fulfilled')renderTopology()}catch(e){console.error('render topology',e)}
   try{if(ok('/assets'))renderAssets()}catch(e){console.error('render assets',e)}
+  try{if(ok('/devices'))renderDevices()}catch(e){console.error('render devices',e)}
+  try{if(ok('/vulnerabilities'))renderVulnerabilities()}catch(e){console.error('render vulnerabilities',e)}
   try{if(ok('/tags'))renderTags()}catch(e){console.error('render tags',e)}
   try{if(ok('/sensors'))renderSensors()}catch(e){console.error('render sensors',e)}
   try{if(ok('/alerts'))renderAlerts()}catch(e){console.error('render alerts',e)}
+  try{if(ok('/incidents'))renderIncidents()}catch(e){console.error('render incidents',e)}
+  try{if(ok('/reports'))renderReports()}catch(e){console.error('render reports',e)}
   try{if(ok('/rules'))renderRules()}catch(e){console.error('render rules',e)}
   try{if(ok('/baseline'))renderBaseline()}catch(e){console.error('render baseline',e)}
   try{if(ok('/analysis/jobs'))renderAnalysis()}catch(e){console.error('render analysis',e)}try{renderBackups()}catch(e){console.error('render backups',e)}
@@ -517,7 +735,7 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',assets:'Assets',tags:'OT Tags',rules:'Rules',alerts:'Alerts',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log'};
+const TAB_LABELS={dashboard:'Dashboard',topology:'Topology',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',incidents:'Incidents',sensors:'Sensors',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server

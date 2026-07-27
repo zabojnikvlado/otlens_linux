@@ -99,6 +99,26 @@ func main() {
 		DeleteBatchSize: cfg.DatabaseRetention.DeleteBatchSize, Interval: cfg.DatabaseRetention.Interval,
 	}
 
+	var notificationsCfg central.NotificationConfig
+	notificationsCfg.Enabled = cfg.Notifications.Enabled
+	notificationsCfg.MinSeverity = cfg.Notifications.MinSeverity
+	notificationsCfg.Email.Enabled = cfg.Notifications.Email.Enabled
+	notificationsCfg.Email.SMTPHost = cfg.Notifications.Email.SMTPHost
+	notificationsCfg.Email.SMTPPort = cfg.Notifications.Email.SMTPPort
+	notificationsCfg.Email.Username = cfg.Notifications.Email.Username
+	notificationsCfg.Email.Password = cfg.Notifications.Email.Password
+	notificationsCfg.Email.From = cfg.Notifications.Email.From
+	notificationsCfg.Email.To = cfg.Notifications.Email.To
+	notificationsCfg.Email.UseTLS = cfg.Notifications.Email.UseTLS
+	notificationsCfg.Webhook.Enabled = cfg.Notifications.Webhook.Enabled
+	notificationsCfg.Webhook.URL = cfg.Notifications.Webhook.URL
+	notificationsCfg.Webhook.Headers = cfg.Notifications.Webhook.Headers
+
+	reportsCfg := central.ReportsConfig{
+		Enabled: cfg.Reports.Enabled, Schedule: cfg.Reports.Schedule,
+		DayOfWeek: cfg.Reports.DayOfWeek, HourUTC: cfg.Reports.HourUTC, Recipients: cfg.Reports.Recipients,
+	}
+
 	srv := &central.Server{
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
 		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
@@ -111,6 +131,8 @@ func main() {
 		SensorAPITLSEnabled:  cfg.SensorAPI.TLS.Enabled,
 		SessionDuration:      cfg.Auth.SessionDuration,
 		Retention:            retentionCfg,
+		Notifications:        notificationsCfg,
+		Reports:              reportsCfg,
 	}
 	exporter, err := siem.New(siem.Config{
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,
@@ -178,6 +200,35 @@ func main() {
 				return
 			case <-ticker.C:
 				repo.RunRetention(workerCtx, retentionCfg)
+			}
+		}
+	}()
+
+	// Checks once an hour whether the configured weekly slot
+	// (Reports.DayOfWeek/HourUTC) is the current hour — see
+	// DueReportWindow in internal/central/reports.go. Hourly is coarse
+	// enough that this can't double-fire within the same due hour (it
+	// only checks, doesn't track "already ran this week" separately,
+	// so an hourly cadence is what keeps a single due hour from
+	// producing more than one report).
+	go func() {
+		if !reportsCfg.Enabled {
+			return
+		}
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-ticker.C:
+				start, end, due := central.DueReportWindow(reportsCfg, time.Now())
+				if !due {
+					continue
+				}
+				if err := srv.GenerateAndDispatchReport(workerCtx, start, end); err != nil {
+					log.Printf("scheduled report generation failed: %v", err)
+				}
 			}
 		}
 	}()

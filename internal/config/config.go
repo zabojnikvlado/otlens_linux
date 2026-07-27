@@ -133,6 +133,82 @@ type Config struct {
 		// IP are required before treating the new MAC as legitimate
 		// (debounces against a single stray/retransmitted packet).
 		ARPConfirmThreshold int
+
+		// Segmentation flags traffic that jumps too many Purdue Model
+		// levels directly (e.g. a Level 1 field device talking straight
+		// to a Level 4/5 business system, skipping the DMZ) — see
+		// internal/detect/segmentation.go. Off by default: it needs
+		// VLANLevels filled in to mean anything, and a wrong/incomplete
+		// mapping would just generate noise.
+		Segmentation struct {
+			Enabled bool
+			// VLANLevels maps a VLAN ID to its Purdue Model level
+			// (typically 0-5; half-levels like 3.5 for a DMZ are fine).
+			// A VLAN not listed here is treated as unclassified and
+			// never participates in a violation check — both sides of
+			// a flow need a known level for this rule to evaluate it.
+			VLANLevels map[uint16]float64
+			// MaxLevelJump is how many levels apart two VLANs may
+			// communicate directly before it's flagged. 1 (the
+			// default) allows adjacent-level traffic (e.g. Level 2 to
+			// Level 3) but flags anything that skips a level.
+			MaxLevelJump float64
+		}
+
+		// Reconnaissance flags a source IP that contacts an unusually
+		// large number of distinct destination hosts (network/host
+		// scan) or distinct ports on one destination (port scan)
+		// within a short rolling window — see
+		// internal/detect/reconnaissance.go. On by default with
+		// conservative thresholds; a legitimate host that's supposed
+		// to talk to many others (a monitoring server, a DNS
+		// resolver) may need its own suppression or a higher
+		// threshold for a noisy network.
+		Reconnaissance struct {
+			Enabled           bool
+			Window            time.Duration
+			HostScanThreshold int
+			PortScanThreshold int
+		}
+
+		// C2Beacon flags a source IP whose outbound TCP connections to
+		// one external destination+port happen at a suspiciously
+		// regular interval — the classic "beaconing" pattern malware
+		// uses to check in with a command-and-control server. See
+		// internal/detect/c2beacon.go for exactly how "suspiciously
+		// regular" is measured. This is a behavioral heuristic, not a
+		// known-bad-IP match (OTLens has no threat-intel feed) — it
+		// will also flag a legitimate periodic external service (a
+		// license check-in, a monitoring agent phoning a SaaS
+		// dashboard) if its timing happens to be regular enough; that's
+		// a false positive worth tuning MinSamples/MaxCoefficientOfVariation
+		// for, not a sign the whole approach is wrong.
+		C2Beacon struct {
+			Enabled bool
+			// MinSamples is how many connection attempts to the same
+			// destination+port must be seen before timing is judged at
+			// all — too few and normal variance looks artificially
+			// regular.
+			MinSamples int
+			// MaxCoefficientOfVariation is stddev/mean of the intervals
+			// between connections. Lower means more regular; 0 would be
+			// a perfect metronome. 0.15 (the default) is fairly strict —
+			// real beacon malware is often *more* regular than this,
+			// human-driven traffic essentially never is.
+			MaxCoefficientOfVariation float64
+			// MinInterval/MaxInterval bound what counts as "beacon-like"
+			// timing at all — faster than MinInterval looks like retries
+			// or keepalives, slower than MaxInterval doesn't have enough
+			// occurrences within a practical observation window to judge
+			// regularity with any confidence.
+			MinInterval time.Duration
+			MaxInterval time.Duration
+			// MaxTrackedDestinations caps total memory use — the oldest
+			// (least recently touched) destination is evicted once this
+			// is hit, same reasoning as every other unbounded-map risk
+			// this codebase has had to guard against.
+			MaxTrackedDestinations int
+		}
 	}
 
 	// Store controls the OT tag/register storage engine's in-memory
@@ -347,6 +423,56 @@ type CentralConfig struct {
 		// transaction/lock or spike load in one shot.
 		DeleteBatchSize int `mapstructure:"delete_batch_size"`
 	} `mapstructure:"database_retention"`
+
+	// Notifications sends an out-of-band ping (email and/or webhook) when
+	// a new alert at or above MinSeverity is recorded — see
+	// internal/central/notify.go. Deliberately separate from SIEM export:
+	// this is for "someone should look at this now," not a compliance
+	// trail. Email is off by default even when Notifications.Enabled is
+	// true — it needs real SMTP credentials to do anything useful, and
+	// shipping with it silently active would mean a fresh install
+	// occasionally tries (and fails) to send mail through unconfigured
+	// settings. Webhook has no such prerequisite, so it's controlled
+	// solely by its own Enabled flag.
+	Notifications struct {
+		Enabled     bool   `mapstructure:"enabled"`
+		MinSeverity string `mapstructure:"min_severity"` // low|medium|high|critical
+		Email       struct {
+			Enabled    bool     `mapstructure:"enabled"`
+			SMTPHost   string   `mapstructure:"smtp_host"`
+			SMTPPort   int      `mapstructure:"smtp_port"`
+			Username   string   `mapstructure:"username"`
+			Password   string   `mapstructure:"password"`
+			From       string   `mapstructure:"from"`
+			To         []string `mapstructure:"to"`
+			UseTLS     bool     `mapstructure:"use_tls"`
+		} `mapstructure:"email"`
+		Webhook struct {
+			Enabled bool              `mapstructure:"enabled"`
+			URL     string            `mapstructure:"url"`
+			Headers map[string]string `mapstructure:"headers"`
+		} `mapstructure:"webhook"`
+	} `mapstructure:"notifications"`
+
+	// Reports generates a periodic summary (new assets, alert counts by
+	// severity, new incidents, topology growth, offline sensors) — see
+	// internal/central/reports.go. Off by default. Uses
+	// Notifications.Email's SMTP connection settings (host/port/user/
+	// password/from/TLS) rather than duplicating them — Recipients here
+	// is deliberately separate from Notifications.Email.To, since a
+	// weekly management summary and a real-time alert ping often go to
+	// different people. Every generated report is also saved to
+	// report_history and viewable from the Reports tab regardless of
+	// whether email delivery is configured or succeeds.
+	Reports struct {
+		Enabled bool `mapstructure:"enabled"`
+		// Schedule is currently "weekly" only — DayOfWeek (monday..sunday)
+		// and HourUTC (0-23) say when in that cycle.
+		Schedule   string   `mapstructure:"schedule"`
+		DayOfWeek  string   `mapstructure:"day_of_week"`
+		HourUTC    int      `mapstructure:"hour_utc"`
+		Recipients []string `mapstructure:"recipients"`
+	} `mapstructure:"reports"`
 }
 
 func LoadCentral(path string) (*CentralConfig, error) {
@@ -415,6 +541,16 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	v.SetDefault("database_retention.max_database_size_gb", 80)
 	v.SetDefault("database_retention.target_database_size_gb", 70)
 	v.SetDefault("database_retention.delete_batch_size", 10000)
+	v.SetDefault("notifications.enabled", false)
+	v.SetDefault("notifications.min_severity", "high")
+	v.SetDefault("notifications.email.enabled", false)
+	v.SetDefault("notifications.email.smtp_port", 587)
+	v.SetDefault("notifications.email.use_tls", true)
+	v.SetDefault("notifications.webhook.enabled", false)
+	v.SetDefault("reports.enabled", false)
+	v.SetDefault("reports.schedule", "weekly")
+	v.SetDefault("reports.day_of_week", "monday")
+	v.SetDefault("reports.hour_utc", 8)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("central config load failed: %w", err)
@@ -484,6 +620,18 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("deception.honeypotthreshold", 100)
 
 	viper.SetDefault("detect.arpconfirmthreshold", 3)
+	viper.SetDefault("detect.segmentation.enabled", false)
+	viper.SetDefault("detect.segmentation.maxleveljump", 1.0)
+	viper.SetDefault("detect.reconnaissance.enabled", true)
+	viper.SetDefault("detect.reconnaissance.window", 60*time.Second)
+	viper.SetDefault("detect.reconnaissance.hostscanthreshold", 15)
+	viper.SetDefault("detect.reconnaissance.portscanthreshold", 15)
+	viper.SetDefault("detect.c2beacon.enabled", true)
+	viper.SetDefault("detect.c2beacon.minsamples", 6)
+	viper.SetDefault("detect.c2beacon.maxcoefficientofvariation", 0.15)
+	viper.SetDefault("detect.c2beacon.mininterval", 5*time.Second)
+	viper.SetDefault("detect.c2beacon.maxinterval", time.Hour)
+	viper.SetDefault("detect.c2beacon.maxtrackeddestinations", 5000)
 
 	viper.SetDefault("store.maxvaluechanges", 1000)
 	viper.SetDefault("store.maxcontrolevents", 1000)

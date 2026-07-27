@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
+	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 )
 
 type Worker struct {
 	Client          *Client
 	Detect          *detect.Engine
+	Flow            *flow.Engine
 	Uptime          func() int64
 	Health          func() map[string]string
 	Metrics         func() map[string]interface{}
@@ -159,6 +161,20 @@ func (w *Worker) sync(ctx context.Context) {
 							ids = append(ids, a.ID)
 						}
 						w.Detect.MarkAlertsSynced(ids)
+					}
+				}
+				if w.Flow != nil && len(snapshot.Topology) > 0 {
+					var sentGraph struct {
+						Edges []struct {
+							ID string `json:"ID"`
+						} `json:"Edges"`
+					}
+					if json.Unmarshal(snapshot.Topology, &sentGraph) == nil {
+						ids := make([]string, 0, len(sentGraph.Edges))
+						for _, edge := range sentGraph.Edges {
+							ids = append(ids, edge.ID)
+						}
+						w.Flow.MarkFlowsSynced(ids)
 					}
 				}
 				break

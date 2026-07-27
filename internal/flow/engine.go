@@ -192,6 +192,7 @@ func (e *Engine) Update(packet core.Packet) {
 	f.Packets++
 	f.Bytes += uint64(packet.Length)
 	f.LastSeen = now
+	f.Synced = false
 }
 
 // ApplyExternalDelta updates a flow from an already-aggregated
@@ -258,6 +259,7 @@ func (e *Engine) ApplyExternalDelta(
 	f.Packets += packetsDelta
 	f.Bytes += bytesDelta
 	f.LastSeen = now
+	f.Synced = false
 }
 
 // Count returns the number of tracked flows.
@@ -347,6 +349,81 @@ func (e *Engine) GetAll() []*Flow {
 	}
 
 	return result
+}
+
+// maxDirtyFlowsPerSync caps how many flows a single GetDirtyFlows call
+// returns — same reasoning as detect.maxDirtyAlertsPerSync: right after
+// upgrading to a build with this dirty-tracking at all, every flow
+// already on disk from before this field existed comes back with
+// Synced's zero value (false), so without this cap a sensor that's
+// accumulated a large backlog (unbounded — flows have no size cap at
+// all beyond persist.retention's time-based pruning) would still try
+// to send its entire flow set as topology edges on the very first sync
+// after upgrading. Anything left uncapped just stays dirty and goes
+// out over the next several sync cycles instead.
+const maxDirtyFlowsPerSync = 5000
+
+// GetDirtyFlows returns a snapshot of only the flows that have changed
+// (new, or Packets/Bytes/LastSeen bumped) since they were last
+// successfully reported to Central — see MarkFlowsSynced. This is what
+// the periodic telemetry sync actually uses to build topology edges,
+// instead of GetAll's full set, so a sensor that's accumulated a large
+// number of flows over time doesn't re-serialize and re-upload all of
+// them as edges every single sync — exactly the failure mode that let
+// telemetry payloads exceed PostgreSQL's 256 MB per-JSONB-value limit
+// even after alerts got the same treatment. Capped at
+// maxDirtyFlowsPerSync per call.
+func (e *Engine) GetDirtyFlows() []*Flow {
+
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
+
+	result := make([]*Flow, 0)
+
+	for _, f := range e.flows {
+
+		if f.Synced {
+			continue
+		}
+
+		clone := *f
+
+		result = append(
+			result,
+			&clone,
+		)
+
+		if len(result) >= maxDirtyFlowsPerSync {
+			break
+		}
+
+	}
+
+	return result
+}
+
+// MarkFlowsSynced marks the given flow IDs as successfully reported —
+// call only after Central has acknowledged the sync that included
+// them. Same narrow race window as detect.Engine.MarkAlertsSynced: a
+// flow that changes again between GetDirtyFlows' snapshot and this
+// call just isn't reflected until it changes again and goes dirty once
+// more, which is an acceptable tradeoff for a monitoring field like
+// Packets/Bytes, not silent data loss — the flow itself is never
+// dropped, only briefly slightly stale.
+func (e *Engine) MarkFlowsSynced(ids []string) {
+
+	if len(ids) == 0 {
+		return
+	}
+
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	for _, id := range ids {
+		if f, ok := e.flows[id]; ok {
+			f.Synced = true
+		}
+	}
 }
 
 // flowKey builds a direction-independent identifier for a

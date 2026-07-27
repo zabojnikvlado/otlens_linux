@@ -120,6 +120,59 @@ detect:
   # DHCP/NIC changes); higher is slower to alert but more tolerant of
   # transient noise.
   arpconfirmthreshold: 3
+  # Flags traffic that jumps too many Purdue Model levels directly (e.g.
+  # a Level 1 field device talking straight to a Level 4/5 business
+  # system, skipping the DMZ). Off by default — needs vlanlevels filled
+  # in for your actual network to mean anything; an empty/wrong mapping
+  # just means nothing gets flagged, not false alerts.
+  segmentation:
+    enabled: false
+    # VLAN ID -> Purdue Model level. Half-levels like 3.5 for a DMZ are
+    # fine. A VLAN not listed here is unclassified and never
+    # participates in a violation check.
+    vlanlevels:
+      10: 1    # field devices (PLC/RTU)
+      20: 2    # control (HMI/SCADA)
+      30: 3    # site operations
+      35: 3.5  # DMZ
+      40: 4    # business/IT
+    # How many levels apart two VLANs may communicate directly before
+    # it's flagged. 1 allows adjacent-level traffic but flags anything
+    # that skips a level.
+    maxleveljump: 1
+  # Flags a source IP contacting an unusually large number of distinct
+  # hosts (network/host scan) or distinct ports on one host (port scan)
+  # within a short window. On by default — a legitimate host that talks
+  # to many others (monitoring server, DNS resolver) may need a higher
+  # threshold or its own suppression if this is too noisy for it.
+  reconnaissance:
+    enabled: true
+    window: 60s
+    hostscanthreshold: 15
+    portscanthreshold: 15
+  # Flags a source IP whose outbound TCP connections to one external
+  # destination+port happen at a suspiciously regular interval — the
+  # classic "beaconing" pattern malware uses to check in with a C2
+  # server. Behavioral heuristic, not a known-bad-IP match (no
+  # threat-intel feed) — will also flag a legitimate periodic external
+  # service (license check-in, monitoring agent) if its timing happens
+  # to be regular enough; tune the thresholds below rather than
+  # disabling if that's noisy for your network.
+  c2beacon:
+    enabled: true
+    # Connection attempts to the same destination+port needed before
+    # timing is judged at all.
+    minsamples: 6
+    # stddev/mean of the intervals between connections. Lower = more
+    # regular; 0.15 is fairly strict — real beacon malware is often
+    # *more* regular than this, human-driven traffic essentially never is.
+    maxcoefficientofvariation: 0.15
+    # Bounds what counts as "beacon-like" timing at all.
+    mininterval: 5s
+    maxinterval: 1h
+    # Safety cap on total memory use — oldest (least recently touched)
+    # destination is evicted once this is hit.
+    maxtrackeddestinations: 5000
 
 store:
   # Safety caps on the value-change/control-event history kept in
