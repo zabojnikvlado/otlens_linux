@@ -246,7 +246,9 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
 	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
+	api.GET("/sensors/:id/segmentation-settings", requireView(ViewTopology), s.getMaxLevelJump)
 	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
+	api.PUT("/sensors/:id/segmentation-settings", requireAction(ActionDataManagement), s.setMaxLevelJump)
 	api.GET("/sensors/:id/vlans/:vlanid/assets", requireView(ViewTopology), s.listVLANAssets)
 	api.GET("/sensors/:id/assets/:mac/ip-history", requireView(ViewAssets), s.assetIPHistory)
 	api.GET("/settings", requireView(ViewSettings), s.settings)
@@ -592,6 +594,15 @@ func (s *Server) listVLANConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, vlans)
 }
 
+func (s *Server) getMaxLevelJump(c *gin.Context) {
+	jump, err := s.Repo.GetMaxLevelJump(c, c.Param("id"))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"max_level_jump": jump})
+}
+
 // setVLANConfig names a VLAN and/or assigns it a Purdue Model level.
 // Level: null clears it (unclassified again), a number sets it.
 //
@@ -620,8 +631,50 @@ func (s *Server) setVLANConfig(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
+		log.Printf("segmentation config push failed for %s: %v", sensorID, err)
+	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("VLAN %d configured: %s (level %v)", vlanID, req.Name, req.PurdueLevel), sensorID)
 	c.Status(http.StatusOK)
+}
+
+// setMaxLevelJump sets a sensor's segmentation max-level-jump and
+// pushes the updated config to it — the Network Segmentation tab's
+// per-sensor "how many levels apart is too many" setting.
+func (s *Server) setMaxLevelJump(c *gin.Context) {
+	var req struct {
+		MaxLevelJump float64 `json:"max_level_jump"`
+	}
+	if c.ShouldBindJSON(&req) != nil || req.MaxLevelJump <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_level_jump must be a positive number"})
+		return
+	}
+	sensorID := c.Param("id")
+	if err := s.Repo.SetMaxLevelJump(c, sensorID, req.MaxLevelJump, identityFromContext(c).Username); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
+		log.Printf("segmentation config push failed for %s: %v", sensorID, err)
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("segmentation max_level_jump set: %s -> %v", sensorID, req.MaxLevelJump), sensorID)
+	c.Status(http.StatusOK)
+}
+
+// pushSegmentationConfig queues the "segmentation.config" command with
+// a sensor's complete current VLAN levels + max_level_jump — see
+// Repository.BuildSegmentationConfigCommand. Not fatal to the calling
+// handler if it fails (the setting is already saved either way; the
+// sensor just won't have the live update until the next successful
+// push, e.g. the next time this endpoint is called, or once
+// reconnected if it's currently offline — QueueCommands' row just sits
+// there until PopCommands next delivers it).
+func (s *Server) pushSegmentationConfig(c *gin.Context, sensorID string) error {
+	payload, err := s.Repo.BuildSegmentationConfigCommand(c, sensorID)
+	if err != nil {
+		return err
+	}
+	return s.Repo.QueueCommands(c, sensorID, "segmentation.config", []string{payload})
 }
 
 func (s *Server) listVLANAssets(c *gin.Context) {

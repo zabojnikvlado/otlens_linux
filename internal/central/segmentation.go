@@ -3,7 +3,68 @@ package central
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 )
+
+// GetMaxLevelJump returns a sensor's configured max_level_jump (see
+// segmentation_settings' doc comment in the embedded schema), or 1
+// (the sensor's own local-config default) if nothing's been set yet.
+func (r *Repository) GetMaxLevelJump(ctx context.Context, sensorID string) (float64, error) {
+	var jump float64
+	err := r.db.QueryRowContext(ctx, `SELECT max_level_jump FROM segmentation_settings WHERE sensor_id=$1`, sensorID).Scan(&jump)
+	if err == sql.ErrNoRows {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return jump, nil
+}
+
+// SetMaxLevelJump sets a sensor's max_level_jump — the Network
+// Segmentation tab's per-sensor setting.
+func (r *Repository) SetMaxLevelJump(ctx context.Context, sensorID string, maxLevelJump float64, actor string) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO segmentation_settings(sensor_id, max_level_jump, updated_by, updated_at)
+		VALUES($1,$2,$3,NOW())
+		ON CONFLICT(sensor_id) DO UPDATE SET
+			max_level_jump = EXCLUDED.max_level_jump, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+		sensorID, maxLevelJump, actor,
+	)
+	return err
+}
+
+// BuildSegmentationConfigCommand assembles the "segmentation.config"
+// command payload for a sensor: every VLAN with an assigned Purdue
+// level (from vlan_config) plus max_level_jump (from
+// segmentation_settings) — the full picture the sensor's live
+// segmentation_violation detection rule needs, in the one shape
+// detect.Engine.UpdateSegmentationConfig expects. Called by
+// setVLANConfig and setMaxLevelJump after either changes, so the
+// sensor always has an up-to-date copy without an admin needing to
+// also edit that sensor's local config.yaml — see
+// DOCUMENTATION.md's Network Segmentation section.
+func (r *Repository) BuildSegmentationConfigCommand(ctx context.Context, sensorID string) (string, error) {
+	vlans, err := r.ListVLANConfig(ctx, sensorID)
+	if err != nil {
+		return "", err
+	}
+	maxLevelJump, err := r.GetMaxLevelJump(ctx, sensorID)
+	if err != nil {
+		return "", err
+	}
+	levels := make(map[uint16]float64, len(vlans))
+	for _, v := range vlans {
+		if v.PurdueLevel != nil {
+			levels[uint16(v.VLANID)] = *v.PurdueLevel
+		}
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"vlan_levels":    levels,
+		"max_level_jump": maxLevelJump,
+	})
+	return string(payload), err
+}
 
 // VLANConfig is one VLAN's display name + assigned Purdue Model level
 // — see vlan_config's doc comment in the embedded schema for the

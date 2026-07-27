@@ -11,11 +11,14 @@ import (
 // VLAN each IP was last seen on, and to flag direct communication
 // between VLANs whose configured Purdue Model levels are more than
 // MaxLevelJump apart — see handleSegmentation's doc comment.
+//
+// Always subscribes, even if segmentation starts disabled — enabled/
+// vlanLevels/maxLevelJump can all change later at runtime (see
+// UpdateSegmentationConfig, pushed from Central when an admin edits
+// the Network Segmentation tab), and if this early-returned instead of
+// subscribing, a later live-enable would have nothing listening to
+// turn on.
 func (e *Engine) startSegmentationWatch(bus *core.EventBus) {
-
-	if !e.segmentationEnabled {
-		return
-	}
 
 	ch := bus.Subscribe(
 		core.EventPacketParsed,
@@ -57,26 +60,69 @@ func (e *Engine) startSegmentationWatch(bus *core.EventBus) {
 // and a device that changes VLANs takes one packet to catch up — but
 // good enough for the common case of a directly-observed cross-VLAN
 // conversation.
-func (e *Engine) handleSegmentation(packet core.Packet) {
+// UpdateSegmentationConfig replaces the VLAN-level mapping and
+// max-jump threshold used by handleSegmentation, and enables the rule
+// if vlanLevels is non-empty (there's no point receiving a real
+// mapping from Central and having it silently ignored because the
+// sensor's own local config file still says segmentation.enabled:
+// false — configuring VLAN levels via the Network Segmentation tab is
+// itself the "yes, use this" signal). An empty/nil vlanLevels disables
+// the rule again (nothing to check against) without needing a
+// separate "disable" command.
+//
+// Called from cmd/otlens's command handler for the "segmentation.config"
+// command, which Central queues whenever an admin edits a sensor's VLAN
+// configuration — see internal/central's setVLANConfig. Thread-safe:
+// e.vlanLevels is *replaced* wholesale (never mutated in place), so a
+// concurrent handleSegmentation call already holding a reference to the
+// old map is never affected by this update mid-flight.
+func (e *Engine) UpdateSegmentationConfig(vlanLevels map[uint16]float64, maxLevelJump float64) {
 
-	if !e.segmentationEnabled || packet.SrcIP == "" || packet.DstIP == "" {
-		return
+	if maxLevelJump <= 0 {
+		maxLevelJump = 1
 	}
 
 	e.ipVLANMutex.Lock()
+	defer e.ipVLANMutex.Unlock()
+
+	e.vlanLevels = vlanLevels
+	e.maxLevelJump = maxLevelJump
+	e.segmentationEnabled = len(vlanLevels) > 0
+
+}
+
+func (e *Engine) handleSegmentation(packet core.Packet) {
+
+	if packet.SrcIP == "" || packet.DstIP == "" {
+		return
+	}
+
+	// segmentationEnabled/vlanLevels/maxLevelJump can all change live —
+	// see UpdateSegmentationConfig — so, unlike most of this engine's
+	// config fields, they're no longer safe to read without a lock.
+	// Reusing ipVLANMutex for this (rather than a separate lock) since
+	// it's already held for every packet here anyway, and these fields
+	// are read together with ipVLAN in the same critical section.
+	e.ipVLANMutex.Lock()
+	if !e.segmentationEnabled {
+		e.ipVLANMutex.Unlock()
+		return
+	}
 	if e.ipVLAN == nil {
 		e.ipVLAN = make(map[string]uint16)
 	}
 	dstVLAN, dstKnown := e.ipVLAN[packet.DstIP]
 	e.ipVLAN[packet.SrcIP] = packet.VLANID
+	vlanLevels := e.vlanLevels
+	maxLevelJump := e.maxLevelJump
 	e.ipVLANMutex.Unlock()
 
 	if !dstKnown {
 		return
 	}
 
-	srcLevel, srcKnown := e.vlanLevels[packet.VLANID]
-	dstLevel, dstLevelKnown := e.vlanLevels[dstVLAN]
+	srcLevel, srcKnown := vlanLevels[packet.VLANID]
+	dstLevel, dstLevelKnown := vlanLevels[dstVLAN]
 
 	// Both sides need a configured level for this to mean anything —
 	// an unclassified VLAN never participates in a violation check,
@@ -90,7 +136,7 @@ func (e *Engine) handleSegmentation(packet core.Packet) {
 	if jump < 0 {
 		jump = -jump
 	}
-	if jump <= e.maxLevelJump {
+	if jump <= maxLevelJump {
 		return
 	}
 

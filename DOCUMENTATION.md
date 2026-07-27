@@ -246,13 +246,24 @@ loading a snapshot.
 ### Network Segmentation
 
 VLAN names and Purdue Model levels, per sensor — drives the Topology
-map's VLAN labels/grouping and this tab's own asset-by-segment
-drill-down. **This currently only affects Central's own
-naming/visualization** — the sensor's own live "Purdue Model
-Segmentation Violation" detection rule (see `DETECTION_RULES.md`) still
-reads its *own* `detect.segmentation.vlanlevels` from that sensor's
-local config file, which editing here does not update. Keep the two in
-sync by hand for now if the live rule matters to you.
+map's VLAN labels/grouping, this tab's own asset-by-segment drill-down,
+and — since this is now pushed to the sensor automatically — the
+sensor's own live "Purdue Model Segmentation Violation" detection rule
+(see `DETECTION_RULES.md`) too. Editing a VLAN's level, or the per-sensor
+**Max level jump** setting, queues a `segmentation.config` command to
+that sensor the same way toggling a rule does; a sensor picks it up on
+its next sync if it's offline right now. This is the one config value
+(besides `detect.segmentation.enabled` itself, which stays sensor-local
+— see below) that no longer needs editing in the sensor's own
+config.yaml at all.
+
+Setting *any* VLAN level from this tab implicitly turns the live
+detection rule on for that sensor, even if `detect.segmentation.enabled:
+false` in its config.yaml — configuring levels here is treated as "yes,
+use this." Clearing all of a sensor's levels turns it back off (nothing
+left to check against). The config file's own `enabled`/`vlanlevels`
+only matter as the sensor's bootstrap default before it's ever received
+a push from Central.
 
 Worth knowing going in: a VLAN-to-level mapping is an approximation, not
 a precise boundary. An engineering workstation is conceptually Level 3

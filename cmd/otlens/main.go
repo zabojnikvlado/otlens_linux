@@ -212,6 +212,14 @@ func main() {
 				}
 			case "rule.delete":
 				application.DetectEngine.DeleteRule(command.Target)
+			case "segmentation.config":
+				var request struct {
+					VLANLevels   map[uint16]float64 `json:"vlan_levels"`
+					MaxLevelJump float64            `json:"max_level_jump"`
+				}
+				if err := json.Unmarshal([]byte(command.Target), &request); err == nil {
+					application.DetectEngine.UpdateSegmentationConfig(request.VLANLevels, request.MaxLevelJump)
+				}
 			}
 		}, Versions: func() map[string]string {
 			return map[string]string{

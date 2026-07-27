@@ -342,6 +342,18 @@ CREATE TABLE IF NOT EXISTS vlan_config (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY (sensor_id, vlan_id)
 );
+-- The one setting vlan_config doesn't cover (it's per-sensor, not
+-- per-VLAN): how many Purdue levels apart two VLANs may communicate
+-- before segmentation_violation fires. Kept here so pushSegmentationConfig
+-- (internal/central/segmentation.go) has everything it needs to send the
+-- sensor a complete "segmentation.config" command without also requiring
+-- detect.segmentation.maxleveljump in that sensor's local config file.
+CREATE TABLE IF NOT EXISTS segmentation_settings (
+ sensor_id TEXT PRIMARY KEY REFERENCES sensors(id) ON DELETE CASCADE,
+ max_level_jump REAL NOT NULL DEFAULT 1,
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()

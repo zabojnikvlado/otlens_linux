@@ -247,7 +247,18 @@ async function loadSegmentation(){
     const vlans=await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/vlans`);
     tbody.innerHTML=(vlans||[]).map(v=>`<tr><td>${v.VLANID===0?'Untagged':v.VLANID}</td><td>${esc(v.Name||'—')}</td><td>${v.PurdueLevel==null?'—':esc(v.PurdueLevel)}</td><td class="segmentation-assets" data-vlan="${v.VLANID}">${esc(v.AssetCount)} <span class="rules-help" style="display:inline">(view)</span></td><td><button class="secondary-btn segmentation-edit" data-vlan="${v.VLANID}" data-name="${esc(v.Name||'')}" data-level="${v.PurdueLevel==null?'':v.PurdueLevel}">Edit</button></td></tr>`).join('')||'<tr><td colspan="5">No VLANs observed yet for this sensor.</td></tr>';
   }catch(err){tbody.innerHTML=`<tr><td colspan="5">Failed to load: ${esc(err.message)}</td></tr>`}
+  try{
+    const r=await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/segmentation-settings`);
+    document.getElementById('segmentation-max-jump').value=r.max_level_jump;
+  }catch(err){/* leave whatever was there before */}
 }
+document.getElementById('segmentation-max-jump-save').addEventListener('click',async()=>{
+  const val=Number(document.getElementById('segmentation-max-jump').value);
+  if(!val||val<=0){alert('Enter a positive number.');return}
+  try{
+    await api(`/sensors/${encodeURIComponent(segmentationSensorID)}/segmentation-settings`,{method:'PUT',body:JSON.stringify({max_level_jump:val})});
+  }catch(err){alert(`Failed to save: ${err.message}`)}
+});
 document.getElementById('segmentation-sensor').addEventListener('change',e=>{segmentationSensorID=e.target.value;loadSegmentation()});
 document.querySelector('#table-segmentation tbody').addEventListener('click',async e=>{
   const editBtn=e.target.closest('.segmentation-edit');
