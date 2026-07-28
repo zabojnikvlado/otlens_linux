@@ -93,3 +93,41 @@ func TestClosedConnectionCounters(t *testing.T) {
 		t.Fatalf("unexpected connection counters: %+v", stats)
 	}
 }
+
+func TestPerIPConnectionLimit(t *testing.T) {
+	bus := core.NewEventBus()
+	e := New(bus, Config{Enabled: true, ShardCount: 1, MaxConnectionsPerIP: 1})
+	now := time.Now()
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 1000, DstPort: 22, TCPSeq: 1, TCPFlags: "SYN", Timestamp: now})
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.3", SrcPort: 1001, DstPort: 22, TCPSeq: 1, TCPFlags: "SYN", Timestamp: now})
+	stats := e.Stats()
+	if stats.ActiveConnections != 1 || stats.MaxConnectionsPerIPDrops != 1 {
+		t.Fatalf("per-IP limit not enforced: %+v", stats)
+	}
+}
+
+func TestSynTimeoutAndPeakMetrics(t *testing.T) {
+	bus := core.NewEventBus()
+	e := New(bus, Config{Enabled: true, ShardCount: 1, SynTimeout: time.Millisecond})
+	now := time.Now()
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 1000, DstPort: 22, TCPSeq: 1, TCPFlags: "SYN", Timestamp: now})
+	e.cleanup(now.Add(time.Second))
+	stats := e.Stats()
+	if stats.ActiveConnections != 0 || stats.TimedOutConnections != 1 || stats.PeakActiveConnections != 1 {
+		t.Fatalf("unexpected timeout/peak metrics: %+v", stats)
+	}
+}
+
+func TestResetAndDuplicateMetrics(t *testing.T) {
+	bus := core.NewEventBus()
+	e := New(bus, Config{Enabled: true, ShardCount: 1, ClosedTimeout: time.Millisecond})
+	now := time.Now()
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 1000, DstPort: 22, TCPSeq: 100, TCPFlags: "ACK", AppPayload: []byte("abc"), Timestamp: now})
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 1000, DstPort: 22, TCPSeq: 100, TCPFlags: "ACK", AppPayload: []byte("abc"), Timestamp: now})
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 1000, DstPort: 22, TCPSeq: 103, TCPFlags: "RST,ACK", Timestamp: now})
+	e.cleanup(now.Add(time.Second))
+	stats := e.Stats()
+	if stats.DuplicateSegments != 1 || stats.ResetConnections != 1 || stats.ConnectionsClosed != 1 {
+		t.Fatalf("unexpected reset/duplicate metrics: %+v", stats)
+	}
+}

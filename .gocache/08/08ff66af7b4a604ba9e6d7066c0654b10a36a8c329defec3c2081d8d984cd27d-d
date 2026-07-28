@@ -1,0 +1,13 @@
+./bacnet.go
+./dnp3.go
+./engine.go
+./ethernetip.go
+./helpers.go
+./iec104.go
+./message.go
+./modbus.go
+./opcua.go
+./profinet.go
+./s7comm.go
+./extended_test.go
+./parser_fuzz_test.go

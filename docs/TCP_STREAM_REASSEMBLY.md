@@ -17,3 +17,5 @@ records remain opaque even after reassembly.
 
 Stream quality fields expose whether capture began midstream or a stream became gapped.
 Limits intentionally truncate a stream rather than allowing unbounded sensor memory use.
+
+A detailed module-level reference is available in [`TCP_STREAMER_MODULE.md`](TCP_STREAMER_MODULE.md). Parser behavior and limitations are documented in [`PROTOCOL_PARSERS_REFERENCE.md`](PROTOCOL_PARSERS_REFERENCE.md).

@@ -813,3 +813,11 @@ make build-central           # bin/otlens-central, current OS
   was built from. Not user-facing documentation — kept as historical
   record of *why* things ended up the way they are, in case that context
   is ever useful.
+
+
+## TCP streamer and parser reference
+
+- `docs/TCP_STREAMER_MODULE.md` — detailed TCP connection lifecycle, sequence reassembly, gap/overlap behavior, adaptive timeouts, resource limits, metrics, configuration and troubleshooting.
+- `docs/PROTOCOL_PARSERS_REFERENCE.md` — packet parser, Modbus, S7comm, EtherNet/IP, DNP3, OPC UA, BACnet/IP, IEC 104, PROFINET DCP, SMB and DCE/RPC behavior and limitations.
+
+- [TCP streamer and parser hardening v2](docs/TCP_STREAMER_PARSER_HARDENING_V2.md) — mid-stream synchronization, asymmetric capture, confidence classification, parser isolation, diagnostics, and fuzzing.

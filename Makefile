@@ -1,4 +1,4 @@
-# OTLens build targets. Sensor and Central use separate runtime config files.
+xit# OTLens build targets. Sensor and Central use separate runtime config files.
 
 BINDIR := bin
 SENSOR_BIN := $(BINDIR)/otlens

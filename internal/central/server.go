@@ -1762,7 +1762,7 @@ func basicPDF(text string) []byte {
 	for i := 1; i <= len(objects); i++ {
 		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
 	}
-	fmt.Fprintf(&b, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF", len(objects)+1, xref)
+	fmt.Fprintf(&b, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return b.Bytes()
 }
 func (s *Server) downloadReportPDF(c *gin.Context) {
