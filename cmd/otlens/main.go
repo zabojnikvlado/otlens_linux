@@ -222,8 +222,21 @@ func main() {
 						if runCtx.Err() != nil {
 							runErr = runCtx.Err().Error()
 						}
-						if err := client.PushReconResult(context.Background(), rc.JobID, results, runErr); err != nil {
-							log.Printf("OTLens reconnaissance result upload failed: %v", err)
+						var uploadErr error
+						for attempt := 1; attempt <= 6; attempt++ {
+							uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 20*time.Second)
+							uploadErr = client.PushReconResult(uploadCtx, rc.JobID, results, runErr)
+							uploadCancel()
+							if uploadErr == nil {
+								break
+							}
+							log.Printf("OTLens reconnaissance result upload attempt %d failed: %v", attempt, uploadErr)
+							if attempt < 6 {
+								time.Sleep(time.Duration(attempt*5) * time.Second)
+							}
+						}
+						if uploadErr != nil {
+							log.Printf("OTLens reconnaissance result upload permanently failed for job %s: %v", rc.JobID, uploadErr)
 						}
 					}()
 				case "sensor.capture.stop":

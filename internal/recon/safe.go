@@ -33,12 +33,12 @@ func Run(ctx context.Context, cmd management.ReconCommand) []management.ReconRes
 			return out
 		default:
 		}
-		out = append(out, probeTarget(ctx, strings.TrimSpace(target), p, cmd.Credential, delay))
+		out = append(out, probeTarget(ctx, strings.TrimSpace(target), cmd.Profile, p, cmd.Credential, delay))
 	}
 	return out
 }
 
-func probeTarget(ctx context.Context, target string, p management.ReconPolicy, cred *management.ReconCredentialSecret, delay time.Duration) (r management.ReconResult) {
+func probeTarget(ctx context.Context, target, profile string, p management.ReconPolicy, cred *management.ReconCredentialSecret, delay time.Duration) (r management.ReconResult) {
 	r = management.ReconResult{Target: target, StartedAt: time.Now().UTC()}
 	defer func() { r.FinishedAt = time.Now().UTC() }()
 	ip := net.ParseIP(target)
@@ -67,10 +67,11 @@ func probeTarget(ctx context.Context, target string, p management.ReconPolicy, c
 		if ok {
 			r.Reachable = true
 			r.Services = append(r.Services, svc)
+			r.Evidence = append(r.Evidence, evidence("service.open", fmt.Sprintf("%s/%d", svc.Service, svc.Port), "tcp_connect", 100))
 			enrich(&r, svc)
 		}
 	}
-	if strings.EqualFold(cmdProfile(p), "ot-conservative") || len(p.OTProtocols) > 0 {
+	if strings.EqualFold(profile, "ot-conservative") || len(p.OTProtocols) > 0 {
 		otEvidence := probeOTIdentity(ctx, target, p.OTProtocols, time.Duration(p.TimeoutSeconds)*time.Second)
 		if len(otEvidence) > 0 {
 			r.Reachable = true
@@ -127,13 +128,6 @@ func probeTarget(ctx context.Context, target string, p management.ReconPolicy, c
 		r.Error = "no configured service responded"
 	}
 	return r
-}
-
-func cmdProfile(p management.ReconPolicy) string {
-	if len(p.OTProtocols) > 0 {
-		return "ot-conservative"
-	}
-	return "safe-discovery"
 }
 
 func denied(ip net.IP, p management.ReconPolicy) bool {

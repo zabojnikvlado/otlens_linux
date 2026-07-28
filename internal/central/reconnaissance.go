@@ -181,6 +181,7 @@ func (s *Server) createReconJob(c *gin.Context) {
 	}
 	b, _ := json.Marshal(cmd)
 	if err := s.Repo.QueueCommands(c, j.SensorID, "recon.safe_discovery", []string{string(b)}); err != nil {
+		_, _ = s.Repo.db.ExecContext(c, `UPDATE reconnaissance_jobs SET status='failed',error=$2,completed_at=NOW() WHERE id=$1`, j.ID, "failed to queue sensor command: "+err.Error())
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
