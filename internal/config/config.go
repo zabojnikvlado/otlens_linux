@@ -88,9 +88,6 @@ type Config struct {
 			GapRecoveryTimeout    time.Duration `mapstructure:"gap_recovery_timeout"`
 			ShardCount            int           `mapstructure:"shard_count"`
 			OverlapPolicy         string        `mapstructure:"overlap_policy"`
-			MaxConnectionsPerIP   int           `mapstructure:"max_connections_per_ip"`
-			SynTimeout            time.Duration `mapstructure:"syn_timeout"`
-			LongLivedIdleTimeout  time.Duration `mapstructure:"long_lived_idle_timeout"`
 		}
 
 		IPFIX struct {
@@ -690,9 +687,6 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("capture.tcp_reassembly.gap_recovery_timeout", 2*time.Second)
 	viper.SetDefault("capture.tcp_reassembly.shard_count", 32)
 	viper.SetDefault("capture.tcp_reassembly.overlap_policy", "first_seen")
-	viper.SetDefault("capture.tcp_reassembly.max_connections_per_ip", 4096)
-	viper.SetDefault("capture.tcp_reassembly.syn_timeout", 30*time.Second)
-	viper.SetDefault("capture.tcp_reassembly.long_lived_idle_timeout", 15*time.Minute)
 
 	viper.SetDefault("ics.modbusport", 502)
 	viper.SetDefault("ics.s7port", 102)

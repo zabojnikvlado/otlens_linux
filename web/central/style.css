@@ -1087,3 +1087,8 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
   min-width: 0;
   flex: 0 0 auto;
 }
+
+/* Restored compact Threat Intelligence form/table styling. */
+#ti-source-form label:first-child{min-width:180px;flex:0 1 260px} #ti-source-name{width:100%;min-width:0}
+.ti-table-panel{margin-top:14px}.ti-table-panel h2{margin:0 0 12px}.clickable-row{cursor:pointer}.clickable-row:hover{background:rgba(59,130,246,.08)}
+.detail-grid{display:grid;grid-template-columns:minmax(140px,220px) 1fr;gap:8px 16px}.detail-grid dt{color:var(--muted)}.detail-grid dd{margin:0;overflow-wrap:anywhere}

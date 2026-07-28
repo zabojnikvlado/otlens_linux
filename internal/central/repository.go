@@ -564,6 +564,10 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
 		db.Close()
 		return nil, fmt.Errorf("ensure central database schema: %w", err)
 	}
+	if _, err := db.Exec(vulnerabilitySchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("bootstrap vulnerability schema: %w", err)
+	}
 	if _, err := db.Exec(threatIntelSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ensure threat intelligence schema: %w", err)

@@ -24,9 +24,6 @@ type Config struct {
 	GapRecoveryTimeout    time.Duration
 	ShardCount            int
 	OverlapPolicy         string // first_seen or last_seen
-	MaxConnectionsPerIP   int
-	SynTimeout            time.Duration
-	LongLivedIdleTimeout  time.Duration
 }
 
 type segment struct {
@@ -35,35 +32,21 @@ type segment struct {
 	ts   time.Time
 }
 type direction struct {
-	initialized        bool
-	next               uint32
-	pending            map[uint32]segment
-	buffered           int
-	midstream          bool
-	gapped             bool
-	gapSince           time.Time
-	protocol           string
-	protocolConfidence uint8
-	packets            uint64
-	bytes              uint64
-	finSeen            bool
+	initialized bool
+	next        uint32
+	pending     map[uint32]segment
+	buffered    int
+	midstream   bool
+	gapped      bool
+	gapSince    time.Time
+	protocol    string
 }
 type connection struct {
 	id                 string
 	aIP, bIP           string
 	aPort, bPort       uint16
 	a2b, b2a           direction
-	createdAt          time.Time
-	lastSeen           time.Time
-	closedAt           time.Time
-	state              string
-	synSeen            bool
-	synAckSeen         bool
-	rstSeen            bool
-	seenA2B            bool
-	seenB2A            bool
-	midstream          bool
-	asymmetricReported bool
+	lastSeen, closedAt time.Time
 }
 type shard struct {
 	mu       sync.Mutex
@@ -72,22 +55,19 @@ type shard struct {
 }
 
 type stats struct {
-	active, peakActive, buffered, bufferedHighWater                                                                                          int64
-	opened, closed, segments, bytes, chunks, emitted, outOfOrder, retransmitted, overlaps, overlapConflicts, gapRecoveries, evicted, dropped uint64
-	duplicates, timedOut, resets, perIPDrops, durationNanos                                                                                  uint64
-	midstream, asymmetric, lowConfidence                                                                                                     uint64
+	active                                                                                                                                                                           int64
+	buffered                                                                                                                                                                         int64
+	opened, closed, segments, bytes, chunks, emitted, outOfOrder, retransmitted, overlaps, overlapConflicts, gapRecoveries, evicted, dropped, packetEvents, tcpPackets, typeFailures uint64
 }
 
 type Engine struct {
-	bus           *core.EventBus
-	cfg           Config
-	shards        []shard
-	pool          sync.Pool
-	ipMu          sync.Mutex
-	ipConnections map[string]int
-	st            stats
-	stop          chan struct{}
-	running       atomic.Bool
+	bus     *core.EventBus
+	cfg     Config
+	shards  []shard
+	pool    sync.Pool
+	st      stats
+	stop    chan struct{}
+	running atomic.Bool
 }
 
 func New(bus *core.EventBus, cfg Config) *Engine {
@@ -121,16 +101,7 @@ func New(bus *core.EventBus, cfg Config) *Engine {
 	if cfg.OverlapPolicy != "last_seen" {
 		cfg.OverlapPolicy = "first_seen"
 	}
-	if cfg.MaxConnectionsPerIP <= 0 {
-		cfg.MaxConnectionsPerIP = 4096
-	}
-	if cfg.SynTimeout <= 0 {
-		cfg.SynTimeout = 30 * time.Second
-	}
-	if cfg.LongLivedIdleTimeout <= 0 {
-		cfg.LongLivedIdleTimeout = 15 * time.Minute
-	}
-	e := &Engine{bus: bus, cfg: cfg, shards: make([]shard, cfg.ShardCount), stop: make(chan struct{}), ipConnections: map[string]int{}}
+	e := &Engine{bus: bus, cfg: cfg, shards: make([]shard, cfg.ShardCount), stop: make(chan struct{})}
 	for i := range e.shards {
 		e.shards[i].conns = map[string]*connection{}
 	}
@@ -145,8 +116,22 @@ func (e *Engine) Start() {
 	ch := e.bus.Subscribe(core.EventPacketParsed)
 	go func() {
 		for ev := range ch {
-			if p, ok := ev.Data.(core.Packet); ok {
+			atomic.AddUint64(&e.st.packetEvents, 1)
+			switch p := ev.Data.(type) {
+			case core.Packet:
+				if p.L4Protocol == "TCP" {
+					atomic.AddUint64(&e.st.tcpPackets, 1)
+				}
 				e.Push(p)
+			case *core.Packet:
+				if p != nil {
+					if p.L4Protocol == "TCP" {
+						atomic.AddUint64(&e.st.tcpPackets, 1)
+					}
+					e.Push(*p)
+				}
+			default:
+				atomic.AddUint64(&e.st.typeFailures, 1)
 			}
 		}
 	}()
@@ -204,43 +189,6 @@ func (e *Engine) release(b []byte) {
 	e.pool.Put(&b)
 }
 
-func updateMax(dst *int64, value int64) {
-	for {
-		old := atomic.LoadInt64(dst)
-		if value <= old || atomic.CompareAndSwapInt64(dst, old, value) {
-			return
-		}
-	}
-}
-
-func (e *Engine) canTrackIPs(a, b string) bool {
-	e.ipMu.Lock()
-	defer e.ipMu.Unlock()
-	if e.ipConnections[a] >= e.cfg.MaxConnectionsPerIP || e.ipConnections[b] >= e.cfg.MaxConnectionsPerIP {
-		return false
-	}
-	e.ipConnections[a]++
-	if b != a {
-		e.ipConnections[b]++
-	}
-	return true
-}
-
-func (e *Engine) releaseIPs(a, b string) {
-	e.ipMu.Lock()
-	defer e.ipMu.Unlock()
-	for _, ip := range []string{a, b} {
-		if ip == "" || (ip == b && a == b) {
-			continue
-		}
-		if e.ipConnections[ip] <= 1 {
-			delete(e.ipConnections, ip)
-		} else {
-			e.ipConnections[ip]--
-		}
-	}
-}
-
 func (e *Engine) Push(p core.Packet) {
 	if p.L4Protocol != "TCP" {
 		return
@@ -252,20 +200,10 @@ func (e *Engine) Push(p core.Packet) {
 	s.mu.Lock()
 	c := s.conns[id]
 	if c == nil {
-		if !e.canTrackIPs(p.SrcIP, p.DstIP) {
-			atomic.AddUint64(&e.st.perIPDrops, 1)
-			atomic.AddUint64(&e.st.dropped, 1)
-			s.mu.Unlock()
-			return
-		}
 		if atomic.LoadInt64(&e.st.active) >= int64(e.cfg.MaxConnections) {
 			e.evictOldestLocked(s, "connection_limit")
 		}
-		startedWithSYN := hasFlag(p.TCPFlags, "SYN")
-		c = &connection{id: id, createdAt: p.Timestamp, lastSeen: p.Timestamp, state: "observed", midstream: !startedWithSYN}
-		if c.midstream {
-			atomic.AddUint64(&e.st.midstream, 1)
-		}
+		c = &connection{id: id, lastSeen: p.Timestamp}
 		if forward {
 			c.aIP, c.aPort, c.bIP, c.bPort = p.SrcIP, p.SrcPort, p.DstIP, p.DstPort
 		} else {
@@ -274,53 +212,23 @@ func (e *Engine) Push(p core.Packet) {
 		c.a2b.pending = map[uint32]segment{}
 		c.b2a.pending = map[uint32]segment{}
 		s.conns[id] = c
-		active := atomic.AddInt64(&e.st.active, 1)
-		updateMax(&e.st.peakActive, active)
+		atomic.AddInt64(&e.st.active, 1)
 		atomic.AddUint64(&e.st.opened, 1)
-		e.publishLifecycle(c, "stream_open", "")
+		e.publishLifecycle(c, "opened", "")
 	}
 	c.lastSeen = p.Timestamp
 	d := &c.a2b
-	if forward {
-		c.seenA2B = true
-	} else {
+	if !forward {
 		d = &c.b2a
-		c.seenB2A = true
-	}
-	d.packets++
-	d.bytes += uint64(len(p.AppPayload))
-	if hasFlag(p.TCPFlags, "SYN") {
-		c.synSeen = true
-		if hasFlag(p.TCPFlags, "ACK") {
-			c.synAckSeen = true
-			c.state = "established"
-		} else {
-			c.state = "syn_seen"
-		}
-	} else if hasFlag(p.TCPFlags, "ACK") && c.state != "established" {
-		c.state = "established"
 	}
 	seq := p.TCPSeq
 	if hasFlag(p.TCPFlags, "SYN") {
 		seq++
 	}
 	chunks := e.acceptLocked(s, c, d, seq, p.AppPayload, p.Timestamp, forward)
-	if hasFlag(p.TCPFlags, "FIN") {
-		d.finSeen = true
+	if hasFlag(p.TCPFlags, "FIN") || hasFlag(p.TCPFlags, "RST") {
 		c.closedAt = p.Timestamp
-		if c.a2b.finSeen && c.b2a.finSeen {
-			c.state = "closed"
-		} else {
-			c.state = "half_closed"
-		}
-		e.publishLifecycle(c, "stream_close", "fin")
-	}
-	if hasFlag(p.TCPFlags, "RST") {
-		c.rstSeen = true
-		c.state = "reset"
-		c.closedAt = p.Timestamp
-		atomic.AddUint64(&e.st.resets, 1)
-		e.publishLifecycle(c, "stream_reset", "rst")
+		e.publishLifecycle(c, "closing", strings.ToLower(p.TCPFlags))
 	}
 	s.mu.Unlock()
 	for _, ch := range chunks {
@@ -348,14 +256,13 @@ func (e *Engine) acceptLocked(s *shard, c *connection, d *direction, seq uint32,
 	if !d.initialized {
 		d.initialized = true
 		d.next = seq
-		d.midstream = c.midstream
+		d.midstream = true
 	}
 	overlap := false
 	if seqLess(seq, d.next) {
 		skip := uint32(d.next - seq)
 		atomic.AddUint64(&e.st.retransmitted, uint64(minU32(skip, uint32(len(data)))))
 		if skip >= uint32(len(data)) {
-			atomic.AddUint64(&e.st.duplicates, 1)
 			return nil
 		}
 		data = data[skip:]
@@ -368,7 +275,7 @@ func (e *Engine) acceptLocked(s *shard, c *connection, d *direction, seq uint32,
 		if gap > e.cfg.MaxSequenceGap || len(d.pending) >= e.cfg.MaxOutOfOrderSegments || d.buffered+len(data) > e.cfg.MaxBufferPerDirection || atomic.LoadInt64(&e.st.buffered)+int64(len(data)) > int64(e.cfg.MaxTotalBuffer) {
 			d.gapped = true
 			atomic.AddUint64(&e.st.dropped, 1)
-			e.publishLifecycle(c, "stream_truncated", "reassembly_limit")
+			e.publishLifecycle(c, "truncated", "reassembly_limit")
 			return nil
 		}
 		if old, exists := d.pending[seq]; exists {
@@ -385,8 +292,7 @@ func (e *Engine) acceptLocked(s *shard, c *connection, d *direction, seq uint32,
 				d.pending[seq] = segment{seq: seq, data: cp, ts: ts}
 				s.buffered += len(cp)
 				d.buffered += len(cp)
-				buffered := atomic.AddInt64(&e.st.buffered, int64(len(cp)))
-				updateMax(&e.st.bufferedHighWater, buffered)
+				atomic.AddInt64(&e.st.buffered, int64(len(cp)))
 			}
 			return nil
 		}
@@ -394,8 +300,7 @@ func (e *Engine) acceptLocked(s *shard, c *connection, d *direction, seq uint32,
 		d.pending[seq] = segment{seq: seq, data: cp, ts: ts}
 		d.buffered += len(cp)
 		s.buffered += len(cp)
-		buffered := atomic.AddInt64(&e.st.buffered, int64(len(cp)))
-		updateMax(&e.st.bufferedHighWater, buffered)
+		atomic.AddInt64(&e.st.buffered, int64(len(cp)))
 		atomic.AddUint64(&e.st.outOfOrder, 1)
 		if d.gapSince.IsZero() {
 			d.gapSince = ts
@@ -417,21 +322,14 @@ func (e *Engine) emitContiguousLocked(s *shard, c *connection, d *direction, dat
 			srcPort, dstPort = c.bPort, c.aPort
 		}
 		proto := d.protocol
-		confidence := d.protocolConfidence
-		if proto == "" || proto == "unknown" || confidence < 80 {
-			result := streamproto.DetectResult(b)
-			proto = result.Protocol
-			confidence = result.Confidence
-			if proto != "unknown" && confidence >= d.protocolConfidence {
+		if proto == "" || proto == "unknown" {
+			proto = streamproto.Detect(b)
+			if proto != "unknown" {
 				d.protocol = proto
-				d.protocolConfidence = confidence
 			}
 		}
-		if proto != "unknown" && confidence < 80 {
-			atomic.AddUint64(&e.st.lowConfidence, 1)
-		}
 		cp := append([]byte(nil), b...)
-		out = append(out, core.TCPStreamChunk{ConnectionID: c.id, SrcIP: srcIP, DstIP: dstIP, SrcPort: srcPort, DstPort: dstPort, Timestamp: t, Data: cp, Midstream: d.midstream, Gapped: d.gapped, GapBefore: gap, Overlap: overlap, Protocol: proto, ProtocolConfidence: confidence, Asymmetric: !(c.seenA2B && c.seenB2A)})
+		out = append(out, core.TCPStreamChunk{ConnectionID: c.id, SrcIP: srcIP, DstIP: dstIP, SrcPort: srcPort, DstPort: dstPort, Timestamp: t, Data: cp, Midstream: d.midstream, Gapped: d.gapped, GapBefore: gap, Overlap: overlap, Protocol: proto})
 		d.next += uint32(len(b))
 		atomic.AddUint64(&e.st.chunks, 1)
 		atomic.AddUint64(&e.st.emitted, uint64(len(b)))
@@ -483,30 +381,18 @@ func (e *Engine) cleanup(now time.Time) {
 		var publish []core.TCPStreamChunk
 		s.mu.Lock()
 		for id, c := range s.conns {
-			if !c.asymmetricReported && now.Sub(c.createdAt) >= 5*time.Second && !(c.seenA2B && c.seenB2A) {
-				c.asymmetricReported = true
-				atomic.AddUint64(&e.st.asymmetric, 1)
-				e.publishLifecycle(c, "stream_asymmetric", "one_direction_only")
-			}
 			publish = append(publish, e.recoverDirectionLocked(s, c, &c.a2b, now, true)...)
 			publish = append(publish, e.recoverDirectionLocked(s, c, &c.b2a, now, false)...)
-			timeout := e.connectionTimeout(c)
+			timeout := e.cfg.IdleTimeout
 			reason := "idle_timeout"
 			if !c.closedAt.IsZero() {
 				timeout = e.cfg.ClosedTimeout
 				reason = "closed"
-				if c.rstSeen {
-					reason = "reset"
-				}
 				if now.Sub(c.closedAt) < timeout {
 					continue
 				}
 			} else if now.Sub(c.lastSeen) < timeout {
 				continue
-			}
-			if reason == "idle_timeout" {
-				atomic.AddUint64(&e.st.timedOut, 1)
-				e.publishLifecycle(c, "stream_timeout", reason)
 			}
 			e.removeLocked(s, id, c, reason)
 		}
@@ -531,7 +417,7 @@ func (e *Engine) recoverDirectionLocked(s *shard, c *connection, d *direction, n
 	d.gapped = true
 	d.gapSince = time.Time{}
 	atomic.AddUint64(&e.st.gapRecoveries, 1)
-	e.publishLifecycle(c, "stream_gap", "gap_recovery")
+	e.publishLifecycle(c, "gapped", "gap_recovery")
 	sg := d.pending[first]
 	delete(d.pending, first)
 	d.buffered -= len(sg.data)
@@ -541,20 +427,6 @@ func (e *Engine) recoverDirectionLocked(s *shard, c *connection, d *direction, n
 	e.release(sg.data)
 	return out
 }
-func (e *Engine) connectionTimeout(c *connection) time.Duration {
-	if c.state == "syn_seen" && !c.synAckSeen {
-		return e.cfg.SynTimeout
-	}
-	proto := c.a2b.protocol
-	if proto == "" || proto == "unknown" {
-		proto = c.b2a.protocol
-	}
-	if proto == "modbus" || proto == "s7" || proto == "dnp3" || proto == "opcua" || c.aPort == 502 || c.bPort == 502 || c.aPort == 102 || c.bPort == 102 || c.aPort == 2404 || c.bPort == 2404 || c.aPort == 4840 || c.bPort == 4840 {
-		return e.cfg.LongLivedIdleTimeout
-	}
-	return e.cfg.IdleTimeout
-}
-
 func (e *Engine) evictOldestLocked(s *shard, reason string) {
 	if len(s.conns) == 0 {
 		return
@@ -576,38 +448,18 @@ func (e *Engine) removeLocked(s *shard, id string, c *connection, reason string)
 		atomic.AddInt64(&e.st.buffered, -int64(d.buffered))
 	}
 	delete(s.conns, id)
-	e.releaseIPs(c.aIP, c.bIP)
 	atomic.AddInt64(&e.st.active, -1)
 	atomic.AddUint64(&e.st.closed, 1)
-	if !c.createdAt.IsZero() && !c.lastSeen.Before(c.createdAt) {
-		atomic.AddUint64(&e.st.durationNanos, uint64(c.lastSeen.Sub(c.createdAt)))
-	}
-	c.state = "closed"
-	e.publishLifecycle(c, "stream_closed", reason)
+	e.publishLifecycle(c, "closed", reason)
 }
 func (e *Engine) publishLifecycle(c *connection, typ, reason string) {
 	proto := c.a2b.protocol
 	if proto == "" {
 		proto = c.b2a.protocol
 	}
-	ev := core.TCPStreamEvent{ConnectionID: c.id, Type: typ, Reason: reason, State: c.state, Timestamp: c.lastSeen, SrcIP: c.aIP, DstIP: c.bIP, SrcPort: c.aPort, DstPort: c.bPort, Buffered: c.a2b.buffered + c.b2a.buffered, Protocol: proto, PacketsA2B: c.a2b.packets, PacketsB2A: c.b2a.packets, BytesA2B: c.a2b.bytes, BytesB2A: c.b2a.bytes}
+	ev := core.TCPStreamEvent{ConnectionID: c.id, Type: typ, Reason: reason, Timestamp: c.lastSeen, Buffered: c.a2b.buffered + c.b2a.buffered, Protocol: proto}
 	e.bus.Publish(core.Event{Type: core.EventTCPStreamLifecycle, Timestamp: ev.Timestamp, Data: ev})
 }
 func (e *Engine) Stats() core.TCPReassemblyStats {
-	closed := atomic.LoadUint64(&e.st.closed)
-	avgMS := float64(0)
-	if closed > 0 {
-		avgMS = float64(atomic.LoadUint64(&e.st.durationNanos)) / float64(closed) / float64(time.Millisecond)
-	}
-	return core.TCPReassemblyStats{
-		Enabled: e.cfg.Enabled, Running: e.running.Load(),
-		ActiveConnections: atomic.LoadInt64(&e.st.active), PeakActiveConnections: atomic.LoadInt64(&e.st.peakActive),
-		ConnectionsOpened: atomic.LoadUint64(&e.st.opened), ConnectionsClosed: closed,
-		BufferedBytes: atomic.LoadInt64(&e.st.buffered), BufferedBytesHighWater: atomic.LoadInt64(&e.st.bufferedHighWater),
-		SegmentsSeen: atomic.LoadUint64(&e.st.segments), BytesSeen: atomic.LoadUint64(&e.st.bytes), ChunksEmitted: atomic.LoadUint64(&e.st.chunks), BytesEmitted: atomic.LoadUint64(&e.st.emitted),
-		OutOfOrderSegments: atomic.LoadUint64(&e.st.outOfOrder), RetransmittedBytes: atomic.LoadUint64(&e.st.retransmitted), OverlapSegments: atomic.LoadUint64(&e.st.overlaps), OverlapConflicts: atomic.LoadUint64(&e.st.overlapConflicts),
-		GapRecoveries: atomic.LoadUint64(&e.st.gapRecoveries), EvictedConnections: atomic.LoadUint64(&e.st.evicted), DroppedSegments: atomic.LoadUint64(&e.st.dropped), DuplicateSegments: atomic.LoadUint64(&e.st.duplicates),
-		TimedOutConnections: atomic.LoadUint64(&e.st.timedOut), ResetConnections: atomic.LoadUint64(&e.st.resets), AverageDurationMS: avgMS, MaxConnectionsPerIPDrops: atomic.LoadUint64(&e.st.perIPDrops),
-		MidstreamConnections: atomic.LoadUint64(&e.st.midstream), AsymmetricConnections: atomic.LoadUint64(&e.st.asymmetric), LowConfidenceChunks: atomic.LoadUint64(&e.st.lowConfidence),
-	}
+	return core.TCPReassemblyStats{Enabled: e.cfg.Enabled, Running: e.running.Load(), ActiveConnections: atomic.LoadInt64(&e.st.active), ConnectionsOpened: atomic.LoadUint64(&e.st.opened), ConnectionsClosed: atomic.LoadUint64(&e.st.closed), BufferedBytes: atomic.LoadInt64(&e.st.buffered), SegmentsSeen: atomic.LoadUint64(&e.st.segments), BytesSeen: atomic.LoadUint64(&e.st.bytes), ChunksEmitted: atomic.LoadUint64(&e.st.chunks), BytesEmitted: atomic.LoadUint64(&e.st.emitted), OutOfOrderSegments: atomic.LoadUint64(&e.st.outOfOrder), RetransmittedBytes: atomic.LoadUint64(&e.st.retransmitted), OverlapSegments: atomic.LoadUint64(&e.st.overlaps), OverlapConflicts: atomic.LoadUint64(&e.st.overlapConflicts), GapRecoveries: atomic.LoadUint64(&e.st.gapRecoveries), EvictedConnections: atomic.LoadUint64(&e.st.evicted), DroppedSegments: atomic.LoadUint64(&e.st.dropped), PacketEventsReceived: atomic.LoadUint64(&e.st.packetEvents), TCPPacketsReceived: atomic.LoadUint64(&e.st.tcpPackets), TypeAssertionFailures: atomic.LoadUint64(&e.st.typeFailures)}
 }

@@ -45,9 +45,6 @@ capture:
     shard_count: 32
     # first_seen matches common IDS behavior; last_seen is useful for testing evasion cases.
     overlap_policy: first_seen
-    max_connections_per_ip: 4096
-    syn_timeout: 30s
-    long_lived_idle_timeout: 15m
   # Data source: "pcap" (live packet capture — needs Npcap/libpcap
   # installed and admin/root rights) or "ipfix" (receive flow records
   # exported by a router/switch/probe over UDP — no local capture

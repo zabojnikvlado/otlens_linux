@@ -22,14 +22,6 @@ func parseIEC104(p core.Packet) (Message, bool) {
 		m.FunctionName = "ASDU"
 	}
 	m.Details["type_id"] = typ
-	if len(b) >= 12 {
-		m.Details["variable_structure_qualifier"] = b[7]
-		m.Details["cause_of_transmission"] = b[8] & 0x3f
-		m.Details["test"] = b[8]&0x80 != 0
-		m.Details["negative_confirmation"] = b[8]&0x40 != 0
-		m.Details["originator_address"] = b[9]
-		m.Details["common_address"] = uint16(b[10]) | uint16(b[11])<<8
-	}
 	if typ >= 45 && typ <= 50 || typ == 103 || typ == 105 {
 		m.Details["security_relevant"] = true
 	}

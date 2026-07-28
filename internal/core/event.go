@@ -36,9 +36,6 @@ const (
 	// (as opposed to per-packet) event; not yet published anywhere.
 	EventConnectionSeen EventType = "connection.seen"
 
-	// EventParserDiagnostics carries parser health and throughput snapshots.
-	EventParserDiagnostics EventType = "parser.diagnostics"
-
 	// EventICSMessage carries an ics.Message — a decoded Modbus/S7comm
 	// application-layer message produced by internal/ics.
 	EventICSMessage EventType = "ics.message"

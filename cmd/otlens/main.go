@@ -31,6 +31,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
 	"github.com/zabojnikvlado/otlens_linux/internal/recon"
 	"github.com/zabojnikvlado/otlens_linux/internal/syncagent"
+	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 	"go.uber.org/zap"
 )
 
@@ -187,7 +188,7 @@ func main() {
 			}
 			previousMetricAt, previousPackets, previousBytes, previousTCPSegments = now, packets, bytes, tcp.SegmentsSeen
 			return map[string]interface{}{
-				"schema_version": 6,
+				"schema_version": 4,
 				"system": map[string]interface{}{
 					"goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": mem.Alloc,
 					"memory_sys_bytes": mem.Sys, "heap_objects": mem.HeapObjects,
@@ -205,11 +206,8 @@ func main() {
 					"buffered_bytes": tcp.BufferedBytes, "out_of_order_segments": tcp.OutOfOrderSegments, "retransmitted_bytes": tcp.RetransmittedBytes,
 					"overlap_segments": tcp.OverlapSegments, "overlap_conflicts": tcp.OverlapConflicts, "gap_recoveries": tcp.GapRecoveries,
 					"evicted_connections": tcp.EvictedConnections, "dropped_segments": tcp.DroppedSegments,
-					"duplicate_segments": tcp.DuplicateSegments, "timed_out_connections": tcp.TimedOutConnections, "reset_connections": tcp.ResetConnections,
-					"peak_active_connections": tcp.PeakActiveConnections, "buffered_bytes_high_water": tcp.BufferedBytesHighWater,
-					"average_connection_duration_ms": tcp.AverageDurationMS, "max_connections_per_ip_drops": tcp.MaxConnectionsPerIPDrops,
-					"midstream_connections": tcp.MidstreamConnections, "asymmetric_connections": tcp.AsymmetricConnections,
-					"low_confidence_chunks": tcp.LowConfidenceChunks,
+					"packet_events_received": tcp.PacketEventsReceived, "tcp_packets_received": tcp.TCPPacketsReceived, "type_assertion_failures": tcp.TypeAssertionFailures,
+					"pipeline_issue": map[bool]string{true: "packet events are not reaching TCP reassembly", false: ""}[captureRunning && packets > 0 && tcp.PacketEventsReceived == 0],
 				},
 				"pipeline": map[string]interface{}{
 					"event_queue_depth": 0, "event_queue_percent": 0, "events_per_second": packetsPerSecond, "dropped_events_total": 0,
@@ -324,6 +322,13 @@ func main() {
 					}
 				case "rule.delete":
 					application.DetectEngine.DeleteRule(command.Target)
+				case "vulnerability.snapshot":
+					var advisories []vuln.Advisory
+					if err := json.Unmarshal([]byte(command.Target), &advisories); err != nil {
+						log.Printf("OTLens invalid vulnerability snapshot: %v", err)
+					} else {
+						log.Printf("OTLens vulnerability snapshot applied: %d advisories", application.VulnerabilityDB.Replace(advisories))
+					}
 				case "segmentation.config":
 					var request struct {
 						VLANLevels   map[uint16]float64 `json:"vlan_levels"`

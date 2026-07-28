@@ -51,12 +51,6 @@ func parseModbus(packet core.Packet, modbusPort uint16) (Message, bool) {
 	}
 
 	protocolID := binary.BigEndian.Uint16(data[2:4])
-	declaredLength := int(binary.BigEndian.Uint16(data[4:6]))
-	// MBAP length includes Unit ID and PDU. Reject impossible framing and
-	// truncated ADUs instead of allowing a port match to become a false positive.
-	if declaredLength < 2 || declaredLength > 254 || declaredLength+6 > len(data) {
-		return Message{}, false
-	}
 
 	// The Modbus protocol identifier is always 0 — a cheap sanity
 	// check that this really is Modbus and not some other traffic
@@ -75,8 +69,6 @@ func parseModbus(packet core.Packet, modbusPort uint16) (Message, bool) {
 	msg := newMessage(packet, "Modbus")
 
 	msg.UnitID = unitID
-	msg.Details["transaction_id"] = binary.BigEndian.Uint16(data[0:2])
-	msg.Details["declared_length"] = declaredLength
 	msg.FunctionCode = baseFC
 	msg.FunctionName = modbusFunctionName(baseFC)
 	msg.IsException = isException

@@ -32,6 +32,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/store"
 	"github.com/zabojnikvlado/otlens_linux/internal/tcpreassembly"
 	"github.com/zabojnikvlado/otlens_linux/internal/threatintel"
+	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 	"go.uber.org/zap"
 )
 
@@ -66,6 +67,7 @@ type Application struct {
 	DCERPCEngine      *dcerpc.Engine
 	TCPReassembler    *tcpreassembly.Engine
 	ThreatIntel       *threatintel.Store
+	VulnerabilityDB   *vuln.Database
 	threatIntelCancel context.CancelFunc
 
 	StoreEngine *store.Engine
@@ -112,7 +114,7 @@ func New(cfg *config.Config) (*Application, error) {
 	hostnameEngine := hostname.New(eventBus)
 
 	dnsEngine := passivedns.New(eventBus, cfg.Detect.ThreatIntel.MaxDNSObservations)
-	tcpReassembler := tcpreassembly.New(eventBus, tcpreassembly.Config{Enabled: cfg.Capture.TCPReassembly.Enabled, MaxConnections: cfg.Capture.TCPReassembly.MaxConnections, MaxBufferPerDirection: cfg.Capture.TCPReassembly.MaxBufferPerDirection, MaxTotalBuffer: cfg.Capture.TCPReassembly.MaxTotalBuffer, IdleTimeout: cfg.Capture.TCPReassembly.IdleTimeout, ClosedTimeout: cfg.Capture.TCPReassembly.ClosedTimeout, MaxOutOfOrderSegments: cfg.Capture.TCPReassembly.MaxOutOfOrderSegments, MaxSequenceGap: cfg.Capture.TCPReassembly.MaxSequenceGap, GapRecoveryTimeout: cfg.Capture.TCPReassembly.GapRecoveryTimeout, ShardCount: cfg.Capture.TCPReassembly.ShardCount, OverlapPolicy: cfg.Capture.TCPReassembly.OverlapPolicy, MaxConnectionsPerIP: cfg.Capture.TCPReassembly.MaxConnectionsPerIP, SynTimeout: cfg.Capture.TCPReassembly.SynTimeout, LongLivedIdleTimeout: cfg.Capture.TCPReassembly.LongLivedIdleTimeout})
+	tcpReassembler := tcpreassembly.New(eventBus, tcpreassembly.Config{Enabled: cfg.Capture.TCPReassembly.Enabled, MaxConnections: cfg.Capture.TCPReassembly.MaxConnections, MaxBufferPerDirection: cfg.Capture.TCPReassembly.MaxBufferPerDirection, MaxTotalBuffer: cfg.Capture.TCPReassembly.MaxTotalBuffer, IdleTimeout: cfg.Capture.TCPReassembly.IdleTimeout, ClosedTimeout: cfg.Capture.TCPReassembly.ClosedTimeout, MaxOutOfOrderSegments: cfg.Capture.TCPReassembly.MaxOutOfOrderSegments, MaxSequenceGap: cfg.Capture.TCPReassembly.MaxSequenceGap, GapRecoveryTimeout: cfg.Capture.TCPReassembly.GapRecoveryTimeout, ShardCount: cfg.Capture.TCPReassembly.ShardCount, OverlapPolicy: cfg.Capture.TCPReassembly.OverlapPolicy})
 	smbEngine := smb.New(eventBus, cfg.Capture.TCPReassembly.Enabled)
 	dcerpcEngine := dcerpc.New(eventBus)
 	var tiStore *threatintel.Store
@@ -210,11 +212,12 @@ func New(cfg *config.Config) (*Application, error) {
 
 		HostnameEngine: hostnameEngine,
 
-		DNSEngine:      dnsEngine,
-		SMBEngine:      smbEngine,
-		DCERPCEngine:   dcerpcEngine,
-		TCPReassembler: tcpReassembler,
-		ThreatIntel:    tiStore,
+		DNSEngine:       dnsEngine,
+		SMBEngine:       smbEngine,
+		DCERPCEngine:    dcerpcEngine,
+		TCPReassembler:  tcpReassembler,
+		ThreatIntel:     tiStore,
+		VulnerabilityDB: vuln.New(),
 
 		StoreEngine: storeEngine,
 

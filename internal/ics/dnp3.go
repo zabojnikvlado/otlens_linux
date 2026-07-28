@@ -9,15 +9,7 @@ func parseDNP3(p core.Packet) (Message, bool) {
 	if len(b) < 10 || b[0] != 0x05 || b[1] != 0x64 {
 		return Message{}, false
 	}
-	declared := int(b[2])
-	if declared < 5 {
-		return Message{}, false
-	}
 	m := newMessage(p, "DNP3")
-	m.Details["link_length"] = declared
-	m.Details["link_control"] = b[3]
-	m.Details["direction_from_master"] = b[3]&0x80 != 0
-	m.Details["primary_message"] = b[3]&0x40 != 0
 	m.IsResponse = p.SrcPort == PortDNP3
 	// Link header is 10 bytes; transport+application control generally precede function.
 	off := 12

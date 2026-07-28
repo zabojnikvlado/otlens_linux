@@ -259,6 +259,8 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/sensors/:id/tags/import", requireAction(ActionDataManagement), s.importTagList)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
+	api.POST("/vulnerabilities/import", requireAction(ActionDataManagement), s.importVulnerabilities)
+	api.POST("/vulnerabilities/feed", requireAction(ActionDataManagement), s.importVulnerabilityFeed)
 	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
 	api.GET("/sensors/:id/segmentation-settings", requireView(ViewTopology), s.getMaxLevelJump)
 	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
@@ -1720,6 +1722,7 @@ func basicPDF(text string) []byte {
 	if pages < 1 {
 		pages = 1
 	}
+	// objects is zero-based storage for PDF object numbers 1..N.
 	objects := []string{"", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
 	pageIDs := make([]int, pages)
 	contentIDs := make([]int, pages)
@@ -1727,8 +1730,7 @@ func basicPDF(text string) []byte {
 		pageIDs[i] = len(objects) + 1
 		objects = append(objects, "")
 		contentIDs[i] = len(objects) + 1
-		start := i * perPage
-		end := start + perPage
+		start, end := i*perPage, (i+1)*perPage
 		if end > len(lines) {
 			end = len(lines)
 		}
@@ -1739,31 +1741,31 @@ func basicPDF(text string) []byte {
 		}
 		c.WriteString("ET")
 		stream := c.String()
-		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
+		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len([]byte(stream)), stream))
 	}
 	kids := make([]string, pages)
 	for i, id := range pageIDs {
 		kids[i] = fmt.Sprintf("%d 0 R", id)
 	}
-	objects[1] = fmt.Sprintf("<< /Type /Catalog /Pages 2 0 R >>")
-	objects[2] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pages)
+	objects[0] = "<< /Type /Catalog /Pages 2 0 R >>"
+	objects[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pages)
 	for i := 0; i < pages; i++ {
 		objects[pageIDs[i]-1] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentIDs[i])
 	}
-	var b bytes.Buffer
-	b.WriteString("%PDF-1.4\n")
+	var out bytes.Buffer
+	out.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
 	offsets := make([]int, len(objects)+1)
 	for i, obj := range objects {
-		offsets[i+1] = b.Len()
-		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, obj)
+		offsets[i+1] = out.Len()
+		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, obj)
 	}
-	xref := b.Len()
-	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	xref := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
 	for i := 1; i <= len(objects); i++ {
-		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
+		fmt.Fprintf(&out, "%010d 00000 n \n", offsets[i])
 	}
-	fmt.Fprintf(&b, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
-	return b.Bytes()
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return out.Bytes()
 }
 func (s *Server) downloadReportPDF(c *gin.Context) {
 	rep, err := s.Repo.GetReport(c, c.Param("id"))
