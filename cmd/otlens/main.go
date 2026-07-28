@@ -26,7 +26,6 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/app"
 	"github.com/zabojnikvlado/otlens_linux/internal/capture"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
-	"github.com/zabojnikvlado/otlens_linux/internal/core"
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
@@ -197,16 +196,9 @@ func main() {
 			}
 		}
 		worker := &syncagent.Worker{
-			Metrics:  metricsSnapshot,
-			Uptime:   func() int64 { return int64(time.Since(metricStarted).Seconds()) },
-			Versions: func() map[string]string { return map[string]string{"otlens": cfg.App.Version, "go": runtime.Version()} },
-			CaptureInfo: func() map[string]interface{} {
-				return map[string]interface{}{
-					"backend": cfg.Capture.Mode, "interface": cfg.Capture.Interface,
-					"snaplen": cfg.Capture.Snaplen, "promiscuous": cfg.Capture.Promiscuous,
-				}
-			},
-			Client: client, Detect: application.DetectEngine, Flow: application.FlowEngine, ThreatIntel: application.ThreatIntel, ApplyCommand: func(command management.Command) {
+			Metrics: metricsSnapshot,
+			Uptime:  func() int64 { return int64(time.Since(metricStarted).Seconds()) },
+			Client:  client, Detect: application.DetectEngine, Flow: application.FlowEngine, ThreatIntel: application.ThreatIntel, ApplyCommand: func(command management.Command) {
 				switch command.Type {
 				case "recon.safe_discovery":
 					var rc management.ReconCommand
