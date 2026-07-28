@@ -149,7 +149,7 @@ func main() {
 		}
 		metricStarted := time.Now()
 		var previousMetricAt time.Time
-		var previousPackets, previousBytes uint64
+		var previousPackets, previousBytes, previousTCPSegments uint64
 		metricsSnapshot := func() map[string]interface{} {
 			now := time.Now()
 			var mem runtime.MemStats
@@ -176,9 +176,18 @@ func main() {
 			}
 			packetsPerSecond := float64(packetDelta) / elapsed
 			bytesPerSecond := float64(byteDelta) / elapsed
-			previousMetricAt, previousPackets, previousBytes = now, packets, bytes
+			tcpSegmentDelta := uint64(0)
+			if tcp.SegmentsSeen >= previousTCPSegments {
+				tcpSegmentDelta = tcp.SegmentsSeen - previousTCPSegments
+			}
+			tcpPacketsPerSecond := float64(tcpSegmentDelta) / elapsed
+			tcpPacketPercent := float64(0)
+			if packetDelta > 0 {
+				tcpPacketPercent = float64(tcpSegmentDelta) * 100 / float64(packetDelta)
+			}
+			previousMetricAt, previousPackets, previousBytes, previousTCPSegments = now, packets, bytes, tcp.SegmentsSeen
 			return map[string]interface{}{
-				"schema_version": 3,
+				"schema_version": 4,
 				"system": map[string]interface{}{
 					"goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": mem.Alloc,
 					"memory_sys_bytes": mem.Sys, "heap_objects": mem.HeapObjects,
@@ -188,7 +197,15 @@ func main() {
 					"packets_total": packets, "bytes_total": bytes,
 					"kernel_drops_total": 0, "interface_drops_total": 0, "drop_rate_percent": 0,
 				},
-				"tcp_reassembly": tcp,
+				"tcp_reassembly": map[string]interface{}{
+					"enabled": tcp.Enabled, "running": tcp.Running,
+					"active_connections": tcp.ActiveConnections, "connections_opened_total": tcp.ConnectionsOpened, "connections_closed_total": tcp.ConnectionsClosed,
+					"segments_seen": tcp.SegmentsSeen, "bytes_seen": tcp.BytesSeen, "chunks_emitted": tcp.ChunksEmitted, "bytes_emitted": tcp.BytesEmitted,
+					"tcp_packets_per_second": tcpPacketsPerSecond, "tcp_packet_percent": tcpPacketPercent,
+					"buffered_bytes": tcp.BufferedBytes, "out_of_order_segments": tcp.OutOfOrderSegments, "retransmitted_bytes": tcp.RetransmittedBytes,
+					"overlap_segments": tcp.OverlapSegments, "overlap_conflicts": tcp.OverlapConflicts, "gap_recoveries": tcp.GapRecoveries,
+					"evicted_connections": tcp.EvictedConnections, "dropped_segments": tcp.DroppedSegments,
+				},
 				"pipeline": map[string]interface{}{
 					"event_queue_depth": 0, "event_queue_percent": 0, "events_per_second": packetsPerSecond, "dropped_events_total": 0,
 				},

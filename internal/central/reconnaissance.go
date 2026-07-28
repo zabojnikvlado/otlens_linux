@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
@@ -82,16 +83,18 @@ func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results
 	if err = tx.QueryRowContext(ctx, `SELECT sensor_id FROM reconnaissance_jobs WHERE id=$1`, jobID).Scan(&sensorID); err != nil {
 		return err
 	}
-	for _, x := range results {
-		b, _ := json.Marshal(x)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO reconnaissance_results(job_id,target,result) VALUES($1,$2,$3)`, jobID, x.Target, b); err != nil {
-			return err
-		}
+	for i := range results {
+		x := &results[i]
 		services, _ := json.Marshal(x.Services)
 		evidence, _ := json.Marshal(x.Evidence)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_profile(sensor_id,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
 			ON CONFLICT(sensor_id,ip) DO UPDATE SET hostname=COALESCE(NULLIF(EXCLUDED.hostname,''),asset_recon_profile.hostname),vendor=COALESCE(NULLIF(EXCLUDED.vendor,''),asset_recon_profile.vendor),operating_system=COALESCE(NULLIF(EXCLUDED.operating_system,''),asset_recon_profile.operating_system),model=COALESCE(NULLIF(EXCLUDED.model,''),asset_recon_profile.model),firmware=COALESCE(NULLIF(EXCLUDED.firmware,''),asset_recon_profile.firmware),serial=COALESCE(NULLIF(EXCLUDED.serial,''),asset_recon_profile.serial),ot_identity=CASE WHEN EXCLUDED.ot_identity='{}'::jsonb THEN asset_recon_profile.ot_identity ELSE EXCLUDED.ot_identity END,services=EXCLUDED.services,evidence=EXCLUDED.evidence,last_profiled_at=NOW()`, sensorID, x.Target, x.Hostname, x.Vendor, x.OS, x.Model, x.Firmware, x.Serial, mustJSON(x.OTIdentity), services, evidence); err != nil {
+			return err
+		}
+		x.Audit = append(x.Audit, management.ReconAuditStep{Stage: "persist_results", Status: "ok", Detail: "result stored and asset profile updated", ObservedAt: time.Now().UTC()})
+		b, _ := json.Marshal(x)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO reconnaissance_results(job_id,target,result) VALUES($1,$2,$3)`, jobID, x.Target, b); err != nil {
 			return err
 		}
 	}

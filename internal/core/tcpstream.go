@@ -31,7 +31,11 @@ type TCPStreamEvent struct {
 
 // TCPReassemblyStats is a lock-free snapshot suitable for diagnostics and metrics.
 type TCPReassemblyStats struct {
+	Enabled            bool   `json:"enabled"`
+	Running            bool   `json:"running"`
 	ActiveConnections  int64  `json:"active_connections"`
+	ConnectionsOpened  uint64 `json:"connections_opened_total"`
+	ConnectionsClosed  uint64 `json:"connections_closed_total"`
 	BufferedBytes      int64  `json:"buffered_bytes"`
 	SegmentsSeen       uint64 `json:"segments_seen"`
 	BytesSeen          uint64 `json:"bytes_seen"`

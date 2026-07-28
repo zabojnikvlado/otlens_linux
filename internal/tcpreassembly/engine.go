@@ -55,18 +55,19 @@ type shard struct {
 }
 
 type stats struct {
-	active                                                                                                                   int64
-	buffered                                                                                                                 int64
-	segments, bytes, chunks, emitted, outOfOrder, retransmitted, overlaps, overlapConflicts, gapRecoveries, evicted, dropped uint64
+	active                                                                                                                                   int64
+	buffered                                                                                                                                 int64
+	opened, closed, segments, bytes, chunks, emitted, outOfOrder, retransmitted, overlaps, overlapConflicts, gapRecoveries, evicted, dropped uint64
 }
 
 type Engine struct {
-	bus    *core.EventBus
-	cfg    Config
-	shards []shard
-	pool   sync.Pool
-	st     stats
-	stop   chan struct{}
+	bus     *core.EventBus
+	cfg     Config
+	shards  []shard
+	pool    sync.Pool
+	st      stats
+	stop    chan struct{}
+	running atomic.Bool
 }
 
 func New(bus *core.EventBus, cfg Config) *Engine {
@@ -111,6 +112,7 @@ func (e *Engine) Start() {
 	if !e.cfg.Enabled {
 		return
 	}
+	e.running.Store(true)
 	ch := e.bus.Subscribe(core.EventPacketParsed)
 	go func() {
 		for ev := range ch {
@@ -122,6 +124,7 @@ func (e *Engine) Start() {
 	go e.cleanupLoop()
 }
 func (e *Engine) Stop() {
+	e.running.Store(false)
 	select {
 	case <-e.stop:
 	default:
@@ -176,9 +179,6 @@ func (e *Engine) Push(p core.Packet) {
 	if p.L4Protocol != "TCP" {
 		return
 	}
-	if len(p.AppPayload) == 0 && !hasFlag(p.TCPFlags, "SYN") && !hasFlag(p.TCPFlags, "FIN") && !hasFlag(p.TCPFlags, "RST") {
-		return
-	}
 	atomic.AddUint64(&e.st.segments, 1)
 	atomic.AddUint64(&e.st.bytes, uint64(len(p.AppPayload)))
 	id, forward := canonical(p)
@@ -199,6 +199,7 @@ func (e *Engine) Push(p core.Packet) {
 		c.b2a.pending = map[uint32]segment{}
 		s.conns[id] = c
 		atomic.AddInt64(&e.st.active, 1)
+		atomic.AddUint64(&e.st.opened, 1)
 		e.publishLifecycle(c, "opened", "")
 	}
 	c.lastSeen = p.Timestamp
@@ -434,6 +435,7 @@ func (e *Engine) removeLocked(s *shard, id string, c *connection, reason string)
 	}
 	delete(s.conns, id)
 	atomic.AddInt64(&e.st.active, -1)
+	atomic.AddUint64(&e.st.closed, 1)
 	e.publishLifecycle(c, "closed", reason)
 }
 func (e *Engine) publishLifecycle(c *connection, typ, reason string) {
@@ -445,5 +447,5 @@ func (e *Engine) publishLifecycle(c *connection, typ, reason string) {
 	e.bus.Publish(core.Event{Type: core.EventTCPStreamLifecycle, Timestamp: ev.Timestamp, Data: ev})
 }
 func (e *Engine) Stats() core.TCPReassemblyStats {
-	return core.TCPReassemblyStats{ActiveConnections: atomic.LoadInt64(&e.st.active), BufferedBytes: atomic.LoadInt64(&e.st.buffered), SegmentsSeen: atomic.LoadUint64(&e.st.segments), BytesSeen: atomic.LoadUint64(&e.st.bytes), ChunksEmitted: atomic.LoadUint64(&e.st.chunks), BytesEmitted: atomic.LoadUint64(&e.st.emitted), OutOfOrderSegments: atomic.LoadUint64(&e.st.outOfOrder), RetransmittedBytes: atomic.LoadUint64(&e.st.retransmitted), OverlapSegments: atomic.LoadUint64(&e.st.overlaps), OverlapConflicts: atomic.LoadUint64(&e.st.overlapConflicts), GapRecoveries: atomic.LoadUint64(&e.st.gapRecoveries), EvictedConnections: atomic.LoadUint64(&e.st.evicted), DroppedSegments: atomic.LoadUint64(&e.st.dropped)}
+	return core.TCPReassemblyStats{Enabled: e.cfg.Enabled, Running: e.running.Load(), ActiveConnections: atomic.LoadInt64(&e.st.active), ConnectionsOpened: atomic.LoadUint64(&e.st.opened), ConnectionsClosed: atomic.LoadUint64(&e.st.closed), BufferedBytes: atomic.LoadInt64(&e.st.buffered), SegmentsSeen: atomic.LoadUint64(&e.st.segments), BytesSeen: atomic.LoadUint64(&e.st.bytes), ChunksEmitted: atomic.LoadUint64(&e.st.chunks), BytesEmitted: atomic.LoadUint64(&e.st.emitted), OutOfOrderSegments: atomic.LoadUint64(&e.st.outOfOrder), RetransmittedBytes: atomic.LoadUint64(&e.st.retransmitted), OverlapSegments: atomic.LoadUint64(&e.st.overlaps), OverlapConflicts: atomic.LoadUint64(&e.st.overlapConflicts), GapRecoveries: atomic.LoadUint64(&e.st.gapRecoveries), EvictedConnections: atomic.LoadUint64(&e.st.evicted), DroppedSegments: atomic.LoadUint64(&e.st.dropped)}
 }

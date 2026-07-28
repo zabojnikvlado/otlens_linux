@@ -38,6 +38,7 @@ type ReconService struct {
 	Banner     string `json:"banner,omitempty"`
 	TLSSubject string `json:"tls_subject,omitempty"`
 	TLSIssuer  string `json:"tls_issuer,omitempty"`
+	Hostname   string `json:"hostname,omitempty"`
 }
 
 type ReconEvidence struct {
@@ -45,6 +46,13 @@ type ReconEvidence struct {
 	Value      string    `json:"value"`
 	Source     string    `json:"source"`
 	Confidence int       `json:"confidence"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+type ReconAuditStep struct {
+	Stage      string    `json:"stage"`
+	Status     string    `json:"status"`
+	Detail     string    `json:"detail,omitempty"`
 	ObservedAt time.Time `json:"observed_at"`
 }
 
@@ -60,6 +68,7 @@ type ReconResult struct {
 	OTIdentity map[string]string `json:"ot_identity,omitempty"`
 	Services   []ReconService    `json:"services,omitempty"`
 	Evidence   []ReconEvidence   `json:"evidence,omitempty"`
+	Audit      []ReconAuditStep  `json:"audit,omitempty"`
 	Error      string            `json:"error,omitempty"`
 	StartedAt  time.Time         `json:"started_at"`
 	FinishedAt time.Time         `json:"finished_at"`

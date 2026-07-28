@@ -1053,3 +1053,37 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 @media(max-width:980px){.sidebar{position:fixed;z-index:40;transform:translateX(-100%);box-shadow:10px 0 30px rgba(0,0,0,.35)}body.sidebar-open .sidebar{transform:translateX(0)}.sidebar-toggle{display:inline-block}.content-area{width:100%}.status-cluster .baseline-badge{display:none}}
 .nav-filter-hidden{display:none!important}
 .bulk-progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-top:18px}.bulk-progress-head+progress{width:100%;height:16px;margin:10px 0}.bulk-discovery-status{font-weight:700}.bulk-discovery-status.completed{color:#22c55e}.bulk-discovery-status.failed{color:#ef4444}.bulk-discovery-status.running{color:#60a5fa}.bulk-discovery-status.queued{color:#f59e0b}
+
+/* Compact checkbox filter chips.
+   Generic toolbar/search input rules assign a large min-width to every input,
+   including checkboxes. Keep VLAN and device-category chips sized only to
+   their checkbox plus label text. */
+.vlan-chip {
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+.vlan-chip input[type="checkbox"],
+.topology-search .vlan-chip input[type="checkbox"],
+.flows-toolbar .vlan-chip input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  min-width: 0;
+  max-width: 12px;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 12px;
+  box-sizing: border-box;
+}
+#vlan-filter-list,
+#devices-category-chips {
+  align-content: center;
+}
+#devices-category-chips .vlan-chip {
+  width: max-content;
+  min-width: 0;
+  flex: 0 0 auto;
+}
