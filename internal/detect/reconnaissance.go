@@ -54,8 +54,17 @@ func (e *Engine) handleReconnaissance(packet core.Packet) {
 		return
 	}
 
-	now := time.Now()
+	// packet.Timestamp, not time.Now(): the whole rolling-window
+	// scan-rate measurement below depends on this reflecting when
+	// packets actually happened, not when this sensor happened to
+	// process them — during PCAP analysis those are very different
+	// (packets replay as fast as the file reads, not paced to their
+	// original spacing). See c2beacon.go's identical concern.
+	now := packet.Timestamp
 
+	// hostScanSeen and portScanSeen are shared detector state. The packet
+	// event bus may have multiple producers and tests may invoke this handler
+	// concurrently, so all map reads, writes and pruning must be serialized.
 	e.scanMutex.Lock()
 
 	if e.hostScanSeen[packet.SrcIP] == nil {

@@ -46,15 +46,28 @@ func (r *Repository) ListIncidents(ctx context.Context, window time.Duration, mi
 	if minDistinctTypes < 2 {
 		minDistinctTypes = 2
 	}
+	// Sessionize alerts by sensor+asset. A gap greater than 30 minutes starts
+	// a new incident, preventing unrelated alerts from opposite ends of the
+	// 24-hour lookback from being merged merely because the IP is identical.
 	rows, err := r.db.QueryContext(ctx, `
+		WITH recent AS (
+			SELECT sensor_id, ip, type, alert_key, severity, first_seen, last_seen,
+			       CASE WHEN LAG(last_seen) OVER (PARTITION BY sensor_id, ip ORDER BY first_seen, last_seen) IS NULL
+			                 OR first_seen - LAG(last_seen) OVER (PARTITION BY sensor_id, ip ORDER BY first_seen, last_seen) > INTERVAL '30 minutes'
+			            THEN 1 ELSE 0 END AS new_session
+			FROM alert_history
+			WHERE last_seen > NOW() - ($1 * INTERVAL '1 second') AND ip != ''
+		), sessioned AS (
+			SELECT *, SUM(new_session) OVER (PARTITION BY sensor_id, ip ORDER BY first_seen, last_seen ROWS UNBOUNDED PRECEDING) AS session_id
+			FROM recent
+		)
 		SELECT sensor_id, ip,
 		       string_agg(DISTINCT type, ',' ORDER BY type),
 		       string_agg(alert_key, ',' ORDER BY last_seen DESC),
 		       string_agg(DISTINCT severity, ','),
 		       COUNT(*), MIN(first_seen), MAX(last_seen)
-		FROM alert_history
-		WHERE last_seen > NOW() - ($1 * INTERVAL '1 second') AND ip != ''
-		GROUP BY sensor_id, ip
+		FROM sessioned
+		GROUP BY sensor_id, ip, session_id
 		HAVING COUNT(DISTINCT type) >= $2
 		ORDER BY MAX(last_seen) DESC`,
 		int64(window/time.Second), minDistinctTypes,

@@ -32,6 +32,19 @@ debug:
   enabled: false
 
 capture:
+  tcp_reassembly:
+    enabled: true
+    max_connections: 50000
+    max_buffer_per_direction: 4194304
+    max_total_buffer: 536870912
+    idle_timeout: 2m
+    closed_timeout: 15s
+    max_out_of_order_segments: 256
+    max_sequence_gap: 16777216
+    gap_recovery_timeout: 2s
+    shard_count: 32
+    # first_seen matches common IDS behavior; last_seen is useful for testing evasion cases.
+    overlap_policy: first_seen
   # Data source: "pcap" (live packet capture — needs Npcap/libpcap
   # installed and admin/root rights) or "ipfix" (receive flow records
   # exported by a router/switch/probe over UDP — no local capture
@@ -158,6 +171,43 @@ detect:
   # service (license check-in, monitoring agent) if its timing happens
   # to be regular enough; tune the thresholds below rather than
   # disabling if that's noisy for your network.
+  # Threat-intelligence matching and passive DNS retention. IOC sources are
+  # managed centrally in the Threat Intel tab and synchronized to this sensor.
+  threatintel:
+    enabled: false
+    refreshinterval: 1h # local cache maintenance; Central sync cadence controls delivery
+    httptimeout: 15s
+    maxdnsobservations: 5000
+
+  # Online OT tag anomaly profile. Scores are namespaced as anomaly_score/anomaly_confidence.
+  otvalueanomaly:
+    enabled: true
+    minsamples: 20
+    zscorethreshold: 4.0
+    ratemultiplier: 6.0
+    stuckafter: 30m
+    missingafter: 10m
+    togglewindow: 5m
+    togglethreshold: 10
+    unexpectedwrites: true
+    checkinterval: 1m
+  # Flow-based internal administrative movement heuristics.
+  lateralmovement:
+    enabled: true
+    window: 5m
+    fanoutthreshold: 5
+    largetransferbytes: 104857600
+    pivotwindow: 10m
+    adminports: [22, 135, 139, 445, 3389, 5985, 5986]
+  # DNS and threat-intel signals combined with the existing beacon detector.
+  c2correlation:
+    enabled: true
+    minscore: 60
+    dnswindow: 10m
+    nxdomainthreshold: 20
+    uniquesubdomainthreshold: 20
+    longlabellength: 45
+
   c2beacon:
     enabled: true
     # Connection attempts to the same destination+port needed before

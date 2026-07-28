@@ -15,9 +15,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +35,7 @@ import (
 )
 
 type Server struct {
+	StartedAt        time.Time
 	Repo             *Repository
 	ManagementToken  string
 	SensorToken      string
@@ -45,10 +50,10 @@ type Server struct {
 	// offline-sweep ticker and TLS listeners in main.go read the same
 	// config.CentralConfig values directly, this is just so the UI can
 	// show what's actually running without a second config parse.
-	SensorOfflineAfter   time.Duration
-	SensorCheckInterval  time.Duration
-	WebTLSEnabled        bool
-	SensorAPITLSEnabled  bool
+	SensorOfflineAfter  time.Duration
+	SensorCheckInterval time.Duration
+	WebTLSEnabled       bool
+	SensorAPITLSEnabled bool
 	// SessionDuration is the sliding-expiry window for logged-in Central
 	// UI sessions — see authMiddleware. Defaults to 6h (auth.session_duration).
 	SessionDuration time.Duration
@@ -59,12 +64,14 @@ type Server struct {
 	Notifications NotificationConfig
 	// Reports drives the scheduled report pipeline — see reports.go.
 	Reports ReportsConfig
+	// RuntimeConfig contains only non-secret effective configuration values for the Settings UI.
+	RuntimeConfig map[string]map[string]interface{}
 	// Vuln is looked up by asset vendor only (see package vuln's doc
 	// comment for why that's a real precision limit, not an oversight) —
 	// never nil; main.go always sets it to at least an empty *vuln.Database
 	// so this handler never needs its own "feature disabled" branch.
-	Vuln      *vuln.Database
-	web       *http.Server
+	Vuln *vuln.Database
+	web  *http.Server
 	// loginFailures tracks consecutive failed login attempts per
 	// username, purely in-memory (reset on Central restart — that's
 	// fine, this is a detection signal, not an account lockout
@@ -237,14 +244,25 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/change-password", s.changePassword)
 
 	api.GET("/sensors", requireView(ViewSensors), s.sensors)
+	api.GET("/sensors/metrics", requireView(ViewSensors), s.sensorMetricsOverview)
+	api.GET("/sensors/:id/metrics", requireView(ViewSensors), s.sensorMetricsHistory)
+	api.GET("/healthcheck", requireView(ViewSensors), s.healthcheck)
+	api.GET("/reconnaissance/credentials", requireView(ViewAssets), s.listReconCredentials)
+	api.POST("/reconnaissance/credentials", requireAction(ActionDataManagement), s.createReconCredential)
+	api.DELETE("/reconnaissance/credentials/:id", requireAction(ActionDataManagement), s.deleteReconCredential)
+	api.GET("/reconnaissance/jobs", requireView(ViewAssets), s.listReconJobs)
+	api.POST("/reconnaissance/jobs", requireAction(ActionAssetConfirmDelete), s.createReconJob)
 	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
 	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
 	api.GET("/devices", requireView(ViewAssets), s.devices)
 	api.POST("/sensors/:id/assets/:mac/category", requireAction(ActionAssetConfirmDelete), s.setDeviceCategory)
 	api.POST("/sensors/:id/devices/import", requireAction(ActionAssetConfirmDelete), s.importDeviceList)
+	api.POST("/sensors/:id/tags/import", requireAction(ActionDataManagement), s.importTagList)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
+	api.POST("/vulnerabilities/source/upload", requireAction(ActionDataManagement), s.uploadVulnerabilitySource)
+	api.POST("/vulnerabilities/source/url", requireAction(ActionDataManagement), s.refreshVulnerabilitySourceURL)
 	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
 	api.GET("/sensors/:id/segmentation-settings", requireView(ViewTopology), s.getMaxLevelJump)
 	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
@@ -254,15 +272,36 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/settings", requireView(ViewSettings), s.settings)
 	api.GET("/audit", requireView(ViewAudit), s.auditLog)
 	api.GET("/topology", requireView(ViewTopology), s.topology)
+	api.GET("/sensors/:id/purdue-topology", requireView(ViewTopology), s.purdueTopology)
+	api.GET("/sensors/:id/itot-paths", requireView(ViewTopology), s.observedITOTPaths)
+	api.GET("/asset-context", requireView(ViewAssets), s.assetContexts)
+	api.PUT("/sensors/:id/assets/:ip/context", requireAction(ActionDataManagement), s.setAssetContext)
 	api.GET("/tags", requireView(ViewTags), s.tags)
+	api.GET("/dns-observations", requireView(ViewAlerts), s.dnsObservations)
+	api.GET("/smb-observations", requireView(ViewAlerts), s.smbObservations)
+	api.GET("/threat-intel/sources", requireView(ViewAlerts), s.listThreatIntelSources)
+	api.POST("/threat-intel/sources", requireAction(ActionDataManagement), s.createThreatIntelSource)
+	api.POST("/threat-intel/sources/:id/refresh", requireAction(ActionDataManagement), s.refreshThreatIntelSourceHTTP)
+	api.DELETE("/threat-intel/sources/:id", requireAction(ActionDataManagement), s.deleteThreatIntelSource)
+	api.GET("/threat-intel/indicators", requireView(ViewAlerts), s.listThreatIntelIndicators)
+	api.POST("/threat-intel/indicators", requireAction(ActionDataManagement), s.addThreatIntelIndicator)
+	api.DELETE("/threat-intel/indicators/:id", requireAction(ActionDataManagement), s.deleteThreatIntelIndicator)
+	api.POST("/threat-intel/import", requireAction(ActionDataManagement), s.importThreatIntel)
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
 	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
 	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
 	api.GET("/incidents", requireView(ViewAlerts), s.incidents)
+	api.GET("/asset-security-status", requireView(ViewAssets), s.assetSecurityStatuses)
+	api.PUT("/sensors/:id/assets/:ip/security-status", requireAction(ActionAssetConfirmDelete), s.setAssetSecurityStatus)
+	api.POST("/malware-incidents/contact-trace", requireAction(ActionAlertConfirmApprove), s.createMalwareContactTrace)
+	api.GET("/malware-incidents/:id", requireView(ViewAlerts), s.getMalwareIncident)
+	api.GET("/malware-incidents/:id/contact-graph", requireView(ViewTopology), s.getMalwareContactGraph)
 	api.GET("/baseline", requireView(ViewDashboard), s.baseline)
 	api.GET("/dashboard/trends", requireView(ViewDashboard), s.dashboardTrends)
 	api.GET("/reports", requireView(ViewDashboard), s.listReports)
 	api.GET("/reports/:id", requireView(ViewDashboard), s.getReport)
+	api.GET("/reports/:id/pdf", requireView(ViewDashboard), s.downloadReportPDF)
+	api.DELETE("/reports/:id", requireAction(ActionDataManagement), s.deleteReport)
 	api.POST("/reports/generate", requireAction(ActionDataManagement), s.generateReportNow)
 	api.GET("/rules", requireView(ViewRules), s.rules)
 	api.GET("/rules/export", requireView(ViewRules), s.exportRules)
@@ -310,6 +349,7 @@ func (s *Server) SensorRouter() *gin.Engine {
 	api.GET("/sensors/:id/analysis/jobs/next", s.nextAnalysisJob)
 	api.GET("/sensors/:id/analysis/jobs/:job/pcap", s.downloadAnalysisPCAP)
 	api.POST("/sensors/:id/analysis/jobs/:job/result", s.analysisResult)
+	api.POST("/sensors/:id/reconnaissance/jobs/:job/result", s.reconResult)
 	return r
 }
 
@@ -365,6 +405,7 @@ func (s *Server) assets(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	profiles, _ := s.Repo.AssetReconProfiles(c)
 	out := make([]map[string]interface{}, 0)
 	for _, snapshot := range snapshots {
 		var graph struct {
@@ -380,6 +421,26 @@ func (s *Server) assets(c *gin.Context) {
 		}
 		for _, node := range graph.Nodes {
 			node["SensorID"] = snapshot.SensorID
+			ip := fmt.Sprint(node["IP"])
+			if rp, ok := profiles[snapshot.SensorID+"\x00"+ip]; ok {
+				if rp.Hostname != "" {
+					node["ReconHostname"] = rp.Hostname
+					if fmt.Sprint(node["Hostname"]) == "" {
+						node["Hostname"] = rp.Hostname
+					}
+				}
+				if rp.Vendor != "" {
+					node["ReconVendor"] = rp.Vendor
+				}
+				node["ReconOS"] = rp.OS
+				node["ReconModel"] = rp.Model
+				node["ReconFirmware"] = rp.Firmware
+				node["ReconSerial"] = rp.Serial
+				node["ReconOTIdentity"] = rp.OTIdentity
+				node["ReconServices"] = rp.Services
+				node["ReconEvidence"] = rp.Evidence
+				node["LastProfiledAt"] = rp.LastProfiledAt
+			}
 			score, _ := strconv.Atoi(fmt.Sprint(node["Score"]))
 			node["HoneypotThreshold"] = threshold
 			node["IsHoneypot"] = score >= threshold
@@ -469,35 +530,59 @@ func (s *Server) setDeviceCategory(c *gin.Context) {
 // not fatal to the rest of the import — see ImportAssetOverrides.
 func (s *Server) importDeviceList(c *gin.Context) {
 	sensorID := c.Param("id")
-	file, _, err := c.Request.FormFile("file")
+	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required (multipart form field 'file')"})
 		return
 	}
 	defer file.Close()
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = -1
 	rows := make([]AssetOverride, 0)
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid CSV: " + err.Error()})
+	isJSON := strings.EqualFold(filepath.Ext(header.Filename), ".json") || strings.Contains(strings.ToLower(header.Header.Get("Content-Type")), "json")
+	if isJSON {
+		var raw []map[string]interface{}
+		if err := json.NewDecoder(io.LimitReader(file, 10<<20)).Decode(&raw); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
 			return
 		}
-		if len(record) < 1 {
-			continue
+		for _, item := range raw {
+			mac := strings.TrimSpace(fmt.Sprint(firstValue(item, "mac", "MAC", "mac_address")))
+			if mac == "" {
+				continue
+			}
+			rows = append(rows, AssetOverride{MAC: mac, Category: strings.TrimSpace(fmt.Sprint(firstValue(item, "category", "Category", "class"))), Name: strings.TrimSpace(fmt.Sprint(firstValue(item, "name", "Name", "hostname")))})
 		}
-		o := AssetOverride{MAC: record[0]}
-		if len(record) > 1 {
-			o.Category = record[1]
+	} else {
+		reader := csv.NewReader(io.LimitReader(file, 10<<20))
+		reader.FieldsPerRecord = -1
+		first := true
+		for {
+			record, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid CSV: " + err.Error()})
+				return
+			}
+			if len(record) < 1 {
+				continue
+			}
+			if first && strings.EqualFold(strings.TrimSpace(record[0]), "mac") {
+				first = false
+				continue
+			}
+			first = false
+			o := AssetOverride{MAC: strings.TrimSpace(record[0])}
+			if len(record) > 1 {
+				o.Category = strings.TrimSpace(record[1])
+			}
+			if len(record) > 2 {
+				o.Name = strings.TrimSpace(record[2])
+			}
+			if o.MAC != "" {
+				rows = append(rows, o)
+			}
 		}
-		if len(record) > 2 {
-			o.Name = record[2]
-		}
-		rows = append(rows, o)
 	}
 	applied, err := s.Repo.ImportAssetOverrides(c, sensorID, rows, identityFromContext(c).Username)
 	if err != nil {
@@ -507,6 +592,202 @@ func (s *Server) importDeviceList(c *gin.Context) {
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device list imported: %d row(s) for %s", applied, sensorID), sensorID)
 	c.JSON(http.StatusOK, gin.H{"applied": applied})
 }
+
+func importedTagKey(tag map[string]interface{}) string {
+	if key := strings.TrimSpace(fmt.Sprint(firstValue(tag, "Key", "key"))); key != "" {
+		return key
+	}
+	return fmt.Sprintf("%v|%v|%v|%v|%v", firstValue(tag, "DeviceIP", "device_ip", "ip"), firstValue(tag, "DevicePort", "device_port", "port"), firstValue(tag, "Protocol", "protocol"), firstValue(tag, "AddressSpace", "address_space"), firstValue(tag, "Address", "address"))
+}
+
+func normalizeImportedTag(in map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	fields := map[string][]string{"DeviceIP": {"DeviceIP", "device_ip", "ip"}, "DevicePort": {"DevicePort", "device_port", "port"}, "Protocol": {"Protocol", "protocol"}, "AddressSpace": {"AddressSpace", "address_space"}, "Address": {"Address", "address"}, "Name": {"Name", "name"}, "Operation": {"Operation", "operation", "op"}, "LastValue": {"LastValue", "last_value", "value"}, "MinValue": {"MinValue", "min_value"}, "MaxValue": {"MaxValue", "max_value"}}
+	for dst, keys := range fields {
+		if v := firstValue(in, keys...); fmt.Sprint(v) != "" {
+			out[dst] = v
+		}
+	}
+	out["Key"] = importedTagKey(out)
+	out["Imported"] = true
+	out["LastChangeAt"] = time.Now().UTC()
+	return out
+}
+
+func (s *Server) importTagList(c *gin.Context) {
+	sensorID := c.Param("id")
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+	items := make([]map[string]interface{}, 0)
+	isJSON := strings.EqualFold(filepath.Ext(header.Filename), ".json") || strings.Contains(strings.ToLower(header.Header.Get("Content-Type")), "json")
+	if isJSON {
+		if err := json.NewDecoder(io.LimitReader(file, 10<<20)).Decode(&items); err != nil {
+			c.JSON(400, gin.H{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+	} else {
+		r := csv.NewReader(io.LimitReader(file, 10<<20))
+		r.FieldsPerRecord = -1
+		var headerRow []string
+		for {
+			row, err := r.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				c.JSON(400, gin.H{"error": "invalid CSV: " + err.Error()})
+				return
+			}
+			if len(row) == 0 {
+				continue
+			}
+			if headerRow == nil && strings.Contains(strings.ToLower(strings.Join(row, ",")), "device_ip") {
+				headerRow = row
+				continue
+			}
+			m := map[string]interface{}{}
+			names := headerRow
+			if names == nil {
+				names = []string{"device_ip", "device_port", "protocol", "address_space", "address", "name", "operation"}
+			}
+			for i, v := range row {
+				if i < len(names) {
+					m[strings.TrimSpace(names[i])] = strings.TrimSpace(v)
+				}
+			}
+			items = append(items, m)
+		}
+	}
+	tx, err := s.Repo.db.BeginTx(c, nil)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	applied := 0
+	for _, raw := range items {
+		tag := normalizeImportedTag(raw)
+		key := importedTagKey(tag)
+		if strings.Trim(key, "|") == "" {
+			continue
+		}
+		blob, _ := json.Marshal(tag)
+		if _, err = tx.ExecContext(c, `INSERT INTO imported_tags(sensor_id,tag_key,tag,imported_at,imported_by) VALUES($1,$2,$3,NOW(),$4) ON CONFLICT(sensor_id,tag_key) DO UPDATE SET tag=EXCLUDED.tag,imported_at=NOW(),imported_by=EXCLUDED.imported_by`, sensorID, key, blob, identityFromContext(c).Username); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		applied++
+	}
+	if err = tx.Commit(); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("tag list imported: %d row(s) for %s", applied, sensorID), sensorID)
+	c.JSON(200, gin.H{"applied": applied})
+}
+
+func (s *Server) loadVulnerabilityBytes(c *gin.Context, name string, data []byte) {
+	if len(data) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty vulnerability snapshot"})
+		return
+	}
+	if len(data) > 20<<20 {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "vulnerability snapshot exceeds 20 MB"})
+		return
+	}
+	dir := s.AnalysisDir
+	if strings.TrimSpace(dir) == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	path := filepath.Join(dir, "vulnerability-current.csv")
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if s.Vuln == nil {
+		s.Vuln = vuln.New()
+	}
+	count, err := s.Vuln.LoadCSV(path)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("vulnerability source loaded: %s (%d advisories)", name, count), "")
+	c.JSON(http.StatusOK, gin.H{"loaded": count, "source": name})
+}
+
+func (s *Server) uploadVulnerabilitySource(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file is required"})
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (20<<20)+1))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	s.loadVulnerabilityBytes(c, header.Filename, data)
+}
+
+func (s *Server) refreshVulnerabilitySourceURL(c *gin.Context) {
+	var in struct {
+		URL string `json:"url"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(in.URL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only valid HTTP/HTTPS URLs are supported"})
+		return
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source host could not be resolved"})
+		return
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "private, loopback and link-local source addresses are blocked"})
+			return
+		}
+	}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}}
+	req, _ := http.NewRequestWithContext(c, http.MethodGet, u.String(), nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("source returned HTTP %d", resp.StatusCode)})
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (20<<20)+1))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	s.loadVulnerabilityBytes(c, u.String(), data)
+}
+
 // Matching is vendor-only — see package vuln's doc comment for why OTLens
 // has no passive way to fingerprint a device's exact product/firmware, so
 // this narrows to "known issues affecting this vendor," not "known issues
@@ -714,26 +995,27 @@ func (s *Server) settings(c *gin.Context) {
 		vulnCount = s.Vuln.Count()
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"SensorOfflineAfterSeconds":  int64(s.SensorOfflineAfter / time.Second),
-		"SensorCheckIntervalSeconds": int64(s.SensorCheckInterval / time.Second),
-		"SessionDurationSeconds":     int64(s.SessionDuration / time.Second),
-		"SIEMEnabled":                s.SIEMEnabled,
-		"AnalysisEnabled":            s.AnalysisEnabled,
-		"VulnerabilityLoaded":        vulnCount > 0,
-		"VulnerabilityCount":         vulnCount,
-		"WebTLSEnabled":              s.WebTLSEnabled,
-		"SensorAPITLSEnabled":        s.SensorAPITLSEnabled,
-		"RetentionEnabled":           s.Retention.Enabled,
-		"RetentionIntervalHours":     s.Retention.Interval.Hours(),
-		"TelemetryRetentionDays":     s.Retention.TelemetryDays,
-		"AlertsRetentionDays":        s.Retention.AlertsDays,
-		"AuditRetentionDays":         s.Retention.AuditDays,
-		"MaxDatabaseSizeGB":          s.Retention.MaxDatabaseSizeGB,
-		"TargetDatabaseSizeGB":       s.Retention.TargetDatabaseSizeGB,
-		"NotificationsEnabled":       s.Notifications.Enabled,
-		"NotificationsMinSeverity":   s.Notifications.MinSeverity,
-		"NotificationsEmailEnabled":  s.Notifications.Email.Enabled,
+		"SensorOfflineAfterSeconds":   int64(s.SensorOfflineAfter / time.Second),
+		"SensorCheckIntervalSeconds":  int64(s.SensorCheckInterval / time.Second),
+		"SessionDurationSeconds":      int64(s.SessionDuration / time.Second),
+		"SIEMEnabled":                 s.SIEMEnabled,
+		"AnalysisEnabled":             s.AnalysisEnabled,
+		"VulnerabilityLoaded":         vulnCount > 0,
+		"VulnerabilityCount":          vulnCount,
+		"WebTLSEnabled":               s.WebTLSEnabled,
+		"SensorAPITLSEnabled":         s.SensorAPITLSEnabled,
+		"RetentionEnabled":            s.Retention.Enabled,
+		"RetentionIntervalHours":      s.Retention.Interval.Hours(),
+		"TelemetryRetentionDays":      s.Retention.TelemetryDays,
+		"AlertsRetentionDays":         s.Retention.AlertsDays,
+		"AuditRetentionDays":          s.Retention.AuditDays,
+		"MaxDatabaseSizeGB":           s.Retention.MaxDatabaseSizeGB,
+		"TargetDatabaseSizeGB":        s.Retention.TargetDatabaseSizeGB,
+		"NotificationsEnabled":        s.Notifications.Enabled,
+		"NotificationsMinSeverity":    s.Notifications.MinSeverity,
+		"NotificationsEmailEnabled":   s.Notifications.Email.Enabled,
 		"NotificationsWebhookEnabled": s.Notifications.Webhook.Enabled,
+		"RuntimeConfig":               s.RuntimeConfig,
 	})
 }
 
@@ -800,6 +1082,28 @@ func (s *Server) tags(c *gin.Context) {
 				stableKey = fmt.Sprintf("%v|%v|%v|%v|%v", tag["DeviceIP"], tag["DevicePort"], tag["Protocol"], tag["AddressSpace"], tag["Address"])
 			}
 			key := snapshot.SensorID + "::" + stableKey
+			if _, exists := unique[key]; !exists {
+				order = append(order, key)
+			}
+			unique[key] = tag
+		}
+	}
+	rows, queryErr := s.Repo.db.QueryContext(c, `SELECT sensor_id, tag FROM imported_tags ORDER BY imported_at`)
+	if queryErr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sensorID string
+			var raw []byte
+			if rows.Scan(&sensorID, &raw) != nil {
+				continue
+			}
+			var tag map[string]interface{}
+			if json.Unmarshal(raw, &tag) != nil {
+				continue
+			}
+			tag["SensorID"] = sensorID
+			stableKey := importedTagKey(tag)
+			key := sensorID + "::" + stableKey
 			if _, exists := unique[key]; !exists {
 				order = append(order, key)
 			}
@@ -1053,7 +1357,6 @@ func aggregateEdges(flows []topology.Edge) []aggregatedEdge {
 	return out
 }
 
-
 // topologyFingerprint hashes every sensor's telemetry sequence number into
 // a single stable string. It changes if and only if at least one sensor
 // has posted new telemetry since the last call — this is what lets
@@ -1198,6 +1501,14 @@ func validateManagementRule(req *management.Rule) error {
 	}
 	if req.Kind != "custom" {
 		return fmt.Errorf("only custom rules can be created")
+	}
+	if req.Scope == "" {
+		req.Scope = "Universal"
+	}
+	switch req.Scope {
+	case "IT", "OT", "IT/OT", "Universal":
+	default:
+		return fmt.Errorf("scope must be IT, OT, IT/OT or Universal")
 	}
 	if req.Severity == "" {
 		req.Severity = "medium"
@@ -1437,6 +1748,158 @@ func (s *Server) getReport(c *gin.Context) {
 // tab — covers the 7 days immediately before this call, same window a
 // scheduled run would use, rather than needing to wait for the next
 // scheduled time just to see what a report looks like.
+
+func (s *Server) deleteReport(c *gin.Context) {
+	id := c.Param("id")
+	if err := s.Repo.DeleteReport(c, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "report not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, "report deleted: "+id, "")
+	c.Status(http.StatusNoContent)
+}
+
+var reportTagRE = regexp.MustCompile(`<[^>]+>`)
+
+func reportPlainText(htmlBody string) string {
+	x := strings.ReplaceAll(htmlBody, "&ndash;", "-")
+	x = strings.ReplaceAll(x, "&mdash;", "-")
+	x = strings.ReplaceAll(x, "&nbsp;", " ")
+	x = strings.ReplaceAll(x, "&amp;", "&")
+	x = strings.ReplaceAll(x, "&lt;", "<")
+	x = strings.ReplaceAll(x, "&gt;", ">")
+	x = regexp.MustCompile(`(?i)</(h1|h2|h3|p|div|tr|li)>`).ReplaceAllString(x, "\n")
+	x = reportTagRE.ReplaceAllString(x, "")
+	lines := strings.Split(x, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if v := strings.TrimSpace(strings.Join(strings.Fields(line), " ")); v != "" {
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func pdfEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 32 || r > 126 {
+			if r == '\n' {
+				b.WriteByte('\n')
+			} else {
+				b.WriteByte('?')
+			}
+			continue
+		}
+		if r == '(' || r == ')' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+func wrapPDFText(text string, width int) []string {
+	var out []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		words := strings.Fields(paragraph)
+		line := ""
+		for _, w := range words {
+			if len(line)+1+len(w) > width && line != "" {
+				out = append(out, line)
+				line = w
+			} else if line == "" {
+				line = w
+			} else {
+				line += " " + w
+			}
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+func basicPDF(text string) []byte {
+	lines := wrapPDFText(text, 92)
+	const perPage = 55
+	pages := (len(lines) + perPage - 1) / perPage
+	if pages < 1 {
+		pages = 1
+	}
+
+	// PDF objects are explicitly one-based. Object 1 is the catalog,
+	// object 2 the pages tree and object 3 the shared Helvetica font.
+	// Each page then owns one page object and one content-stream object.
+	objectCount := 3 + pages*2
+	objects := make([]string, objectCount+1)
+	pageIDs := make([]int, pages)
+	contentIDs := make([]int, pages)
+
+	objects[1] = "<< /Type /Catalog /Pages 2 0 R >>"
+	objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+
+	for i := 0; i < pages; i++ {
+		pageID := 4 + i*2
+		contentID := pageID + 1
+		pageIDs[i] = pageID
+		contentIDs[i] = contentID
+
+		start := i * perPage
+		end := start + perPage
+		if end > len(lines) {
+			end = len(lines)
+		}
+		var content strings.Builder
+		content.WriteString("BT\n/F1 10 Tf\n48 790 Td\n13 TL\n")
+		for _, line := range lines[start:end] {
+			content.WriteString("(" + pdfEscape(line) + ") Tj\nT*\n")
+		}
+		content.WriteString("ET\n")
+		stream := content.String()
+		objects[contentID] = fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len([]byte(stream)), stream)
+		objects[pageID] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentID)
+	}
+
+	kids := make([]string, pages)
+	for i, id := range pageIDs {
+		kids[i] = fmt.Sprintf("%d 0 R", id)
+	}
+	objects[2] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pages)
+
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
+	offsets := make([]int, objectCount+1)
+	for id := 1; id <= objectCount; id++ {
+		offsets[id] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", id, objects[id])
+	}
+	xrefOffset := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n", objectCount+1)
+	b.WriteString("0000000000 65535 f \n")
+	for id := 1; id <= objectCount; id++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[id])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", objectCount+1, xrefOffset)
+	return b.Bytes()
+}
+
+func (s *Server) downloadReportPDF(c *gin.Context) {
+	rep, err := s.Repo.GetReport(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "report not found"})
+		return
+	}
+	pdf := basicPDF(reportPlainText(rep.HTML))
+	filename := strings.ReplaceAll(rep.ID, "\"", "") + ".pdf"
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Data(http.StatusOK, "application/pdf", pdf)
+	s.logAudit(c, identityFromContext(c).Username, "report PDF downloaded: "+rep.ID, "")
+}
+
 func (s *Server) generateReportNow(c *gin.Context) {
 	now := time.Now().UTC()
 	if err := s.GenerateAndDispatchReport(c, now.AddDate(0, 0, -7), now); err != nil {
@@ -1590,6 +2053,65 @@ func (s *Server) deleteSensor(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
+func metricRange(value string) time.Duration {
+	switch value {
+	case "15m":
+		return 15 * time.Minute
+	case "6h":
+		return 6 * time.Hour
+	case "24h":
+		return 24 * time.Hour
+	default:
+		return time.Hour
+	}
+}
+func (s *Server) sensorMetricsHistory(c *gin.Context) {
+	samples, err := s.Repo.SensorMetricHistory(c, c.Param("id"), time.Now().UTC().Add(-metricRange(c.Query("range"))), 10000)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, samples)
+}
+func (s *Server) sensorMetricsOverview(c *gin.Context) {
+	samples, err := s.Repo.LatestSensorMetrics(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, samples)
+}
+func (s *Server) healthcheck(c *gin.Context) {
+	start := time.Now()
+	dbOK := s.Repo.db.PingContext(c) == nil
+	latency := float64(time.Since(start).Microseconds()) / 1000
+	samples, err := s.Repo.LatestSensorMetrics(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	started := s.StartedAt
+	if started.IsZero() {
+		started = time.Now()
+	}
+	h := management.CentralHealth{RecordedAt: time.Now().UTC(), UptimeSeconds: int64(time.Since(started).Seconds()), GoRoutines: runtime.NumGoroutine(), MemoryAllocBytes: ms.Alloc, MemorySysBytes: ms.Sys, HeapObjects: ms.HeapObjects, DatabaseOK: dbOK, DatabaseLatencyMS: latency, SensorsTotal: len(samples)}
+	for _, x := range samples {
+		switch x.HealthState {
+		case "healthy":
+			h.SensorsHealthy++
+		case "warning":
+			h.SensorsWarning++
+		case "critical":
+			h.SensorsCritical++
+		case "offline":
+			h.SensorsOffline++
+		}
+	}
+	c.JSON(200, gin.H{"central": h, "sensors": samples})
+}
+
 func (s *Server) sensors(c *gin.Context) {
 	v, e := s.Repo.ListSensors(c)
 	if e != nil {
@@ -1600,12 +2122,19 @@ func (s *Server) sensors(c *gin.Context) {
 }
 func (s *Server) sync(c *gin.Context) {
 	commands, _ := s.Repo.PopCommands(c, c.Param("id"))
-	rs, e := s.Repo.AssignedRuleSet(c, c.Param("id"))
-	if e != nil {
-		c.JSON(200, management.SyncResponse{RulesVersion: 0, Commands: commands})
-		return
+	response := management.SyncResponse{Commands: commands}
+	if snapshot, err := s.Repo.ThreatIntelSnapshot(c); err == nil {
+		response.ThreatIntelVersion = snapshot.Version
+		sensorVersion, _ := strconv.ParseInt(c.Query("threat_intel_version"), 10, 64)
+		if sensorVersion != snapshot.Version {
+			response.ThreatIntel = &snapshot
+		}
 	}
-	c.JSON(200, management.SyncResponse{RulesVersion: rs.Version, RuleSet: rs, Commands: commands})
+	if rs, err := s.Repo.AssignedRuleSet(c, c.Param("id")); err == nil {
+		response.RulesVersion = rs.Version
+		response.RuleSet = rs
+	}
+	c.JSON(200, response)
 }
 func (s *Server) putRuleset(c *gin.Context) {
 	var rs management.RuleSet
@@ -1937,4 +2466,129 @@ func (s *Server) downloadBackup(c *gin.Context) {
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".json"))
 	c.Data(200, "application/json", b)
+}
+
+func (s *Server) assetSecurityStatuses(c *gin.Context) {
+	rows, err := s.Repo.ListAssetSecurityStatuses(c, strings.TrimSpace(c.Query("sensor_id")))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, rows)
+}
+
+func (s *Server) setAssetSecurityStatus(c *gin.Context) {
+	var in struct {
+		Status        string     `json:"status"`
+		Reason        string     `json:"reason"`
+		Source        string     `json:"source"`
+		DetectedAt    *time.Time `json:"detected_at"`
+		UpdatedBy     string     `json:"updated_by"`
+		AutoTrace     bool       `json:"auto_trace"`
+		LookbackHours int        `json:"lookback_hours"`
+		MaxHops       int        `json:"max_hops"`
+	}
+	if c.ShouldBindJSON(&in) != nil || validateSecurityStatus(strings.ToLower(in.Status)) != nil {
+		c.JSON(400, gin.H{"error": "invalid security status"})
+		return
+	}
+	if in.Source == "" {
+		in.Source = "manual"
+	}
+	v := AssetSecurityStatus{SensorID: c.Param("id"), AssetIP: c.Param("ip"), Status: strings.ToLower(in.Status), Reason: in.Reason, Source: in.Source, DetectedAt: in.DetectedAt, UpdatedBy: in.UpdatedBy}
+	if err := s.Repo.SetAssetSecurityStatus(c, v); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	out := gin.H{"status": v}
+	if in.AutoTrace && (v.Status == "infected" || v.Status == "suspected") {
+		incident, err := s.Repo.CreateContactTrace(c, v.SensorID, v.AssetIP, in.LookbackHours, in.MaxHops)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		out["incident"] = incident
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("asset security status set: %s %s", v.AssetIP, v.Status), v.SensorID)
+	c.JSON(200, out)
+}
+
+func (s *Server) createMalwareContactTrace(c *gin.Context) {
+	var in struct {
+		SensorID      string `json:"sensor_id"`
+		AssetIP       string `json:"asset_ip"`
+		LookbackHours int    `json:"lookback_hours"`
+		MaxHops       int    `json:"max_hops"`
+	}
+	if c.ShouldBindJSON(&in) != nil || strings.TrimSpace(in.SensorID) == "" || strings.TrimSpace(in.AssetIP) == "" {
+		c.JSON(400, gin.H{"error": "sensor_id and asset_ip are required"})
+		return
+	}
+	v, err := s.Repo.CreateContactTrace(c, in.SensorID, in.AssetIP, in.LookbackHours, in.MaxHops)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("malware contact trace created: incident %d for %s", v.ID, v.InitialAssetIP), v.SensorID)
+	c.JSON(201, v)
+}
+func (s *Server) getMalwareIncident(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid incident id"})
+		return
+	}
+	v, err := s.Repo.GetMalwareIncident(c, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "incident not found"})
+		} else {
+			c.JSON(500, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(200, v)
+}
+func (s *Server) getMalwareContactGraph(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid incident id"})
+		return
+	}
+	v, err := s.Repo.GetMalwareIncident(c, id)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "incident not found"})
+		return
+	}
+	c.JSON(200, v.Graph())
+}
+
+func (s *Server) dnsObservations(c *gin.Context) {
+	limit := 500
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	rows, err := s.Repo.ListDNSObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("query")), strings.TrimSpace(c.Query("client_ip")), limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (s *Server) smbObservations(c *gin.Context) {
+	limit := 500
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	rows, err := s.Repo.ListSMBObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
 }

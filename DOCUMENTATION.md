@@ -378,6 +378,16 @@ sensor pauses live capture, processes the file, then resumes. Needs
 `analysis_manage` to upload/delete; viewing the job list only needs the
 Analysis tab's view permission.
 
+Packets replay with their *original* capture timestamps preserved (not
+the time of the analysis run), so detection rules that measure timing
+— reconnaissance and C2 beaconing, see `DETECTION_RULES.md` — see the
+traffic's real pacing, not however fast the file happens to be read.
+Connections found this way also aren't restricted to private/internal addresses the way the Topology map's live-capture
+edges are (see [Topology](#topology)) — seeing what a device talked to
+externally is often the whole point of analyzing a suspicious capture,
+and a one-shot bounded file doesn't have live capture's unbounded-growth
+concern that restriction exists for.
+
 ### Users
 
 Every role can open this tab — everyone needs somewhere to change their

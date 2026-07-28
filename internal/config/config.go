@@ -14,6 +14,23 @@ import (
 	"github.com/spf13/viper"
 )
 
+type ThreatIntelIndicator struct {
+	Type       string `mapstructure:"type"`
+	Value      string `mapstructure:"value"`
+	Provider   string `mapstructure:"provider"`
+	ThreatType string `mapstructure:"threat_type"`
+	Confidence int    `mapstructure:"confidence"`
+}
+
+type ThreatIntelFeed struct {
+	Name          string `mapstructure:"name"`
+	URL           string `mapstructure:"url"`
+	Path          string `mapstructure:"path"`
+	Format        string `mapstructure:"format"`
+	IndicatorType string `mapstructure:"indicator_type"`
+	Confidence    int    `mapstructure:"confidence"`
+}
+
 type Config struct {
 	App struct {
 		Name    string
@@ -59,6 +76,20 @@ type Config struct {
 		BPFFilter   string
 
 		// IPFIX settings, only used when Mode is "ipfix".
+		TCPReassembly struct {
+			Enabled               bool          `mapstructure:"enabled"`
+			MaxConnections        int           `mapstructure:"max_connections"`
+			MaxBufferPerDirection int           `mapstructure:"max_buffer_per_direction"`
+			MaxTotalBuffer        int           `mapstructure:"max_total_buffer"`
+			IdleTimeout           time.Duration `mapstructure:"idle_timeout"`
+			ClosedTimeout         time.Duration `mapstructure:"closed_timeout"`
+			MaxOutOfOrderSegments int           `mapstructure:"max_out_of_order_segments"`
+			MaxSequenceGap        uint32        `mapstructure:"max_sequence_gap"`
+			GapRecoveryTimeout    time.Duration `mapstructure:"gap_recovery_timeout"`
+			ShardCount            int           `mapstructure:"shard_count"`
+			OverlapPolicy         string        `mapstructure:"overlap_policy"`
+		}
+
 		IPFIX struct {
 			// ListenAddr is the UDP address to receive IPFIX export
 			// packets on, e.g. "0.0.0.0:4739" (4739 is IPFIX's
@@ -171,6 +202,17 @@ type Config struct {
 			PortScanThreshold int
 		}
 
+		// ThreatIntel matches observed IP addresses and DNS names against
+		// configured static indicators and periodically refreshed feeds.
+		ThreatIntel struct {
+			Enabled            bool
+			RefreshInterval    time.Duration
+			HTTPTimeout        time.Duration
+			MaxDNSObservations int
+			Static             []ThreatIntelIndicator
+			Feeds              []ThreatIntelFeed
+		}
+
 		// C2Beacon flags a source IP whose outbound TCP connections to
 		// one external destination+port happen at a suspiciously
 		// regular interval — the classic "beaconing" pattern malware
@@ -183,6 +225,35 @@ type Config struct {
 		// dashboard) if its timing happens to be regular enough; that's
 		// a false positive worth tuning MinSamples/MaxCoefficientOfVariation
 		// for, not a sign the whole approach is wrong.
+		OTValueAnomaly struct {
+			Enabled          bool
+			MinSamples       int
+			ZScoreThreshold  float64
+			RateMultiplier   float64
+			StuckAfter       time.Duration
+			MissingAfter     time.Duration
+			ToggleWindow     time.Duration
+			ToggleThreshold  int
+			UnexpectedWrites bool
+			CheckInterval    time.Duration
+		}
+		LateralMovement struct {
+			Enabled            bool
+			Window             time.Duration
+			FanOutThreshold    int
+			LargeTransferBytes uint64
+			PivotWindow        time.Duration
+			AdminPorts         []uint16
+		}
+		C2Correlation struct {
+			Enabled                  bool
+			MinScore                 int
+			DNSWindow                time.Duration
+			NXDomainThreshold        int
+			UniqueSubdomainThreshold int
+			LongLabelLength          int
+		}
+
 		C2Beacon struct {
 			Enabled bool
 			// MinSamples is how many connection attempts to the same
@@ -438,14 +509,14 @@ type CentralConfig struct {
 		Enabled     bool   `mapstructure:"enabled"`
 		MinSeverity string `mapstructure:"min_severity"` // low|medium|high|critical
 		Email       struct {
-			Enabled    bool     `mapstructure:"enabled"`
-			SMTPHost   string   `mapstructure:"smtp_host"`
-			SMTPPort   int      `mapstructure:"smtp_port"`
-			Username   string   `mapstructure:"username"`
-			Password   string   `mapstructure:"password"`
-			From       string   `mapstructure:"from"`
-			To         []string `mapstructure:"to"`
-			UseTLS     bool     `mapstructure:"use_tls"`
+			Enabled  bool     `mapstructure:"enabled"`
+			SMTPHost string   `mapstructure:"smtp_host"`
+			SMTPPort int      `mapstructure:"smtp_port"`
+			Username string   `mapstructure:"username"`
+			Password string   `mapstructure:"password"`
+			From     string   `mapstructure:"from"`
+			To       []string `mapstructure:"to"`
+			UseTLS   bool     `mapstructure:"use_tls"`
 		} `mapstructure:"email"`
 		Webhook struct {
 			Enabled bool              `mapstructure:"enabled"`
@@ -605,6 +676,17 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("capture.promiscuous", true)
 	viper.SetDefault("capture.bpffilter", "")
 	viper.SetDefault("capture.ipfix.listenaddr", "0.0.0.0:4739")
+	viper.SetDefault("capture.tcp_reassembly.enabled", true)
+	viper.SetDefault("capture.tcp_reassembly.max_connections", 50000)
+	viper.SetDefault("capture.tcp_reassembly.max_buffer_per_direction", 4194304)
+	viper.SetDefault("capture.tcp_reassembly.max_total_buffer", 536870912)
+	viper.SetDefault("capture.tcp_reassembly.idle_timeout", 2*time.Minute)
+	viper.SetDefault("capture.tcp_reassembly.closed_timeout", 15*time.Second)
+	viper.SetDefault("capture.tcp_reassembly.max_out_of_order_segments", 256)
+	viper.SetDefault("capture.tcp_reassembly.max_sequence_gap", 16777216)
+	viper.SetDefault("capture.tcp_reassembly.gap_recovery_timeout", 2*time.Second)
+	viper.SetDefault("capture.tcp_reassembly.shard_count", 32)
+	viper.SetDefault("capture.tcp_reassembly.overlap_policy", "first_seen")
 
 	viper.SetDefault("ics.modbusport", 502)
 	viper.SetDefault("ics.s7port", 102)
@@ -626,6 +708,32 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("detect.reconnaissance.window", 60*time.Second)
 	viper.SetDefault("detect.reconnaissance.hostscanthreshold", 15)
 	viper.SetDefault("detect.reconnaissance.portscanthreshold", 15)
+	viper.SetDefault("detect.threatintel.enabled", false)
+	viper.SetDefault("detect.threatintel.refreshinterval", time.Hour)
+	viper.SetDefault("detect.threatintel.httptimeout", 15*time.Second)
+	viper.SetDefault("detect.threatintel.maxdnsobservations", 5000)
+	viper.SetDefault("detect.otvalueanomaly.enabled", true)
+	viper.SetDefault("detect.otvalueanomaly.minsamples", 20)
+	viper.SetDefault("detect.otvalueanomaly.zscorethreshold", 4.0)
+	viper.SetDefault("detect.otvalueanomaly.ratemultiplier", 6.0)
+	viper.SetDefault("detect.otvalueanomaly.stuckafter", 30*time.Minute)
+	viper.SetDefault("detect.otvalueanomaly.missingafter", 10*time.Minute)
+	viper.SetDefault("detect.otvalueanomaly.togglewindow", 5*time.Minute)
+	viper.SetDefault("detect.otvalueanomaly.togglethreshold", 10)
+	viper.SetDefault("detect.otvalueanomaly.unexpectedwrites", true)
+	viper.SetDefault("detect.otvalueanomaly.checkinterval", time.Minute)
+	viper.SetDefault("detect.lateralmovement.enabled", true)
+	viper.SetDefault("detect.lateralmovement.window", 5*time.Minute)
+	viper.SetDefault("detect.lateralmovement.fanoutthreshold", 5)
+	viper.SetDefault("detect.lateralmovement.largetransferbytes", 104857600)
+	viper.SetDefault("detect.lateralmovement.pivotwindow", 10*time.Minute)
+	viper.SetDefault("detect.lateralmovement.adminports", []uint16{22, 135, 139, 445, 3389, 5985, 5986})
+	viper.SetDefault("detect.c2correlation.enabled", true)
+	viper.SetDefault("detect.c2correlation.minscore", 60)
+	viper.SetDefault("detect.c2correlation.dnswindow", 10*time.Minute)
+	viper.SetDefault("detect.c2correlation.nxdomainthreshold", 20)
+	viper.SetDefault("detect.c2correlation.uniquesubdomainthreshold", 20)
+	viper.SetDefault("detect.c2correlation.longlabellength", 45)
 	viper.SetDefault("detect.c2beacon.enabled", true)
 	viper.SetDefault("detect.c2beacon.minsamples", 6)
 	viper.SetDefault("detect.c2beacon.maxcoefficientofvariation", 0.15)

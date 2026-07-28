@@ -17,6 +17,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
 	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/threatintel"
 	"go.uber.org/zap"
 )
 
@@ -95,8 +96,8 @@ type Engine struct {
 	hostScanThreshold     int
 	portScanThreshold     int
 	scanMutex             sync.Mutex
-	hostScanSeen          map[string]map[string]time.Time            // srcIP -> dstIP -> last seen
-	portScanSeen          map[string]map[string]map[int]time.Time    // srcIP -> dstIP -> port -> last seen
+	hostScanSeen          map[string]map[string]time.Time         // srcIP -> dstIP -> last seen
+	portScanSeen          map[string]map[string]map[int]time.Time // srcIP -> dstIP -> port -> last seen
 
 	// c2BeaconEnabled/*/beaconMutex/beaconHistory/beaconLastTouch — see
 	// config.SensorConfig.Detect.C2Beacon and c2beacon.go.
@@ -106,15 +107,29 @@ type Engine struct {
 	// when each key was last updated, purely so
 	// MaxTrackedDestinations eviction has something to evict by
 	// (oldest-touched first) when the map grows too large.
-	c2BeaconEnabled           bool
-	c2BeaconMinSamples        int
-	c2BeaconMaxCV             float64
-	c2BeaconMinInterval       time.Duration
-	c2BeaconMaxInterval       time.Duration
-	c2BeaconMaxTrackedDests   int
-	beaconMutex               sync.Mutex
-	beaconHistory             map[string][]time.Time
-	beaconLastTouch           map[string]time.Time
+	c2BeaconEnabled         bool
+	c2BeaconMinSamples      int
+	c2BeaconMaxCV           float64
+	c2BeaconMinInterval     time.Duration
+	c2BeaconMaxInterval     time.Duration
+	c2BeaconMaxTrackedDests int
+	beaconMutex             sync.Mutex
+	beaconHistory           map[string][]time.Time
+	beaconLastTouch         map[string]time.Time
+
+	threatIntel *threatintel.Store
+
+	otAnomaly OTValueAnomalyConfig
+	otMutex   sync.Mutex
+	otValues  map[string]*otValueState
+
+	lateral     LateralMovementConfig
+	lateralData lateralState
+
+	c2Correlation C2CorrelationConfig
+	c2DNSMutex    sync.Mutex
+	c2NXDomains   map[string][]time.Time
+	c2Subdomains  map[string]map[string]time.Time
 }
 
 // NewEngine creates a detection engine. learningDuration controls
@@ -188,9 +203,9 @@ func NewEngine(
 		honeypotThreshold: honeypotThreshold,
 
 		segmentationEnabled: segmentationEnabled,
-		vlanLevels:           vlanLevels,
-		maxLevelJump:         maxLevelJump,
-		ipVLAN:                make(map[string]uint16),
+		vlanLevels:          vlanLevels,
+		maxLevelJump:        maxLevelJump,
+		ipVLAN:              make(map[string]uint16),
 
 		reconnaissanceEnabled: reconnaissanceEnabled,
 		reconWindow:           reconWindow,
@@ -207,6 +222,11 @@ func NewEngine(
 		c2BeaconMaxTrackedDests: c2BeaconMaxTrackedDests,
 		beaconHistory:           make(map[string][]time.Time),
 		beaconLastTouch:         make(map[string]time.Time),
+
+		otValues:     make(map[string]*otValueState),
+		lateralData:  lateralState{fanout: make(map[string]map[string]time.Time), transfers: make(map[string]*trafficWindow), inboundAdmin: make(map[string]map[string]time.Time)},
+		c2NXDomains:  make(map[string][]time.Time),
+		c2Subdomains: make(map[string]map[string]time.Time),
 	}
 
 	if e.reconWindow <= 0 {
@@ -256,6 +276,71 @@ func NewEngine(
 	return e
 }
 
+func (e *Engine) SetThreatIntel(store *threatintel.Store) { e.threatIntel = store }
+func (e *Engine) ConfigureOTValueAnomaly(c OTValueAnomalyConfig) {
+	if c.MinSamples <= 0 {
+		c.MinSamples = 20
+	}
+	if c.ZScoreThreshold <= 0 {
+		c.ZScoreThreshold = 4
+	}
+	if c.RateMultiplier <= 0 {
+		c.RateMultiplier = 6
+	}
+	if c.StuckAfter <= 0 {
+		c.StuckAfter = 30 * time.Minute
+	}
+	if c.MissingAfter <= 0 {
+		c.MissingAfter = 10 * time.Minute
+	}
+	if c.ToggleWindow <= 0 {
+		c.ToggleWindow = 5 * time.Minute
+	}
+	if c.ToggleThreshold <= 0 {
+		c.ToggleThreshold = 10
+	}
+	if c.CheckInterval <= 0 {
+		c.CheckInterval = time.Minute
+	}
+	e.otAnomaly = c
+}
+func (e *Engine) ConfigureLateralMovement(c LateralMovementConfig) {
+	if c.Window <= 0 {
+		c.Window = 5 * time.Minute
+	}
+	if c.FanOutThreshold <= 0 {
+		c.FanOutThreshold = 5
+	}
+	if c.LargeTransferBytes == 0 {
+		c.LargeTransferBytes = 100 * 1024 * 1024
+	}
+	if c.PivotWindow <= 0 {
+		c.PivotWindow = 10 * time.Minute
+	}
+	if len(c.AdminPorts) == 0 {
+		c.AdminPorts = []uint16{22, 135, 139, 445, 3389, 5985, 5986}
+	}
+	e.lateral = c
+}
+func (e *Engine) ConfigureC2Correlation(c C2CorrelationConfig) {
+	if c.MinScore <= 0 {
+		c.MinScore = 60
+	}
+	if c.DNSWindow <= 0 {
+		c.DNSWindow = 10 * time.Minute
+	}
+	if c.NXDomainThreshold <= 0 {
+		c.NXDomainThreshold = 20
+	}
+	if c.UniqueSubdomainThreshold <= 0 {
+		c.UniqueSubdomainThreshold = 20
+	}
+	if c.LongLabelLength <= 0 {
+		c.LongLabelLength = 45
+	}
+	e.c2Correlation = c
+}
+
 func (e *Engine) Start(bus *core.EventBus) {
 
 	logger.Log.Info(
@@ -275,6 +360,11 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startSegmentationWatch(bus)
 	e.startReconnaissanceWatch(bus)
 	e.startC2BeaconWatch(bus)
+	e.startThreatIntelWatch(bus)
+	e.startOTValueAnomalyWatch(bus)
+	e.startLateralMovementWatch(bus)
+	e.startSMBLateralWatch(bus)
+	e.startC2CorrelationWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }
@@ -513,7 +603,6 @@ func (e *Engine) MarkAlertsSynced(ids []string) {
 		}
 	}
 }
-
 
 // Alerts, e.g. at startup after loading from disk.
 func (e *Engine) RestoreAlerts(alerts []*Alert) {

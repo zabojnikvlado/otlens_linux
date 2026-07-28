@@ -37,13 +37,13 @@ const (
 // without any action grant in it (e.g. "view" role sees Alerts but can't
 // confirm/approve anything there).
 const (
-	ActionSensorStartStop    = "sensor_start_stop"
-	ActionAssetConfirmDelete = "asset_confirm_delete"
+	ActionSensorStartStop     = "sensor_start_stop"
+	ActionAssetConfirmDelete  = "asset_confirm_delete"
 	ActionAlertConfirmApprove = "alert_confirm_approve"
-	ActionRuleManage         = "rule_manage"
-	ActionAnalysisManage     = "analysis_manage"
-	ActionDataManagement     = "data_management"
-	ActionUsersRolesManage   = "users_roles_manage"
+	ActionRuleManage          = "rule_manage"
+	ActionAnalysisManage      = "analysis_manage"
+	ActionDataManagement      = "data_management"
+	ActionUsersRolesManage    = "users_roles_manage"
 )
 
 // tokenAuthPermissions is what the legacy management_token bearer-auth

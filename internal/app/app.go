@@ -9,6 +9,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -16,8 +17,10 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/capture"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/dcerpc"
 	"github.com/zabojnikvlado/otlens_linux/internal/debug"
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
+	passivedns "github.com/zabojnikvlado/otlens_linux/internal/dns"
 	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/hostname"
 	"github.com/zabojnikvlado/otlens_linux/internal/ics"
@@ -25,7 +28,10 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/parser"
 	"github.com/zabojnikvlado/otlens_linux/internal/persist"
+	"github.com/zabojnikvlado/otlens_linux/internal/smb"
 	"github.com/zabojnikvlado/otlens_linux/internal/store"
+	"github.com/zabojnikvlado/otlens_linux/internal/tcpreassembly"
+	"github.com/zabojnikvlado/otlens_linux/internal/threatintel"
 	"go.uber.org/zap"
 )
 
@@ -54,6 +60,13 @@ type Application struct {
 	ICSEngine *ics.Engine
 
 	HostnameEngine *hostname.Engine
+
+	DNSEngine         *passivedns.Engine
+	SMBEngine         *smb.Engine
+	DCERPCEngine      *dcerpc.Engine
+	TCPReassembler    *tcpreassembly.Engine
+	ThreatIntel       *threatintel.Store
+	threatIntelCancel context.CancelFunc
 
 	StoreEngine *store.Engine
 
@@ -98,6 +111,17 @@ func New(cfg *config.Config) (*Application, error) {
 
 	hostnameEngine := hostname.New(eventBus)
 
+	dnsEngine := passivedns.New(eventBus, cfg.Detect.ThreatIntel.MaxDNSObservations)
+	tcpReassembler := tcpreassembly.New(eventBus, tcpreassembly.Config{Enabled: cfg.Capture.TCPReassembly.Enabled, MaxConnections: cfg.Capture.TCPReassembly.MaxConnections, MaxBufferPerDirection: cfg.Capture.TCPReassembly.MaxBufferPerDirection, MaxTotalBuffer: cfg.Capture.TCPReassembly.MaxTotalBuffer, IdleTimeout: cfg.Capture.TCPReassembly.IdleTimeout, ClosedTimeout: cfg.Capture.TCPReassembly.ClosedTimeout, MaxOutOfOrderSegments: cfg.Capture.TCPReassembly.MaxOutOfOrderSegments, MaxSequenceGap: cfg.Capture.TCPReassembly.MaxSequenceGap, GapRecoveryTimeout: cfg.Capture.TCPReassembly.GapRecoveryTimeout, ShardCount: cfg.Capture.TCPReassembly.ShardCount, OverlapPolicy: cfg.Capture.TCPReassembly.OverlapPolicy})
+	smbEngine := smb.New(eventBus, cfg.Capture.TCPReassembly.Enabled)
+	dcerpcEngine := dcerpc.New(eventBus)
+	var tiStore *threatintel.Store
+	if cfg.Detect.ThreatIntel.Enabled {
+		// Feed definitions are managed centrally. The sensor keeps only a
+		// local in-memory snapshot received during its normal Central sync.
+		tiStore = threatintel.New(nil, nil, cfg.Detect.ThreatIntel.RefreshInterval, cfg.Detect.ThreatIntel.HTTPTimeout)
+	}
+
 	storeEngine := store.NewEngine(cfg.Store.MaxValueChanges, cfg.Store.MaxControlEvents)
 
 	detectEngine := detect.NewEngine(
@@ -120,6 +144,10 @@ func New(cfg *config.Config) (*Application, error) {
 		cfg.Detect.C2Beacon.MaxInterval,
 		cfg.Detect.C2Beacon.MaxTrackedDestinations,
 	)
+	detectEngine.SetThreatIntel(tiStore)
+	detectEngine.ConfigureOTValueAnomaly(detect.OTValueAnomalyConfig{Enabled: cfg.Detect.OTValueAnomaly.Enabled, MinSamples: cfg.Detect.OTValueAnomaly.MinSamples, ZScoreThreshold: cfg.Detect.OTValueAnomaly.ZScoreThreshold, RateMultiplier: cfg.Detect.OTValueAnomaly.RateMultiplier, StuckAfter: cfg.Detect.OTValueAnomaly.StuckAfter, MissingAfter: cfg.Detect.OTValueAnomaly.MissingAfter, ToggleWindow: cfg.Detect.OTValueAnomaly.ToggleWindow, ToggleThreshold: cfg.Detect.OTValueAnomaly.ToggleThreshold, UnexpectedWrites: cfg.Detect.OTValueAnomaly.UnexpectedWrites, CheckInterval: cfg.Detect.OTValueAnomaly.CheckInterval})
+	detectEngine.ConfigureLateralMovement(detect.LateralMovementConfig{Enabled: cfg.Detect.LateralMovement.Enabled, Window: cfg.Detect.LateralMovement.Window, FanOutThreshold: cfg.Detect.LateralMovement.FanOutThreshold, LargeTransferBytes: cfg.Detect.LateralMovement.LargeTransferBytes, PivotWindow: cfg.Detect.LateralMovement.PivotWindow, AdminPorts: cfg.Detect.LateralMovement.AdminPorts})
+	detectEngine.ConfigureC2Correlation(detect.C2CorrelationConfig{Enabled: cfg.Detect.C2Correlation.Enabled, MinScore: cfg.Detect.C2Correlation.MinScore, DNSWindow: cfg.Detect.C2Correlation.DNSWindow, NXDomainThreshold: cfg.Detect.C2Correlation.NXDomainThreshold, UniqueSubdomainThreshold: cfg.Detect.C2Correlation.UniqueSubdomainThreshold, LongLabelLength: cfg.Detect.C2Correlation.LongLabelLength})
 
 	parserEngine := parser.New(eventBus)
 
@@ -182,6 +210,12 @@ func New(cfg *config.Config) (*Application, error) {
 
 		HostnameEngine: hostnameEngine,
 
+		DNSEngine:      dnsEngine,
+		SMBEngine:      smbEngine,
+		DCERPCEngine:   dcerpcEngine,
+		TCPReassembler: tcpReassembler,
+		ThreatIntel:    tiStore,
+
 		StoreEngine: storeEngine,
 
 		DetectEngine: detectEngine,
@@ -219,6 +253,16 @@ func (a *Application) Start() {
 	)
 
 	a.HostnameEngine.Start()
+
+	a.DNSEngine.Start()
+	a.SMBEngine.Start()
+	a.DCERPCEngine.Start()
+	a.TCPReassembler.Start()
+	if a.ThreatIntel != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.threatIntelCancel = cancel
+		go a.ThreatIntel.Run(ctx)
+	}
 
 	a.ParserEngine.Start()
 
@@ -290,6 +334,11 @@ func (a *Application) Shutdown() {
 	logger.Log.Info(
 		"Shutting down, flushing persisted state",
 	)
+
+	if a.threatIntelCancel != nil {
+		a.threatIntelCancel()
+	}
+	a.TCPReassembler.Stop()
 
 	if err := a.Snapshotter.Close(); err != nil {
 

@@ -54,7 +54,17 @@ type Edge struct {
 	SrcIP string
 	DstIP string
 
-	Protocol string // L4 protocol, e.g. "TCP"/"UDP" — see flow.Flow.Protocol
+	Protocol      string // L4 protocol, e.g. "TCP"/"UDP" — see flow.Flow.Protocol
+	SrcPort       uint16
+	DstPort       uint16
+	InitiatorIP   string
+	ResponderIP   string
+	InitiatorPort uint16
+	ResponderPort uint16
+	PacketsAToB   uint64
+	PacketsBToA   uint64
+	BytesAToB     uint64
+	BytesBToA     uint64
 
 	// IsOT marks an edge that runs over a recognized OT/ICS port
 	// (502/Modbus, 102/S7comm) on either side, regardless of whether

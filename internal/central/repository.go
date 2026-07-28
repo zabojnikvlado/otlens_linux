@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS rule_sets (
  name TEXT NOT NULL,
  version BIGINT NOT NULL DEFAULT 1,
  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+ dns_observations JSONB NOT NULL DEFAULT '[]'::jsonb,
+ smb_observations JSONB NOT NULL DEFAULT '[]'::jsonb,
  batch_id TEXT NOT NULL DEFAULT '',
  sequence BIGINT NOT NULL DEFAULT 0,
  checksum TEXT NOT NULL DEFAULT '',
@@ -108,6 +110,18 @@ ALTER TABLE sensors ADD COLUMN IF NOT EXISTS pending_records BIGINT NOT NULL DEF
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_sync_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sync_sequence BIGINT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS sensor_metrics (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ uptime_seconds BIGINT NOT NULL DEFAULT 0,
+ health JSONB NOT NULL DEFAULT '{}'::jsonb,
+ metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+ versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+ capture JSONB NOT NULL DEFAULT '{}'::jsonb,
+ sync JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_sensor_metrics_sensor_time ON sensor_metrics(sensor_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -115,9 +129,60 @@ ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL 
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS alerts JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS baseline JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS dns_observations JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS smb_observations JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS sequence BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS reconnaissance_credentials (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ type TEXT NOT NULL,
+ username TEXT NOT NULL DEFAULT '',
+ encrypted_secret BYTEA NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS reconnaissance_jobs (
+ id TEXT PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ profile TEXT NOT NULL DEFAULT 'safe-discovery',
+ targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+ policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+ status TEXT NOT NULL DEFAULT 'queued',
+ error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ started_at TIMESTAMPTZ,
+ completed_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS asset_recon_profile (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ ip TEXT NOT NULL,
+ hostname TEXT NOT NULL DEFAULT '',
+ vendor TEXT NOT NULL DEFAULT '',
+ operating_system TEXT NOT NULL DEFAULT '',
+ model TEXT NOT NULL DEFAULT '',
+ firmware TEXT NOT NULL DEFAULT '',
+ serial TEXT NOT NULL DEFAULT '',
+ ot_identity JSONB NOT NULL DEFAULT '{}'::jsonb,
+ services JSONB NOT NULL DEFAULT '[]'::jsonb,
+ evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+ last_profiled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(sensor_id,ip)
+);
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS firmware TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS serial TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS ot_identity JSONB NOT NULL DEFAULT '{}'::jsonb;
+CREATE TABLE IF NOT EXISTS reconnaissance_results (
+ id BIGSERIAL PRIMARY KEY,
+ job_id TEXT NOT NULL REFERENCES reconnaissance_jobs(id) ON DELETE CASCADE,
+ target TEXT NOT NULL,
+ result JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_recon_jobs_created ON reconnaissance_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_recon_results_job ON reconnaissance_results(job_id);
 CREATE TABLE IF NOT EXISTS sensor_commands (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -212,6 +277,124 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
 -- upsertTopologyEdges), and the /topology handler reads from here instead
 -- of the live per-sensor snapshot, so a connection drawn once stays on the
 -- map even after the sensor's own copy of it has aged out.
+CREATE TABLE IF NOT EXISTS dns_observations (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ observed_at TIMESTAMPTZ NOT NULL,
+ client_ip TEXT NOT NULL DEFAULT '',
+ server_ip TEXT NOT NULL DEFAULT '',
+ query_name TEXT NOT NULL,
+ query_type INTEGER NOT NULL DEFAULT 0,
+ response_code INTEGER NOT NULL DEFAULT 0,
+ is_response BOOLEAN NOT NULL DEFAULT FALSE,
+ answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+ cnames JSONB NOT NULL DEFAULT '[]'::jsonb,
+ ttl BIGINT NOT NULL DEFAULT 0,
+ UNIQUE(sensor_id,observed_at,client_ip,query_name,is_response)
+);
+CREATE INDEX IF NOT EXISTS idx_dns_observations_lookup ON dns_observations(sensor_id,observed_at,query_name);
+CREATE INDEX IF NOT EXISTS idx_dns_observations_client ON dns_observations(sensor_id,client_ip,observed_at);
+
+CREATE TABLE IF NOT EXISTS smb_observations (
+ id BIGSERIAL PRIMARY KEY, sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ observed_at TIMESTAMPTZ NOT NULL, client_ip TEXT NOT NULL DEFAULT '', server_ip TEXT NOT NULL DEFAULT '',
+ client_port INTEGER NOT NULL DEFAULT 0, server_port INTEGER NOT NULL DEFAULT 445, command TEXT NOT NULL DEFAULT '',
+ message_id NUMERIC(20,0) NOT NULL DEFAULT 0, session_id NUMERIC(20,0) NOT NULL DEFAULT 0, tree_id BIGINT NOT NULL DEFAULT 0,
+ share_name TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '', named_pipe TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT '',
+ bytes BIGINT NOT NULL DEFAULT 0, status BIGINT NOT NULL DEFAULT 0, is_response BOOLEAN NOT NULL DEFAULT FALSE,
+ is_admin_share BOOLEAN NOT NULL DEFAULT FALSE, is_executable BOOLEAN NOT NULL DEFAULT FALSE, is_script BOOLEAN NOT NULL DEFAULT FALSE, is_encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+ UNIQUE(sensor_id,observed_at,client_ip,server_ip,message_id,command,is_response)
+);
+CREATE INDEX IF NOT EXISTS idx_smb_observations_lookup ON smb_observations(sensor_id,observed_at,client_ip,server_ip);
+CREATE INDEX IF NOT EXISTS idx_smb_observations_artifact ON smb_observations(sensor_id,share_name,file_name,observed_at);
+CREATE TABLE IF NOT EXISTS flow_counters (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ flow_id TEXT NOT NULL,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets_a_to_b BIGINT NOT NULL DEFAULT 0,
+ packets_b_to_a BIGINT NOT NULL DEFAULT 0,
+ bytes_a_to_b BIGINT NOT NULL DEFAULT 0,
+ bytes_b_to_a BIGINT NOT NULL DEFAULT 0,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(sensor_id,flow_id)
+);
+CREATE TABLE IF NOT EXISTS flow_observations (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ flow_id TEXT NOT NULL,
+ bucket_start TIMESTAMPTZ NOT NULL,
+ bucket_end TIMESTAMPTZ NOT NULL,
+ src_ip TEXT NOT NULL,
+ dst_ip TEXT NOT NULL,
+ src_port INTEGER NOT NULL DEFAULT 0,
+ dst_port INTEGER NOT NULL DEFAULT 0,
+ protocol TEXT NOT NULL DEFAULT '',
+ initiator_ip TEXT NOT NULL DEFAULT '',
+ responder_ip TEXT NOT NULL DEFAULT '',
+ initiator_port INTEGER NOT NULL DEFAULT 0,
+ responder_port INTEGER NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets_a_to_b BIGINT NOT NULL DEFAULT 0,
+ packets_b_to_a BIGINT NOT NULL DEFAULT 0,
+ bytes_a_to_b BIGINT NOT NULL DEFAULT 0,
+ bytes_b_to_a BIGINT NOT NULL DEFAULT 0,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ UNIQUE(sensor_id,flow_id,bucket_start)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_contact ON flow_observations(sensor_id,bucket_start,src_ip,dst_ip);
+CREATE TABLE IF NOT EXISTS asset_security_status (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_ip TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('clean','suspected','infected','contained','recovered')),
+ reason TEXT NOT NULL DEFAULT '',
+ source TEXT NOT NULL DEFAULT 'manual',
+ detected_at TIMESTAMPTZ,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_by TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(sensor_id,asset_ip)
+);
+CREATE TABLE IF NOT EXISTS malware_incidents (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ initial_asset_ip TEXT NOT NULL,
+ title TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'open',
+ severity TEXT NOT NULL DEFAULT 'critical',
+ lookback_hours INTEGER NOT NULL DEFAULT 24,
+ max_hops INTEGER NOT NULL DEFAULT 2,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS asset_exposures (
+ incident_id BIGINT NOT NULL REFERENCES malware_incidents(id) ON DELETE CASCADE,
+ exposed_asset_ip TEXT NOT NULL,
+ parent_asset_ip TEXT NOT NULL DEFAULT '',
+ hop_count INTEGER NOT NULL,
+ exposure_score INTEGER NOT NULL,
+ exposure_severity TEXT NOT NULL,
+ reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+ first_contact TIMESTAMPTZ,
+ last_contact TIMESTAMPTZ,
+ protocols TEXT NOT NULL DEFAULT '',
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(incident_id,exposed_asset_ip)
+);
+DO $$
+BEGIN
+ IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='score')
+    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='exposure_score') THEN
+  ALTER TABLE asset_exposures RENAME COLUMN score TO exposure_score;
+ END IF;
+ IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='severity')
+    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='exposure_severity') THEN
+  ALTER TABLE asset_exposures RENAME COLUMN severity TO exposure_severity;
+ END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS topology_edges (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  pair_key TEXT NOT NULL,
@@ -317,6 +500,28 @@ CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(gen
 -- is purely operator input (either one-by-one from the Devices tab, or
 -- bulk via CSV import) and always wins over the automatic vendor-based
 -- category guess for a given (sensor_id, mac).
+CREATE TABLE IF NOT EXISTS asset_context (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_ip TEXT NOT NULL,
+ asset_role TEXT NOT NULL DEFAULT '',
+ criticality TEXT NOT NULL DEFAULT '',
+ zone TEXT NOT NULL DEFAULT '',
+ purdue_override REAL,
+ is_attack_path_entry BOOLEAN NOT NULL DEFAULT FALSE,
+ is_attack_path_target BOOLEAN NOT NULL DEFAULT FALSE,
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(sensor_id,asset_ip)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_itot ON flow_observations(sensor_id,bucket_end,initiator_ip,responder_ip);
+CREATE TABLE IF NOT EXISTS imported_tags (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ tag_key TEXT NOT NULL,
+ tag JSONB NOT NULL DEFAULT '{}'::jsonb,
+ imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ imported_by TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(sensor_id, tag_key)
+);
 CREATE TABLE IF NOT EXISTS asset_overrides (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  mac TEXT NOT NULL,
@@ -358,6 +563,10 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ensure central database schema: %w", err)
+	}
+	if _, err := db.Exec(threatIntelSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ensure threat intelligence schema: %w", err)
 	}
 	return &Repository{db: db}, nil
 }
@@ -464,8 +673,135 @@ func (r *Repository) Heartbeat(ctx context.Context, h management.Heartbeat) erro
 		stringValue(h.Versions, "go"), stringValue(h.Versions, "libpcap"), stringValue(h.Versions, "gopacket"),
 		toString(interfaceValue("backend")), toString(interfaceValue("interface")), toInt32(interfaceValue("snaplen")), toBool(interfaceValue("promiscuous")),
 		h.Sync.LastAttemptAt, h.Sync.LastSuccessAt, h.Sync.PendingRecords, h.Sync.ConsecutiveFailures, h.Sync.LastError, h.Sync.Sequence)
+	if err != nil {
+		return err
+	}
+	healthJSON, _ := json.Marshal(h.Health)
+	metricsJSON, _ := json.Marshal(h.Metrics)
+	versionsJSON, _ := json.Marshal(h.Versions)
+	captureJSON, _ := json.Marshal(h.Capture)
+	syncJSON, _ := json.Marshal(h.Sync)
+	_, err = r.db.ExecContext(ctx, `INSERT INTO sensor_metrics(sensor_id,recorded_at,uptime_seconds,health,metrics,versions,capture,sync) VALUES($1,NOW(),$2,$3,$4,$5,$6,$7)`, h.SensorID, h.Uptime, healthJSON, metricsJSON, versionsJSON, captureJSON, syncJSON)
+	if err == nil {
+		_, _ = r.db.ExecContext(ctx, `DELETE FROM sensor_metrics WHERE recorded_at < NOW() - INTERVAL '7 days'`)
+	}
 	return err
 }
+func healthFromSample(sample management.SensorMetricSample, lastSeen time.Time) (string, []string) {
+	reasons := []string{}
+	if time.Since(lastSeen) > 90*time.Second {
+		return "offline", []string{"No recent heartbeat"}
+	}
+	if sample.RecordedAt.IsZero() || time.Since(sample.RecordedAt) > 2*time.Minute {
+		return "warning", []string{"Sensor heartbeat is live, but no recent metrics sample is available"}
+	}
+	number := func(path ...string) float64 {
+		var current interface{} = sample.Metrics
+		for _, key := range path {
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return 0
+			}
+			current = m[key]
+		}
+		switch v := current.(type) {
+		case float64:
+			return v
+		case int:
+			return float64(v)
+		case int64:
+			return float64(v)
+		}
+		return 0
+	}
+	drops := number("capture", "drop_rate_percent")
+	mem := number("system", "memory_percent")
+	queue := number("pipeline", "event_queue_percent")
+	if drops >= 5 {
+		reasons = append(reasons, fmt.Sprintf("Packet drop rate %.1f%%", drops))
+	}
+	if mem >= 95 {
+		reasons = append(reasons, fmt.Sprintf("Memory usage %.1f%%", mem))
+	}
+	if queue >= 95 {
+		reasons = append(reasons, fmt.Sprintf("Event queue %.1f%% full", queue))
+	}
+	if sample.Sync.ConsecutiveFailures >= 3 && sample.Sync.LastError != "" {
+		reasons = append(reasons, "Repeated Central synchronization failures: "+sample.Sync.LastError)
+	}
+	if len(reasons) > 0 {
+		return "critical", reasons
+	}
+	if drops >= 1 {
+		reasons = append(reasons, fmt.Sprintf("Packet drop rate %.1f%%", drops))
+	}
+	if mem >= 80 {
+		reasons = append(reasons, fmt.Sprintf("Memory usage %.1f%%", mem))
+	}
+	if queue >= 75 {
+		reasons = append(reasons, fmt.Sprintf("Event queue %.1f%% full", queue))
+	}
+	if sample.Sync.ConsecutiveFailures > 0 && sample.Sync.LastError != "" {
+		reasons = append(reasons, "Central synchronization degraded")
+	}
+	if len(reasons) > 0 {
+		return "warning", reasons
+	}
+	return "healthy", nil
+}
+
+func (r *Repository) SensorMetricHistory(ctx context.Context, sensorID string, since time.Time, limit int) ([]management.SensorMetricSample, error) {
+	if limit <= 0 || limit > 10000 {
+		limit = 2000
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,recorded_at,uptime_seconds,health,metrics,versions,capture,sync FROM sensor_metrics WHERE sensor_id=$1 AND recorded_at >= $2 ORDER BY recorded_at ASC LIMIT $3`, sensorID, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []management.SensorMetricSample{}
+	for rows.Next() {
+		var x management.SensorMetricSample
+		var health, metrics, versions, capture, sync []byte
+		if err := rows.Scan(&x.SensorID, &x.RecordedAt, &x.UptimeSeconds, &health, &metrics, &versions, &capture, &sync); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(health, &x.Health)
+		_ = json.Unmarshal(metrics, &x.Metrics)
+		_ = json.Unmarshal(versions, &x.Versions)
+		_ = json.Unmarshal(capture, &x.Capture)
+		_ = json.Unmarshal(sync, &x.Sync)
+		x.HealthState, x.HealthReasons = healthFromSample(x, x.RecordedAt)
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) LatestSensorMetrics(ctx context.Context) ([]management.SensorMetricSample, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT ON (m.sensor_id) m.sensor_id,m.recorded_at,m.uptime_seconds,m.health,m.metrics,m.versions,m.capture,m.sync,s.last_seen FROM sensor_metrics m JOIN sensors s ON s.id=m.sensor_id ORDER BY m.sensor_id,m.recorded_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []management.SensorMetricSample{}
+	for rows.Next() {
+		var x management.SensorMetricSample
+		var health, metrics, versions, capture, sync []byte
+		var lastSeen time.Time
+		if err := rows.Scan(&x.SensorID, &x.RecordedAt, &x.UptimeSeconds, &health, &metrics, &versions, &capture, &sync, &lastSeen); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(health, &x.Health)
+		_ = json.Unmarshal(metrics, &x.Metrics)
+		_ = json.Unmarshal(versions, &x.Versions)
+		_ = json.Unmarshal(capture, &x.Capture)
+		_ = json.Unmarshal(sync, &x.Sync)
+		x.HealthState, x.HealthReasons = healthFromSample(x, lastSeen)
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,''),
 COALESCE(go_version,''),COALESCE(libpcap_version,''),COALESCE(gopacket_version,''),COALESCE(capture_backend,''),
@@ -518,6 +854,7 @@ func (r *Repository) AssignRuleSet(ctx context.Context, sensorID, ruleSetID stri
 	_, err := r.db.ExecContext(ctx, `INSERT INTO sensor_rule_sets(sensor_id,rule_set_id) VALUES($1,$2) ON CONFLICT(sensor_id) DO UPDATE SET rule_set_id=EXCLUDED.rule_set_id`, sensorID, ruleSetID)
 	return err
 }
+
 // MarkOffline flips status to 'offline' for any sensor whose last_seen
 // is older than olderThan — but only ones not already offline, and
 // returns exactly those ids. Both matter for auditing this: without the
@@ -571,9 +908,9 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 		return nil, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,batch_id,sequence,checksum,updated_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
-WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), x.BatchID, x.Sequence, x.Checksum)
+	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,batch_id,sequence,checksum,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
+WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -619,12 +956,21 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	// strict foreign key.
 	var graph topology.Graph
 	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
+		if err := persistFlowObservations(ctx, tx, x.SensorID, x.CapturedAt, graph.Edges); err != nil {
+			return nil, err
+		}
 		if err := upsertTopologyNodes(ctx, tx, x.SensorID, graph.Nodes); err != nil {
 			return nil, err
 		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
 			return nil, err
 		}
+	}
+	if err := persistDNSObservations(ctx, tx, x.SensorID, x.DNSObservations); err != nil {
+		return nil, err
+	}
+	if err := persistSMBObservations(ctx, tx, x.SensorID, x.SMBObservations); err != nil {
+		return nil, err
 	}
 	newAlerts, err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts)
 	if err != nil {
@@ -650,7 +996,7 @@ func firstString(m map[string]interface{}, keys ...string) string {
 }
 
 func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,batch_id,sequence,checksum FROM sensor_telemetry ORDER BY sensor_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,batch_id,sequence,checksum FROM sensor_telemetry ORDER BY sensor_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -658,7 +1004,7 @@ func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnaps
 	var out []management.TelemetrySnapshot
 	for rows.Next() {
 		var x management.TelemetrySnapshot
-		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules, &x.BatchID, &x.Sequence, &x.Checksum); err != nil {
+		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules, &x.DNSObservations, &x.SMBObservations, &x.BatchID, &x.Sequence, &x.Checksum); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -933,6 +1279,10 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes RESTART IDENTITY`)
 	case "alerts":
 		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
+	case "incidents":
+		// Incidents are derived from alert_history. Malware/contact-tracing
+		// incidents are persisted separately, so clear both sources.
+		_, err = tx.ExecContext(ctx, `TRUNCATE alert_history, malware_incidents RESTART IDENTITY CASCADE`)
 	case "siem":
 		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
 	case "analysis":

@@ -29,9 +29,17 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
+	"github.com/zabojnikvlado/otlens_linux/internal/recon"
 	"github.com/zabojnikvlado/otlens_linux/internal/syncagent"
 	"go.uber.org/zap"
 )
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 func main() {
 	configPath := flag.String("config", "/etc/otlens/config.yaml", "path to the Linux sensor configuration file")
@@ -139,8 +147,49 @@ func main() {
 			b, err := json.Marshal(v)
 			return json.RawMessage(b), err
 		}
-		worker := &syncagent.Worker{Client: client, Detect: application.DetectEngine, Flow: application.FlowEngine, ApplyCommand: func(command management.Command) {
+		metricStarted := time.Now()
+		var previousMetricAt time.Time
+		var previousSegments, previousBytes uint64
+		metricsSnapshot := func() map[string]interface{} {
+			now := time.Now()
+			var mem runtime.MemStats
+			runtime.ReadMemStats(&mem)
+			tcp := application.TCPReassembler.Stats()
+			elapsed := now.Sub(previousMetricAt).Seconds()
+			if previousMetricAt.IsZero() || elapsed <= 0 {
+				elapsed = cfg.Central.Interval.Seconds()
+			}
+			packetsPerSecond := float64(tcp.SegmentsSeen-previousSegments) / elapsed
+			bytesPerSecond := float64(tcp.BytesSeen-previousBytes) / elapsed
+			previousMetricAt, previousSegments, previousBytes = now, tcp.SegmentsSeen, tcp.BytesSeen
+			return map[string]interface{}{
+				"system":         map[string]interface{}{"goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": mem.Alloc, "memory_sys_bytes": mem.Sys, "heap_objects": mem.HeapObjects, "memory_percent": 0},
+				"capture":        map[string]interface{}{"packets_per_second": packetsPerSecond, "bytes_per_second": bytesPerSecond, "kernel_drops_total": 0, "interface_drops_total": 0, "drop_rate_percent": 0},
+				"tcp_reassembly": tcp,
+				"pipeline":       map[string]interface{}{"event_queue_depth": 0, "event_queue_percent": 0, "events_per_second": 0, "dropped_events_total": 0},
+				"uptime_seconds": int64(time.Since(metricStarted).Seconds()),
+			}
+		}
+		worker := &syncagent.Worker{Metrics: metricsSnapshot, Client: client, Detect: application.DetectEngine, Flow: application.FlowEngine, ThreatIntel: application.ThreatIntel, ApplyCommand: func(command management.Command) {
 			switch command.Type {
+			case "recon.safe_discovery":
+				var rc management.ReconCommand
+				if err := json.Unmarshal([]byte(command.Target), &rc); err != nil {
+					log.Printf("OTLens invalid reconnaissance command: %v", err)
+					break
+				}
+				go func() {
+					runCtx, cancel := context.WithTimeout(context.Background(), time.Duration(maxInt(30, len(rc.Targets)*len(rc.Policy.Ports)*maxInt(1, rc.Policy.TimeoutSeconds)+30))*time.Second)
+					defer cancel()
+					results := recon.Run(runCtx, rc)
+					runErr := ""
+					if runCtx.Err() != nil {
+						runErr = runCtx.Err().Error()
+					}
+					if err := client.PushReconResult(context.Background(), rc.JobID, results, runErr); err != nil {
+						log.Printf("OTLens reconnaissance result upload failed: %v", err)
+					}
+				}()
 			case "sensor.capture.stop":
 				if application.CaptureEngine != nil {
 					application.CaptureEngine.Stop()
@@ -354,11 +403,19 @@ func main() {
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}
+			dnsJSON, err := marshal(application.DNSEngine.GetObservations())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
+			smbJSON, err := marshal(application.SMBEngine.GetObservations())
+			if err != nil {
+				return management.TelemetrySnapshot{}, err
+			}
 			rulesJSON, err := marshal(application.DetectEngine.GetRules())
 			if err != nil {
 				return management.TelemetrySnapshot{}, err
 			}
-			return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON}, nil
+			return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON}, nil
 		}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

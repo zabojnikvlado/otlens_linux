@@ -121,7 +121,18 @@ func Build(
 			srcIP, dstIP = dstIP, srcIP
 		}
 
-		if !isPrivateIP(srcIP) || !isPrivateIP(dstIP) {
+		// Analysis-derived flows are exempt from the private-IP-only
+		// restriction below — see Prune()'s identical FromAnalysis
+		// exemption in internal/flow/engine.go for the same underlying
+		// reasoning. That filter exists to stop *continuous live
+		// capture* from growing the topology ledger without bound as
+		// it accumulates internet-facing noise over time; a PCAP
+		// analysis is a one-shot, human-initiated investigation of a
+		// specific bounded file, not an ongoing growth risk, and seeing
+		// what a device talked to externally is very often the whole
+		// point of analyzing a suspicious capture (e.g. investigating a
+		// suspected malware/C2 sample).
+		if !f.FromAnalysis && (!isPrivateIP(srcIP) || !isPrivateIP(dstIP)) {
 			continue
 		}
 
@@ -134,6 +145,11 @@ func Build(
 				DstIP: dstIP,
 
 				Protocol: f.Protocol,
+				SrcPort:  f.SrcPort, DstPort: f.DstPort,
+				InitiatorIP: f.InitiatorIP, ResponderIP: f.ResponderIP,
+				InitiatorPort: f.InitiatorPort, ResponderPort: f.ResponderPort,
+				PacketsAToB: f.PacketsAToB, PacketsBToA: f.PacketsBToA,
+				BytesAToB: f.BytesAToB, BytesBToA: f.BytesBToA,
 
 				IsOT: isICSPort(f.SrcPort, modbusPort, s7Port) || isICSPort(f.DstPort, modbusPort, s7Port),
 

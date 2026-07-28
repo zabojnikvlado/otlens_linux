@@ -25,6 +25,19 @@ type Flow struct {
 
 	Protocol string // L4 protocol, e.g. "TCP" or "UDP"
 
+	// Initiator/Responder are stable conversation roles. For TCP the initiator
+	// is learned from the first SYN without ACK; for UDP/IPFIX they default to
+	// the first observed/exported direction. Directional counters always use
+	// these roles, independent of SrcIP/DstIP legacy fields.
+	InitiatorIP   string
+	ResponderIP   string
+	InitiatorPort uint16
+	ResponderPort uint16
+	PacketsAToB   uint64
+	PacketsBToA   uint64
+	BytesAToB     uint64
+	BytesBToA     uint64
+
 	// Packets/Bytes accumulate across every packet seen in either
 	// direction since FirstSeen.
 	Packets uint64

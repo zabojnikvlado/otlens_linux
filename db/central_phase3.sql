@@ -292,6 +292,20 @@ CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(gen
 -- is purely operator input (either one-by-one from the Devices tab, or
 -- bulk via CSV import) and always wins over the automatic vendor-based
 -- category guess for a given (sensor_id, mac).
+CREATE TABLE IF NOT EXISTS asset_context (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_ip TEXT NOT NULL,
+ asset_role TEXT NOT NULL DEFAULT '',
+ criticality TEXT NOT NULL DEFAULT '',
+ zone TEXT NOT NULL DEFAULT '',
+ purdue_override REAL,
+ is_attack_path_entry BOOLEAN NOT NULL DEFAULT FALSE,
+ is_attack_path_target BOOLEAN NOT NULL DEFAULT FALSE,
+ updated_by TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(sensor_id,asset_ip)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_itot ON flow_observations(sensor_id,bucket_end,initiator_ip,responder_ip);
 CREATE TABLE IF NOT EXISTS asset_overrides (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  mac TEXT NOT NULL,
@@ -329,3 +343,106 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
  updated_by TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Malware contact tracing and directional flow history
+CREATE TABLE IF NOT EXISTS flow_counters (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ flow_id TEXT NOT NULL,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets_a_to_b BIGINT NOT NULL DEFAULT 0,
+ packets_b_to_a BIGINT NOT NULL DEFAULT 0,
+ bytes_a_to_b BIGINT NOT NULL DEFAULT 0,
+ bytes_b_to_a BIGINT NOT NULL DEFAULT 0,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(sensor_id,flow_id)
+);
+CREATE TABLE IF NOT EXISTS flow_observations (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ flow_id TEXT NOT NULL,
+ bucket_start TIMESTAMPTZ NOT NULL,
+ bucket_end TIMESTAMPTZ NOT NULL,
+ src_ip TEXT NOT NULL,
+ dst_ip TEXT NOT NULL,
+ src_port INTEGER NOT NULL DEFAULT 0,
+ dst_port INTEGER NOT NULL DEFAULT 0,
+ protocol TEXT NOT NULL DEFAULT '',
+ initiator_ip TEXT NOT NULL DEFAULT '',
+ responder_ip TEXT NOT NULL DEFAULT '',
+ initiator_port INTEGER NOT NULL DEFAULT 0,
+ responder_port INTEGER NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets_a_to_b BIGINT NOT NULL DEFAULT 0,
+ packets_b_to_a BIGINT NOT NULL DEFAULT 0,
+ bytes_a_to_b BIGINT NOT NULL DEFAULT 0,
+ bytes_b_to_a BIGINT NOT NULL DEFAULT 0,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ UNIQUE(sensor_id,flow_id,bucket_start)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_contact ON flow_observations(sensor_id,bucket_start,src_ip,dst_ip);
+CREATE TABLE IF NOT EXISTS asset_security_status (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_ip TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('clean','suspected','infected','contained','recovered')),
+ reason TEXT NOT NULL DEFAULT '',
+ source TEXT NOT NULL DEFAULT 'manual',
+ detected_at TIMESTAMPTZ,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_by TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(sensor_id,asset_ip)
+);
+CREATE TABLE IF NOT EXISTS malware_incidents (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ initial_asset_ip TEXT NOT NULL,
+ title TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'open',
+ severity TEXT NOT NULL DEFAULT 'critical',
+ lookback_hours INTEGER NOT NULL DEFAULT 24,
+ max_hops INTEGER NOT NULL DEFAULT 2,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS asset_exposures (
+ incident_id BIGINT NOT NULL REFERENCES malware_incidents(id) ON DELETE CASCADE,
+ exposed_asset_ip TEXT NOT NULL,
+ parent_asset_ip TEXT NOT NULL DEFAULT '',
+ hop_count INTEGER NOT NULL,
+ exposure_score INTEGER NOT NULL,
+ exposure_severity TEXT NOT NULL,
+ reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+ first_contact TIMESTAMPTZ,
+ last_contact TIMESTAMPTZ,
+ protocols TEXT NOT NULL DEFAULT '',
+ bytes BIGINT NOT NULL DEFAULT 0,
+ packets BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(incident_id,exposed_asset_ip)
+);
+DO $$
+BEGIN
+ IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='score')
+    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='exposure_score') THEN
+  ALTER TABLE asset_exposures RENAME COLUMN score TO exposure_score;
+ END IF;
+ IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='severity')
+    AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='asset_exposures' AND column_name='exposure_severity') THEN
+  ALTER TABLE asset_exposures RENAME COLUMN severity TO exposure_severity;
+ END IF;
+END $$;
+
+-- Operational sensor metrics (raw 15/30-second heartbeat samples, retained 7 days by Central).
+CREATE TABLE IF NOT EXISTS sensor_metrics (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ uptime_seconds BIGINT NOT NULL DEFAULT 0,
+ health JSONB NOT NULL DEFAULT '{}'::jsonb,
+ metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+ versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+ capture JSONB NOT NULL DEFAULT '{}'::jsonb,
+ sync JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_sensor_metrics_sensor_time ON sensor_metrics(sensor_id, recorded_at DESC);

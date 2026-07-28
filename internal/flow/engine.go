@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -156,6 +157,9 @@ func (e *Engine) Update(packet core.Packet) {
 
 			Protocol: packet.L4Protocol,
 
+			InitiatorIP: packet.SrcIP, ResponderIP: packet.DstIP,
+			InitiatorPort: packet.SrcPort, ResponderPort: packet.DstPort,
+
 			FirstSeen: now,
 
 			FromAnalysis: packet.FromAnalysis,
@@ -189,8 +193,22 @@ func (e *Engine) Update(packet core.Packet) {
 		f.VLANID = packet.VLANID
 	}
 
+	// A TCP SYN without ACK is the strongest passive initiator signal. If the
+	// flow was first observed mid-stream, correct the provisional roles when
+	// that handshake packet later appears.
+	if packet.L4Protocol == "TCP" && strings.Contains(packet.TCPFlags, "SYN") && !strings.Contains(packet.TCPFlags, "ACK") {
+		f.InitiatorIP, f.ResponderIP = packet.SrcIP, packet.DstIP
+		f.InitiatorPort, f.ResponderPort = packet.SrcPort, packet.DstPort
+	}
 	f.Packets++
 	f.Bytes += uint64(packet.Length)
+	if packet.SrcIP == f.InitiatorIP && packet.SrcPort == f.InitiatorPort {
+		f.PacketsAToB++
+		f.BytesAToB += uint64(packet.Length)
+	} else {
+		f.PacketsBToA++
+		f.BytesBToA += uint64(packet.Length)
+	}
 	f.LastSeen = now
 	f.Synced = false
 }
@@ -234,6 +252,9 @@ func (e *Engine) ApplyExternalDelta(
 
 			Protocol: protocol,
 
+			InitiatorIP: srcIP, ResponderIP: dstIP,
+			InitiatorPort: srcPort, ResponderPort: dstPort,
+
 			FirstSeen: now,
 		}
 
@@ -258,6 +279,8 @@ func (e *Engine) ApplyExternalDelta(
 
 	f.Packets += packetsDelta
 	f.Bytes += bytesDelta
+	f.PacketsAToB += packetsDelta
+	f.BytesAToB += bytesDelta
 	f.LastSeen = now
 	f.Synced = false
 }
@@ -283,6 +306,17 @@ func (e *Engine) Restore(flows []*Flow) {
 	e.flows = make(map[string]*Flow, len(flows))
 
 	for _, f := range flows {
+		// Backward-compatible upgrade for snapshots written before stable
+		// initiator/responder fields existed. Preserve totals and establish
+		// provisional roles from the legacy first-observed endpoints.
+		if f.InitiatorIP == "" {
+			f.InitiatorIP, f.ResponderIP = f.SrcIP, f.DstIP
+			f.InitiatorPort, f.ResponderPort = f.SrcPort, f.DstPort
+			if f.PacketsAToB+f.PacketsBToA == 0 {
+				f.PacketsAToB = f.Packets
+				f.BytesAToB = f.Bytes
+			}
+		}
 		e.flows[f.ID] = f
 	}
 }

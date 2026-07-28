@@ -964,3 +964,124 @@ main {
 .bar-list{display:grid;gap:13px}.bar-row{display:grid;grid-template-columns:110px 1fr 52px;align-items:center;gap:10px}.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}.bar-track{height:8px;border-radius:99px;background:#0b1220;overflow:hidden}.bar-fill{height:100%;min-width:2px;border-radius:99px;background:var(--ot)}.bar-row[data-severity="critical"] .bar-fill{background:var(--crit)}.bar-row[data-severity="high"] .bar-fill{background:#ef8354}.bar-row[data-severity="medium"] .bar-fill{background:var(--warn)}.bar-row[data-severity="low"] .bar-fill{background:#6b9bd2}.bar-value{text-align:right;color:var(--text)}.empty-dashboard{display:flex;align-items:center;justify-content:center;min-height:165px;color:var(--text-dim);text-align:center}
 .activity-list{display:grid}.activity-item{display:grid;grid-template-columns:76px 90px 1fr;gap:10px;padding:10px 0;border-top:1px solid var(--line)}.activity-item:first-child{border-top:0}.activity-time,.activity-sensor{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-message{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-message .severity{margin-right:7px}.status-list{margin:0}.status-list>div{display:flex;justify-content:space-between;gap:16px;padding:15px 0;border-top:1px solid var(--line)}.status-list>div:first-child{border-top:0}.status-list dt{color:var(--text-dim)}.status-list dd{margin:0;text-align:right}
 @media(max-width:1050px){.dashboard-kpis{grid-template-columns:repeat(2,minmax(180px,1fr))}}@media(max-width:760px){.dashboard-heading{display:grid}.health-banner{min-width:0}.dashboard-kpis,.dashboard-grid{grid-template-columns:1fr}.activity-item{grid-template-columns:66px 1fr}.activity-sensor{display:none}}
+.itot-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.itot-toolbar input{width:150px}.itot-toolbar label input{width:65px}.purdue-overlay{display:grid;gap:6px;margin:10px 0}.purdue-level{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--panel)}.purdue-level h4{margin:0 0 5px}.purdue-assets{display:flex;gap:6px;flex-wrap:wrap}.purdue-asset{border:1px solid var(--line);border-radius:999px;padding:3px 8px;cursor:pointer;background:var(--panel-raised)}.itot-results{display:grid;gap:8px;margin:10px 0}.itot-path{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel)}.itot-path-chain{font-family:monospace;overflow:auto;white-space:nowrap}.itot-path-meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;color:var(--text-dim)}
+/* Threat, DNS, SMB and incident investigation additions. Topology physics untouched. */
+.row-threat{background:rgba(239,68,68,.08)}
+.incident-row{cursor:pointer}.incident-row:hover{background:rgba(63,191,176,.09)}
+.wide-modal{width:min(1100px,94vw);max-height:90vh;overflow:auto}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.incident-timeline{display:grid;gap:8px}.timeline-item{display:grid;grid-template-columns:180px 110px 1fr;align-items:start;gap:12px;padding:10px 12px;border:1px solid #263449;border-radius:8px;background:#111a29}.timeline-item time{font-family:monospace;color:#91a0b5}
+#table-dns td:nth-child(5),#table-smb td:nth-child(6),#table-ti td:nth-child(6){max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:800px){.timeline-item{grid-template-columns:1fr}.wide-modal{width:96vw}}
+
+/* Data Management sensor picker */
+.sensor-reset-modal-card{width:min(720px,94vw)}
+.sensor-reset-toolbar{display:flex;align-items:end;justify-content:space-between;gap:16px;margin:14px 0 10px}
+.sensor-reset-search-label{display:grid;gap:6px;flex:1;color:var(--text-dim);font-size:13px}
+.sensor-reset-search-label input,.sensor-reset-confirm-label input{background:var(--panel-raised);border:1px solid var(--line);color:var(--text);padding:9px 10px;border-radius:6px}
+.sensor-reset-select-all{display:flex;align-items:center;gap:7px;color:var(--text-dim);font-size:13px;white-space:nowrap;padding-bottom:9px}
+.sensor-reset-list{border:1px solid var(--line);border-radius:8px;max-height:340px;overflow:auto;background:#0b1220}
+.sensor-reset-row{display:grid;grid-template-columns:auto minmax(130px,1fr) minmax(120px,1fr) minmax(90px,.7fr) auto;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+.sensor-reset-row:last-child{border-bottom:0}
+.sensor-reset-row:hover{background:var(--panel-raised)}
+.sensor-reset-row-name{font-weight:600;overflow-wrap:anywhere}
+.sensor-reset-row-meta{font-size:12px;color:var(--text-dim);overflow-wrap:anywhere}
+.sensor-reset-summary{display:flex;justify-content:flex-end;color:var(--text-dim);font-size:12px;margin:8px 0 14px}
+.sensor-reset-confirm-label{display:grid;gap:6px;color:var(--text-dim);font-size:13px}
+.sensor-reset-empty{padding:24px;text-align:center;color:var(--text-dim)}
+@media(max-width:700px){.sensor-reset-toolbar{align-items:stretch;flex-direction:column}.sensor-reset-select-all{padding-bottom:0}.sensor-reset-row{grid-template-columns:auto 1fr auto}.sensor-reset-row .sensor-reset-site,.sensor-reset-row .sensor-reset-host{display:none}}
+
+
+/* Investigation UI polish */
+.timeline-item{grid-template-columns:minmax(145px,180px) minmax(120px,170px) minmax(0,1fr)}
+.timeline-item>*{min-width:0}.timeline-item .severity{white-space:normal;overflow-wrap:anywhere;line-height:1.35}.timeline-item>div{overflow-wrap:anywhere;white-space:normal;line-height:1.45}
+#incident-modal-body .status-list dd{overflow-wrap:anywhere;white-space:normal}
+.topology-search .vlan-filter{min-width:0;flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px}
+.topology-search #vlan-filter-list{display:flex;flex-wrap:nowrap;gap:5px;max-width:none;min-width:max-content}
+.topology-search .vlan-chip{flex:0 0 auto}
+#devices-category-chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+#devices-category-chips .vlan-chip{padding:2px 7px;font-size:10px;line-height:16px;gap:4px}
+#devices-category-chips .vlan-chip input{width:11px;height:11px}
+#table-assets td{padding:8px 10px;line-height:20px;vertical-align:middle}
+#table-assets .ack-btn,#table-assets .danger-btn{padding:4px 7px;font-size:10px;line-height:16px}
+.dns-row,.alert-row{cursor:pointer}.dns-row:hover,.alert-row:hover{background:rgba(63,191,176,.09)!important}
+.detail-status-list dd{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}.wrap-anywhere{overflow-wrap:anywhere!important;word-break:break-word}
+.detail-message,.detail-list{border:1px solid var(--line);background:#0b1220;border-radius:7px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
+.compact-modal{width:min(520px,94vw)}.modal-field{display:grid;gap:7px;color:var(--text-dim)}.modal-field select{background:var(--panel-raised);border:1px solid var(--line);color:var(--text);padding:10px;border-radius:6px}
+@media(max-width:800px){.timeline-item{grid-template-columns:1fr}.topology-search .vlan-filter{width:100%}}
+
+/* Unified compact form controls across toolbars and explorer filters. */
+select,input[type="text"],input[type="search"],input[type="number"],input[type="url"],input[type="email"],input[type="password"],textarea{
+  background:var(--panel-raised);border:1px solid var(--line);color:var(--text);border-radius:6px;
+  padding:8px 10px;font-family:var(--font-mono);font-size:13px;line-height:1.2;box-sizing:border-box;
+}
+select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);outline-offset:1px;border-color:#4f78a8}
+.itot-toolbar select,.itot-toolbar input{height:34px;min-height:34px}
+.report-actions{white-space:nowrap}.report-actions button{padding:5px 9px;font-size:12px}
+.settings-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:12px;padding:0 18px 18px}
+.settings-config-group{border:1px solid var(--line);border-radius:8px;background:var(--panel-raised);padding:10px}
+.settings-config-group h3{margin:0 0 8px;font-size:13px;text-transform:none;letter-spacing:0}
+.settings-config-group .status-list{margin:0}.settings-config-group .status-list div{grid-template-columns:minmax(130px,45%) 1fr}
+.sensor-row,.health-row{cursor:pointer}.sensor-row:hover,.health-row:hover{background:rgba(63,191,176,.09)}
+.metric-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.metric-chart-grid section{border:1px solid var(--line);border-radius:9px;background:#0b1220;padding:12px}.metric-chart-grid h3{margin:0 0 8px}.metric-chart{display:block;width:100%;height:180px}
+.health-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.health-summary-item{border:1px solid var(--line);border-radius:8px;padding:14px;text-align:center}.health-summary-item span{display:block;text-transform:uppercase;color:var(--text-dim);font-size:11px}.health-summary-item strong{display:block;font-size:28px;margin-top:8px}.sensor-state-healthy{color:var(--ok)}.sensor-state-warning{color:var(--warn)}.sensor-state-critical,.sensor-state-offline{color:var(--crit)}
+.dashboard-trend-chart{width:100%;height:180px;display:block}
+@media(max-width:850px){.metric-chart-grid{grid-template-columns:1fr}.health-summary{grid-template-columns:repeat(2,1fr)}}
+#view-reconnaissance .analysis-form textarea{min-width:260px;resize:vertical}#table-recon td{vertical-align:top;max-width:320px;white-space:normal;overflow-wrap:anywhere}
+
+/* Reconnaissance and explainable asset identity */
+.recon-page{display:flex;flex-direction:column;gap:16px}.recon-subtabs,.asset-detail-tabs{display:flex;gap:8px;overflow-x:auto;border-bottom:1px solid var(--border,#334155);padding-bottom:8px}.recon-subtab,.asset-detail-tabs button{border:1px solid var(--border,#334155);background:var(--panel,#111827);color:inherit;border-radius:8px;padding:9px 13px;white-space:nowrap;cursor:pointer}.recon-subtab.active,.asset-detail-tabs button.active{background:var(--accent,#2563eb);border-color:var(--accent,#2563eb);color:#fff}.recon-panel{display:none}.recon-panel.active{display:block}#recon-ot-protocols{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;border:1px solid var(--border,#334155);border-radius:10px;padding:12px}#recon-ot-protocols label{display:flex;align-items:center;gap:8px}.asset-row,.recon-job-row{cursor:pointer}.asset-row:hover,.recon-job-row:hover{background:rgba(96,165,250,.08)}.identity-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:18px 0}.identity-grid>div{border:1px solid var(--border,#334155);border-radius:10px;padding:13px;display:flex;flex-direction:column;gap:5px}.identity-grid span{font-size:.78rem;opacity:.68;text-transform:uppercase;letter-spacing:.04em}.identity-grid strong{overflow-wrap:anywhere}.evidence-list{display:flex;flex-direction:column;gap:8px;margin-top:14px}.evidence-list article{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;border:1px solid var(--border,#334155);border-radius:10px;padding:12px}.evidence-list article>div{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.evidence-list article>div:first-child{flex-direction:column;align-items:flex-start;gap:3px}.confidence{font-weight:700}.wide-modal #asset-detail-body{margin-top:14px;max-height:65vh;overflow:auto}@media(max-width:800px){.evidence-list article{grid-template-columns:1fr}.recon-page .dashboard-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Dedicated Purdue architecture view. The main topology keeps its existing
+   force layout, animation settings and communication styling. */
+.purdue-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.purdue-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.purdue-summary .kpi{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px;display:flex;flex-direction:column;gap:4px}
+.purdue-summary .kpi span{color:var(--text-dim);font-size:12px}.purdue-summary .kpi strong{font-size:24px}
+.purdue-architecture{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px;padding:14px}
+.purdue-levels{display:grid;gap:9px}.purdue-band{border:1px solid var(--line);border-left-width:5px;border-radius:9px;background:var(--panel-raised);overflow:hidden}
+.purdue-band header{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:1px solid var(--line)}
+.purdue-band header em{font-style:normal;color:var(--text-dim);font-size:12px}.purdue-band-assets{display:flex;gap:7px;flex-wrap:wrap;padding:10px;min-height:42px}.purdue-band-assets.collapsed{min-height:0}
+.purdue-node{display:flex;flex-direction:column;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:7px 9px;cursor:pointer;min-width:135px}.purdue-node small{color:var(--text-dim);margin-top:2px}.purdue-empty{color:var(--text-dim);font-size:12px}
+.purdue-band.level-5{border-left-color:#94a3b8}.purdue-band.level-4{border-left-color:#60a5fa}.purdue-band.level-3-5{border-left-color:#a78bfa}.purdue-band.level-3{border-left-color:#22d3ee}.purdue-band.level-2{border-left-color:#fbbf24}.purdue-band.level-1{border-left-color:#4ade80}.purdue-band.level-0{border-left-color:#fb7185}.purdue-band.unclassified{border-left-color:#64748b}
+.purdue-side{border-left:1px solid var(--line);padding-left:14px}.purdue-side h3{margin:4px 0 10px}.coverage-row{display:grid;grid-template-columns:58px 1fr 32px;gap:7px;align-items:center;margin:7px 0}.coverage-row progress{width:100%}
+.purdue-suggestion{display:grid;gap:3px;border:1px solid var(--line);border-radius:7px;padding:8px;margin-bottom:8px}.purdue-suggestion span,.purdue-suggestion small{color:var(--text-dim)}.purdue-suggestion button{justify-self:start;margin-top:4px}
+@media(max-width:950px){.purdue-architecture{grid-template-columns:1fr}.purdue-side{border-left:0;border-top:1px solid var(--line);padding-left:0;padding-top:12px}.purdue-summary{grid-template-columns:repeat(2,minmax(130px,1fr))}}
+
+/* Grouped, task-oriented navigation */
+.sidebar{width:264px;transition:width .18s ease,transform .18s ease}.nav-search{padding:0 12px 10px}.nav-search input{width:100%;background:#0d1526;border:1px solid var(--line);border-radius:7px;color:var(--text);padding:8px 10px;font:inherit}.tabs{gap:5px;padding-bottom:18px}.nav-home{margin-bottom:3px}.nav-group{border-top:1px solid rgba(131,147,171,.12);padding-top:4px}.nav-group-toggle{width:100%;border:0;background:transparent;color:var(--text-dim);padding:9px 10px;display:flex;align-items:center;justify-content:space-between;font-family:var(--font-display);font-weight:650;font-size:11px;letter-spacing:.055em;text-transform:uppercase;cursor:pointer;text-align:left}.nav-group-toggle:hover{color:var(--text)}.nav-group-toggle>span:first-child{display:flex;align-items:center;gap:8px}.nav-icon{display:inline-flex;width:17px;justify-content:center;color:var(--ot);font-size:14px}.nav-chevron{font-size:19px;transform:rotate(0);transition:transform .15s}.nav-group.open .nav-chevron{transform:rotate(90deg)}.nav-submenu{display:none;padding:0 0 5px 16px}.nav-group.open .nav-submenu{display:block}.nav-submenu .tab{padding:8px 10px;border-left:2px solid transparent;border-radius:0 6px 6px 0}.nav-submenu .tab.active{border-left-color:var(--ot)}.nav-count{margin-left:auto;background:var(--crit);color:#fff;border-radius:99px;min-width:19px;padding:1px 6px;font-size:10px;text-align:center}.nav-count:empty{display:none}.nav-empty{padding:14px;color:var(--text-dim);text-align:center}.topbar{justify-content:space-between}.topbar-context{display:flex;align-items:center;gap:11px}.topbar-context>div{display:flex;flex-direction:column;line-height:1.25}.topbar-context small{color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.topbar-context strong{font-family:var(--font-display);font-size:15px}.sidebar-toggle{display:none;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:5px 8px;cursor:pointer}
+@media(max-width:980px){.sidebar{position:fixed;z-index:40;transform:translateX(-100%);box-shadow:10px 0 30px rgba(0,0,0,.35)}body.sidebar-open .sidebar{transform:translateX(0)}.sidebar-toggle{display:inline-block}.content-area{width:100%}.status-cluster .baseline-badge{display:none}}
+.nav-filter-hidden{display:none!important}
+/* UI consistency and compact filter controls. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+textarea, select {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+}
+input::placeholder, textarea::placeholder { color: var(--text-dim); opacity: .8; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--ot); box-shadow: 0 0 0 2px rgba(63,191,176,.12); }
+.vlan-filter { flex: 0 1 auto; margin-left: auto; max-width: min(52vw, 680px); }
+#vlan-filter-list, #devices-category-chips { display:flex; flex-wrap:wrap; gap:6px; width:auto; max-width:100%; }
+.vlan-chip { width:max-content; max-width:100%; flex:0 0 auto; padding:4px 9px; }
+.vlan-chip input { width:auto!important; min-width:0!important; flex:0 0 auto; }
+.ti-section { margin-top: 16px; padding:0; }
+.ti-section .rules-toolbar { padding-bottom:8px; }
+.analysis-form > label, .analysis-autodetect { min-height:74px; justify-content:flex-end; }
+.analysis-form select, .analysis-form input[type="file"] { height:38px; }
+.analysis-autodetect { display:flex; flex-direction:column; gap:5px; min-width:230px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel-raised); }
+.analysis-autodetect span { color:var(--text-dim); font-size:11px; }
+.analysis-autodetect small { color:var(--text-dim); }
+.vuln-upload-label { display:inline-flex; align-items:center; min-height:38px!important; align-self:flex-end; }
+.smb-row { cursor:pointer; }
+.smb-row:hover { background:rgba(63,191,176,.09)!important; }
+.smb-detail-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:14px 0; }
+.smb-detail-grid article { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel-raised); }
+.smb-detail-grid small,.smb-detail-grid strong { display:block; }
+.smb-detail-grid small { color:var(--text-dim); margin-bottom:4px; }
+@media(max-width:800px){.vlan-filter{margin-left:0;max-width:100%}.smb-detail-grid{grid-template-columns:1fr}.topology-search{flex-wrap:wrap}}
+.rule-kpis{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:10px;padding:8px 18px 14px}.rule-kpis button{background:#101a2f;border:1px solid #263757;border-radius:10px;color:inherit;padding:12px;text-align:left;cursor:pointer}.rule-kpis small{display:block;color:#8da6ce;text-transform:uppercase;letter-spacing:.06em}.rule-kpis strong{display:block;font-size:24px;margin-top:4px}.rule-filterbar{display:flex;flex-wrap:wrap;gap:10px;padding:0 18px 16px}.rule-filterbar label{display:grid;gap:5px;min-width:140px;color:#9db0cf;font-size:12px}.rule-filterbar input,.rule-filterbar select{min-height:38px}.rule-scope-badge{display:inline-flex;align-items:center;border:1px solid #3b4f75;border-radius:999px;padding:3px 8px;font-weight:700;white-space:nowrap}.rule-scope-it{background:rgba(80,130,255,.12)}.rule-scope-ot{background:rgba(44,190,140,.12)}.rule-scope-itot{background:rgba(255,166,56,.14)}.rule-scope-universal{background:rgba(160,170,190,.12)}.rule-protocols{max-width:190px;white-space:normal}.rule-catalog-list{display:grid;gap:12px;margin-top:16px}.rule-catalog-card{border:1px solid #263757;border-radius:10px;padding:14px;background:#0d1628}.rule-catalog-card header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.rule-catalog-card h3{margin:0}.rule-catalog-meta{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.rule-catalog-card p{color:#9db0cf}.rule-catalog-card footer{display:flex;justify-content:flex-end}@media(max-width:900px){.rule-kpis{grid-template-columns:repeat(2,1fr)}}
+.rule-origin{display:inline-flex;margin-top:5px;padding:2px 7px;border-radius:999px;border:1px solid #314365;font-size:10px;line-height:1.4;text-transform:uppercase;letter-spacing:.08em;color:#9eb2d4}.rule-origin-builtin{background:rgba(63,191,176,.08);border-color:rgba(63,191,176,.35)}.rule-origin-custom{background:rgba(91,130,230,.08);border-color:rgba(91,130,230,.35)}

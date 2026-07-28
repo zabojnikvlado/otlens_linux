@@ -1,0 +1,291 @@
+package central
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/zabojnikvlado/otlens_linux/internal/topology"
+)
+
+type AssetSecurityStatus struct {
+	SensorID   string     `json:"sensor_id"`
+	AssetIP    string     `json:"asset_ip"`
+	Status     string     `json:"status"`
+	Reason     string     `json:"reason"`
+	Source     string     `json:"source"`
+	DetectedAt *time.Time `json:"detected_at,omitempty"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	UpdatedBy  string     `json:"updated_by"`
+}
+type MalwareIncident struct {
+	ID             int64           `json:"id"`
+	SensorID       string          `json:"sensor_id"`
+	InitialAssetIP string          `json:"initial_asset_ip"`
+	Title          string          `json:"title"`
+	Status         string          `json:"status"`
+	Severity       string          `json:"severity"`
+	LookbackHours  int             `json:"lookback_hours"`
+	MaxHops        int             `json:"max_hops"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	Exposures      []AssetExposure `json:"exposures,omitempty"`
+}
+type AssetExposure struct {
+	AssetIP          string    `json:"asset_ip"`
+	ParentAssetIP    string    `json:"parent_asset_ip"`
+	HopCount         int       `json:"hop_count"`
+	ExposureScore    int       `json:"exposure_score"`
+	ExposureSeverity string    `json:"exposure_severity"`
+	Reasons          []string  `json:"reasons"`
+	FirstContact     time.Time `json:"first_contact"`
+	LastContact      time.Time `json:"last_contact"`
+	Protocols        []string  `json:"protocols"`
+	Bytes            uint64    `json:"bytes"`
+	Packets          uint64    `json:"packets"`
+}
+type flowContact struct {
+	A, B, Protocol   string
+	SrcPort, DstPort uint16
+	First, Last      time.Time
+	Bytes, Packets   uint64
+	IsOT             bool
+}
+
+func persistFlowObservations(ctx context.Context, x execer, sensorID string, capturedAt time.Time, edges []topology.Edge) error {
+	bucket := capturedAt.UTC().Truncate(time.Minute)
+	for _, e := range edges {
+		if e.ID == "" || e.SrcIP == "" || e.DstIP == "" {
+			continue
+		}
+		var op, ob, oab, oba, oabb, obab uint64
+		rows, err := x.QueryContext(ctx, `SELECT packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a FROM flow_counters WHERE sensor_id=$1 AND flow_id=$2`, sensorID, e.ID)
+		if err != nil {
+			return err
+		}
+		// QueryRow is not part of execer, so use the returned rows.
+		var found bool
+		if rows.Next() {
+			if err := rows.Scan(&op, &ob, &oab, &oba, &oabb, &obab); err != nil {
+				rows.Close()
+				return err
+			}
+			found = true
+		}
+		rows.Close()
+		dp, db := e.Packets, e.Bytes
+		dpa, dpb := e.PacketsAToB, e.PacketsBToA
+		dba, dbb := e.BytesAToB, e.BytesBToA
+		if found {
+			if dp >= op {
+				dp -= op
+			}
+			if db >= ob {
+				db -= ob
+			}
+			if dpa >= oab {
+				dpa -= oab
+			}
+			if dpb >= oba {
+				dpb -= oba
+			}
+			if dba >= oabb {
+				dba -= oabb
+			}
+			if dbb >= obab {
+				dbb -= obab
+			}
+		}
+		if dp > 0 || db > 0 {
+			_, err = x.ExecContext(ctx, `INSERT INTO flow_observations(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`, sensorID, e.ID, bucket, capturedAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol, e.InitiatorIP, e.ResponderIP, e.InitiatorPort, e.ResponderPort, dp, db, dpa, dpb, dba, dbb, e.VLANID, e.IsOT)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = x.ExecContext(ctx, `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) SetAssetSecurityStatus(ctx context.Context, v AssetSecurityStatus) error {
+	_, err := r.db.ExecContext(ctx, `INSERT INTO asset_security_status(sensor_id,asset_ip,status,reason,source,detected_at,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,NOW(),$7) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET status=EXCLUDED.status,reason=EXCLUDED.reason,source=EXCLUDED.source,detected_at=EXCLUDED.detected_at,updated_at=NOW(),updated_by=EXCLUDED.updated_by`, v.SensorID, v.AssetIP, v.Status, v.Reason, v.Source, v.DetectedAt, v.UpdatedBy)
+	return err
+}
+func (r *Repository) ListAssetSecurityStatuses(ctx context.Context, sensorID string) ([]AssetSecurityStatus, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_ip,status,reason,source,detected_at,updated_at,updated_by FROM asset_security_status WHERE ($1='' OR sensor_id=$1) ORDER BY updated_at DESC`, sensorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AssetSecurityStatus
+	for rows.Next() {
+		var v AssetSecurityStatus
+		if err := rows.Scan(&v.SensorID, &v.AssetIP, &v.Status, &v.Reason, &v.Source, &v.DetectedAt, &v.UpdatedAt, &v.UpdatedBy); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func exposureSeverity(exposureScore int) string {
+	if exposureScore >= 80 {
+		return "critical"
+	}
+	if exposureScore >= 60 {
+		return "high"
+	}
+	if exposureScore >= 30 {
+		return "medium"
+	}
+	return "low"
+}
+func contactExposureScore(c flowContact, hop int) (int, []string) {
+	exposureScore := 20
+	reasons := []string{"direct communication with traced asset"}
+	p := strings.ToUpper(c.Protocol)
+	if p == "TCP" && (c.SrcPort == 445 || c.DstPort == 445 || c.SrcPort == 3389 || c.DstPort == 3389 || c.SrcPort == 22 || c.DstPort == 22 || c.SrcPort == 5985 || c.DstPort == 5985) {
+		exposureScore += 25
+		reasons = append(reasons, "administrative or file-transfer protocol")
+	}
+	if c.Bytes >= 100*1024*1024 {
+		exposureScore += 15
+		reasons = append(reasons, "large data transfer")
+	}
+	if c.Packets >= 100 {
+		exposureScore += 10
+		reasons = append(reasons, "repeated communication")
+	}
+	if c.IsOT {
+		exposureScore += 30
+		reasons = append(reasons, "OT protocol exposure")
+	}
+	exposureScore -= 15 * (hop - 1)
+	if exposureScore < 0 {
+		exposureScore = 0
+	}
+	if exposureScore > 100 {
+		exposureScore = 100
+	}
+	return exposureScore, reasons
+}
+func (r *Repository) CreateContactTrace(ctx context.Context, sensorID, ip string, lookback, maxHops int) (MalwareIncident, error) {
+	if lookback <= 0 {
+		lookback = 24
+	}
+	if maxHops < 1 {
+		maxHops = 1
+	}
+	if maxHops > 3 {
+		maxHops = 3
+	}
+	now := time.Now().UTC()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MalwareIncident{}, err
+	}
+	defer tx.Rollback()
+	var id int64
+	title := "Malware infection – " + ip
+	err = tx.QueryRowContext(ctx, `INSERT INTO malware_incidents(sensor_id,initial_asset_ip,title,lookback_hours,max_hops) VALUES($1,$2,$3,$4,$5) RETURNING id`, sensorID, ip, title, lookback, maxHops).Scan(&id)
+	if err != nil {
+		return MalwareIncident{}, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT src_ip,dst_ip,protocol,src_port,dst_port,MIN(bucket_start),MAX(bucket_end),SUM(bytes),SUM(packets),BOOL_OR(is_ot) FROM flow_observations WHERE sensor_id=$1 AND bucket_end >= $2 GROUP BY src_ip,dst_ip,protocol,src_port,dst_port`, sensorID, now.Add(-time.Duration(lookback)*time.Hour))
+	if err != nil {
+		return MalwareIncident{}, err
+	}
+	var contacts []flowContact
+	for rows.Next() {
+		var c flowContact
+		if err := rows.Scan(&c.A, &c.B, &c.Protocol, &c.SrcPort, &c.DstPort, &c.First, &c.Last, &c.Bytes, &c.Packets, &c.IsOT); err != nil {
+			rows.Close()
+			return MalwareIncident{}, err
+		}
+		contacts = append(contacts, c)
+	}
+	rows.Close()
+	frontier := []string{ip}
+	visited := map[string]bool{ip: true}
+	var ex []AssetExposure
+	for hop := 1; hop <= maxHops; hop++ {
+		var next []string
+		for _, cur := range frontier {
+			for _, c := range contacts {
+				other := ""
+				if c.A == cur {
+					other = c.B
+				} else if c.B == cur {
+					other = c.A
+				}
+				if other == "" || visited[other] {
+					continue
+				}
+				visited[other] = true
+				exposureScore, reasons := contactExposureScore(c, hop)
+				e := AssetExposure{AssetIP: other, ParentAssetIP: cur, HopCount: hop, ExposureScore: exposureScore, ExposureSeverity: exposureSeverity(exposureScore), Reasons: reasons, FirstContact: c.First, LastContact: c.Last, Protocols: []string{c.Protocol}, Bytes: c.Bytes, Packets: c.Packets}
+				raw, _ := json.Marshal(reasons)
+				_, err = tx.ExecContext(ctx, `INSERT INTO asset_exposures(incident_id,exposed_asset_ip,parent_asset_ip,hop_count,exposure_score,exposure_severity,reasons,first_contact,last_contact,protocols,bytes,packets) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, id, e.AssetIP, e.ParentAssetIP, e.HopCount, e.ExposureScore, e.ExposureSeverity, raw, e.FirstContact, e.LastContact, strings.Join(e.Protocols, ","), e.Bytes, e.Packets)
+				if err != nil {
+					return MalwareIncident{}, err
+				}
+				ex = append(ex, e)
+				next = append(next, other)
+			}
+		}
+		frontier = next
+	}
+	if err := tx.Commit(); err != nil {
+		return MalwareIncident{}, err
+	}
+	sort.Slice(ex, func(i, j int) bool { return ex[i].ExposureScore > ex[j].ExposureScore })
+	return MalwareIncident{ID: id, SensorID: sensorID, InitialAssetIP: ip, Title: title, Status: "open", Severity: "critical", LookbackHours: lookback, MaxHops: maxHops, CreatedAt: now, UpdatedAt: now, Exposures: ex}, nil
+}
+func (r *Repository) GetMalwareIncident(ctx context.Context, id int64) (MalwareIncident, error) {
+	var v MalwareIncident
+	err := r.db.QueryRowContext(ctx, `SELECT id,sensor_id,initial_asset_ip,title,status,severity,lookback_hours,max_hops,created_at,updated_at FROM malware_incidents WHERE id=$1`, id).Scan(&v.ID, &v.SensorID, &v.InitialAssetIP, &v.Title, &v.Status, &v.Severity, &v.LookbackHours, &v.MaxHops, &v.CreatedAt, &v.UpdatedAt)
+	if err != nil {
+		return v, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT exposed_asset_ip,parent_asset_ip,hop_count,exposure_score,exposure_severity,reasons,first_contact,last_contact,protocols,bytes,packets FROM asset_exposures WHERE incident_id=$1 ORDER BY exposure_score DESC`, id)
+	if err != nil {
+		return v, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e AssetExposure
+		var raw []byte
+		var protocols string
+		if err := rows.Scan(&e.AssetIP, &e.ParentAssetIP, &e.HopCount, &e.ExposureScore, &e.ExposureSeverity, &raw, &e.FirstContact, &e.LastContact, &protocols, &e.Bytes, &e.Packets); err != nil {
+			return v, err
+		}
+		json.Unmarshal(raw, &e.Reasons)
+		if protocols != "" {
+			e.Protocols = strings.Split(protocols, ",")
+		}
+		v.Exposures = append(v.Exposures, e)
+	}
+	return v, rows.Err()
+}
+func (v MalwareIncident) Graph() map[string]interface{} {
+	nodes := []map[string]interface{}{{"id": v.InitialAssetIP, "security_status": "infected", "is_initial_asset": true, "exposure_score": nil}}
+	edges := []map[string]interface{}{}
+	for _, e := range v.Exposures {
+		nodes = append(nodes, map[string]interface{}{"id": e.AssetIP, "security_status": "unknown", "exposure_status": "exposed", "is_initial_asset": false, "exposure_score": e.ExposureScore, "exposure_severity": e.ExposureSeverity, "hop_count": e.HopCount})
+		edges = append(edges, map[string]interface{}{"source": e.ParentAssetIP, "target": e.AssetIP, "exposure_score": e.ExposureScore, "exposure_severity": e.ExposureSeverity, "first_contact": e.FirstContact, "last_contact": e.LastContact, "protocols": e.Protocols})
+	}
+	return map[string]interface{}{"incident": v, "nodes": nodes, "edges": edges}
+}
+func validateSecurityStatus(v string) error {
+	switch v {
+	case "clean", "suspected", "infected", "contained", "recovered":
+		return nil
+	}
+	return fmt.Errorf("invalid status")
+}

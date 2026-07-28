@@ -71,6 +71,9 @@ type Rule struct {
 	Name          string          `json:"name"`
 	Description   string          `json:"description,omitempty"`
 	Category      string          `json:"category,omitempty"`
+	Scope         string          `json:"scope,omitempty"`
+	Protocols     []string        `json:"protocols,omitempty"`
+	AttackMapping []string        `json:"attack_mapping,omitempty"`
 	Kind          string          `json:"kind"`
 	Enabled       bool            `json:"enabled"`
 	Severity      string          `json:"severity,omitempty"`
@@ -94,6 +97,35 @@ type SensorRegistration struct {
 	Version                string `json:"version"`
 	Hostname               string `json:"hostname"`
 	CertificateFingerprint string `json:"certificate_fingerprint"`
+}
+
+type SensorMetricSample struct {
+	SensorID      string                 `json:"sensor_id"`
+	RecordedAt    time.Time              `json:"recorded_at"`
+	UptimeSeconds int64                  `json:"uptime_seconds"`
+	Health        map[string]string      `json:"health,omitempty"`
+	Metrics       map[string]interface{} `json:"metrics,omitempty"`
+	Versions      map[string]string      `json:"versions,omitempty"`
+	Capture       map[string]interface{} `json:"capture,omitempty"`
+	Sync          SyncHealth             `json:"sync,omitempty"`
+	HealthState   string                 `json:"health_state,omitempty"`
+	HealthReasons []string               `json:"health_reasons,omitempty"`
+}
+
+type CentralHealth struct {
+	RecordedAt        time.Time `json:"recorded_at"`
+	UptimeSeconds     int64     `json:"uptime_seconds"`
+	GoRoutines        int       `json:"goroutines"`
+	MemoryAllocBytes  uint64    `json:"memory_alloc_bytes"`
+	MemorySysBytes    uint64    `json:"memory_sys_bytes"`
+	HeapObjects       uint64    `json:"heap_objects"`
+	DatabaseOK        bool      `json:"database_ok"`
+	DatabaseLatencyMS float64   `json:"database_latency_ms"`
+	SensorsTotal      int       `json:"sensors_total"`
+	SensorsHealthy    int       `json:"sensors_healthy"`
+	SensorsWarning    int       `json:"sensors_warning"`
+	SensorsCritical   int       `json:"sensors_critical"`
+	SensorsOffline    int       `json:"sensors_offline"`
 }
 
 type Heartbeat struct {
@@ -137,29 +169,48 @@ type Command struct {
 	Target string `json:"target"`
 }
 
+type ThreatIntelIndicator struct {
+	Type       string     `json:"type"`
+	Value      string     `json:"value"`
+	Provider   string     `json:"provider"`
+	ThreatType string     `json:"threat_type,omitempty"`
+	Confidence int        `json:"confidence"`
+	ValidUntil *time.Time `json:"valid_until,omitempty"`
+}
+
+type ThreatIntelSnapshot struct {
+	Version     int64                  `json:"version"`
+	GeneratedAt time.Time              `json:"generated_at"`
+	Indicators  []ThreatIntelIndicator `json:"indicators"`
+}
+
 type SyncResponse struct {
-	ConfigVersion int64     `json:"config_version"`
-	RulesVersion  int64     `json:"rules_version"`
-	RuleSet       *RuleSet  `json:"rule_set,omitempty"`
-	Commands      []Command `json:"commands,omitempty"`
+	ConfigVersion      int64                `json:"config_version"`
+	RulesVersion       int64                `json:"rules_version"`
+	RuleSet            *RuleSet             `json:"rule_set,omitempty"`
+	Commands           []Command            `json:"commands,omitempty"`
+	ThreatIntelVersion int64                `json:"threat_intel_version,omitempty"`
+	ThreatIntel        *ThreatIntelSnapshot `json:"threat_intel,omitempty"`
 }
 
 // TelemetrySnapshot is the periodically uploaded sensor view used by the
 // Central Topology, Assets and OT Tags tabs. Sensors remain the source of
 // truth for passive discovery; Central only aggregates and persists it.
 type TelemetrySnapshot struct {
-	SensorID   string          `json:"sensor_id"`
-	CapturedAt time.Time       `json:"captured_at"`
-	Topology   json.RawMessage `json:"topology"`
-	Tags       json.RawMessage `json:"tags"`
-	TagChanges json.RawMessage `json:"tag_changes,omitempty"`
-	TagEvents  json.RawMessage `json:"tag_events,omitempty"`
-	Alerts     json.RawMessage `json:"alerts,omitempty"`
-	Baseline   json.RawMessage `json:"baseline,omitempty"`
-	Rules      json.RawMessage `json:"rules,omitempty"`
-	BatchID    string          `json:"batch_id,omitempty"`
-	Sequence   int64           `json:"sequence,omitempty"`
-	Checksum   string          `json:"checksum,omitempty"`
+	SensorID        string          `json:"sensor_id"`
+	CapturedAt      time.Time       `json:"captured_at"`
+	Topology        json.RawMessage `json:"topology"`
+	Tags            json.RawMessage `json:"tags"`
+	TagChanges      json.RawMessage `json:"tag_changes,omitempty"`
+	TagEvents       json.RawMessage `json:"tag_events,omitempty"`
+	Alerts          json.RawMessage `json:"alerts,omitempty"`
+	Baseline        json.RawMessage `json:"baseline,omitempty"`
+	Rules           json.RawMessage `json:"rules,omitempty"`
+	DNSObservations json.RawMessage `json:"dns_observations,omitempty"`
+	SMBObservations json.RawMessage `json:"smb_observations,omitempty"`
+	BatchID         string          `json:"batch_id,omitempty"`
+	Sequence        int64           `json:"sequence,omitempty"`
+	Checksum        string          `json:"checksum,omitempty"`
 }
 
 type AnalysisJob struct {

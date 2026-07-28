@@ -2,6 +2,7 @@ package central
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"html"
 	"log"
@@ -317,4 +318,20 @@ func (r *Repository) GetReport(ctx context.Context, id string) (Report, error) {
 		rep.Recipients = strings.Split(recipients, ",")
 	}
 	return rep, nil
+}
+
+// DeleteReport permanently removes one saved report.
+func (r *Repository) DeleteReport(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM report_history WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }

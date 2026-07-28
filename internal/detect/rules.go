@@ -13,6 +13,15 @@ import (
 
 type RuleKind string
 
+type RuleScope string
+
+const (
+	RuleScopeIT        RuleScope = "IT"
+	RuleScopeOT        RuleScope = "OT"
+	RuleScopeITOT      RuleScope = "IT/OT"
+	RuleScopeUniversal RuleScope = "Universal"
+)
+
 const (
 	RuleKindBuiltin RuleKind = "builtin"
 	RuleKindCustom  RuleKind = "custom"
@@ -60,6 +69,9 @@ type Rule struct {
 	Name          string          `json:"name"`
 	Description   string          `json:"description,omitempty"`
 	Category      string          `json:"category,omitempty"`
+	Scope         RuleScope       `json:"scope,omitempty"`
+	Protocols     []string        `json:"protocols,omitempty"`
+	AttackMapping []string        `json:"attack_mapping,omitempty"`
 	Kind          RuleKind        `json:"kind"`
 	Enabled       bool            `json:"enabled"`
 	Severity      string          `json:"severity,omitempty"`
@@ -93,17 +105,30 @@ type RuleView struct {
 
 func builtinRules() map[string]*Rule {
 	seed := []*Rule{
-		{ID: string(AlertARPSpoof), Name: "ARP Spoofing", Category: "security", AlertType: AlertARPSpoof},
-		{ID: string(AlertNewCommunication), Name: "New Communication (baseline)", Category: "baseline", AlertType: AlertNewCommunication},
-		{ID: string(AlertICSCriticalOperation), Name: "Critical ICS Operation", Category: "ics", AlertType: AlertICSCriticalOperation},
-		{ID: string(AlertNewAsset), Name: "New Asset (baseline)", Category: "asset", AlertType: AlertNewAsset},
-		{ID: string(AlertValueOutOfRange), Name: "Value Out of Range", Category: "ot_tag", AlertType: AlertValueOutOfRange},
-		{ID: string(AlertHoneypotProbed), Name: "Honeypot Probed", Category: "security", AlertType: AlertHoneypotProbed},
-		{ID: string(AlertHoneypotLateralMovement), Name: "Honeypot Lateral Movement", Category: "security", AlertType: AlertHoneypotLateralMovement},
-		{ID: string(AlertExternalCommunication), Name: "Internal Asset External Communication", Category: "security", AlertType: AlertExternalCommunication},
-		{ID: string(AlertSegmentationViolation), Name: "Purdue Model Segmentation Violation", Category: "network", AlertType: AlertSegmentationViolation},
-		{ID: string(AlertReconnaissance), Name: "Reconnaissance (Host/Port Scan)", Category: "network", AlertType: AlertReconnaissance},
-		{ID: string(AlertC2Beacon), Name: "C2 Beaconing (Regular Interval Detection)", Category: "security", AlertType: AlertC2Beacon},
+		{ID: string(AlertARPSpoof), Name: "ARP Spoofing", Category: "network_behavior", Scope: RuleScopeUniversal, Protocols: []string{"ARP"}, AttackMapping: []string{"ATT&CK T1557"}, AlertType: AlertARPSpoof},
+		{ID: string(AlertNewCommunication), Name: "New Communication (baseline)", Category: "network_behavior", Scope: RuleScopeUniversal, AlertType: AlertNewCommunication},
+		{ID: string(AlertICSCriticalOperation), Name: "Critical ICS Operation", Category: "ot_process", Scope: RuleScopeOT, Protocols: []string{"S7", "Modbus", "EtherNet/IP", "OPC UA", "BACnet"}, AttackMapping: []string{"ATT&CK for ICS T0836", "ATT&CK for ICS T0858"}, AlertType: AlertICSCriticalOperation},
+		{ID: string(AlertNewAsset), Name: "New Asset (baseline)", Category: "asset_intelligence", Scope: RuleScopeUniversal, AlertType: AlertNewAsset},
+		{ID: string(AlertValueOutOfRange), Name: "Value Out of Range", Category: "ot_process", Scope: RuleScopeOT, Protocols: []string{"OT tags"}, AlertType: AlertValueOutOfRange},
+		{ID: string(AlertHoneypotProbed), Name: "Honeypot Probed", Category: "network_behavior", Scope: RuleScopeUniversal, AlertType: AlertHoneypotProbed},
+		{ID: string(AlertHoneypotLateralMovement), Name: "Honeypot Lateral Movement", Category: "it_activity", Scope: RuleScopeIT, AttackMapping: []string{"ATT&CK T1021"}, AlertType: AlertHoneypotLateralMovement},
+		{ID: string(AlertExternalCommunication), Name: "Internal Asset External Communication", Category: "network_behavior", Scope: RuleScopeUniversal, AlertType: AlertExternalCommunication},
+		{ID: string(AlertSegmentationViolation), Name: "Purdue Model Segmentation Violation", Category: "architecture_violation", Scope: RuleScopeITOT, AttackMapping: []string{"ATT&CK for ICS T0886"}, AlertType: AlertSegmentationViolation},
+		{ID: string(AlertReconnaissance), Name: "Reconnaissance (Host/Port Scan)", Category: "network_behavior", Scope: RuleScopeIT, AttackMapping: []string{"ATT&CK T1046"}, AlertType: AlertReconnaissance},
+		{ID: string(AlertC2Beacon), Name: "C2 Beaconing (Regular Interval Detection)", Category: "it_activity", Scope: RuleScopeIT, AttackMapping: []string{"ATT&CK T1071"}, AlertType: AlertC2Beacon},
+		{ID: string(AlertOTValueAnomaly), Name: "OT Value Anomaly", Category: "ot_process", Scope: RuleScopeOT, Protocols: []string{"OT tags"}, AlertType: AlertOTValueAnomaly},
+		{ID: string(AlertLateralMovement), Name: "Lateral Movement Heuristics", Category: "it_activity", Scope: RuleScopeIT, Protocols: []string{"SMB", "RDP", "WinRM", "SSH"}, AttackMapping: []string{"ATT&CK T1021"}, AlertType: AlertLateralMovement},
+		{ID: string(AlertC2Correlated), Name: "Correlated C2 Detection", Category: "it_activity", Scope: RuleScopeUniversal, AttackMapping: []string{"ATT&CK T1071"}, AlertType: AlertC2Correlated},
+
+		// Product-managed packet-policy rules. These are shipped as built-ins,
+		// cannot be deleted, and start in simulation mode so operators can tune
+		// environment-specific VLAN/IP allowlists before alerting.
+		{ID: "builtin.first_seen_remote_management", Name: "First-seen Remote Management Service", Description: "Detects traffic to common remote-management services. Tune approved administration sources before enabling alert mode.", Category: "it_activity", Scope: RuleScopeIT, Protocols: []string{"RDP", "WinRM", "SSH", "VNC"}, AttackMapping: []string{"ATT&CK T1021"}, Severity: "medium", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "in", Value: "22,3389,5985,5986,5900"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
+		{ID: "builtin.remote_management_into_ot", Name: "Remote Management into OT", Description: "Detects remote-administration protocols entering an OT segment. Add the destination OT VLAN or target range before leaving simulation mode.", Category: "architecture_violation", Scope: RuleScopeITOT, Protocols: []string{"RDP", "WinRM", "SSH", "VNC"}, AttackMapping: []string{"ATT&CK T1021", "ATT&CK for ICS T0886"}, Severity: "high", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "in", Value: "22,3389,5985,5986,5900"}, {Field: RuleFieldVLAN, Operator: "eq", Value: "CHANGE_ME_OT_VLAN"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
+		{ID: "builtin.direct_ot_protocol_access", Name: "Direct OT Protocol Access", Description: "Detects direct access to common controller and OT service ports. Restrict approved engineering sources before enabling alert mode.", Category: "architecture_violation", Scope: RuleScopeITOT, Protocols: []string{"S7", "Modbus", "EtherNet/IP", "OPC UA", "BACnet"}, AttackMapping: []string{"ATT&CK for ICS T0886"}, Severity: "high", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "in", Value: "102,502,44818,4840,47808"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
+		{ID: "builtin.smb_into_ot", Name: "SMB into OT Segment", Description: "Detects SMB communication entering a selected OT VLAN and supports investigations of executable or script transfer into OT.", Category: "it_activity", Scope: RuleScopeITOT, Protocols: []string{"SMB"}, AttackMapping: []string{"ATT&CK T1021.002"}, Severity: "high", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "eq", Value: "445"}, {Field: RuleFieldVLAN, Operator: "eq", Value: "CHANGE_ME_OT_VLAN"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
+		{ID: "builtin.unexpected_engineering_access", Name: "Unexpected Engineering Access", Description: "Detects workstation traffic to engineering and controller services. Tune approved engineering-station exclusions before enabling alert mode.", Category: "ot_process", Scope: RuleScopeOT, Protocols: []string{"S7", "Modbus", "EtherNet/IP", "OPC UA"}, AttackMapping: []string{"ATT&CK for ICS T0886"}, Severity: "high", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "in", Value: "102,502,44818,4840"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
+		{ID: "builtin.large_controller_transfer", Name: "Large Transfer to Controller Service", Description: "Heuristic for unusually large packets to controller services that may indicate project, program, or firmware transfer activity.", Category: "ot_process", Scope: RuleScopeOT, Protocols: []string{"S7", "Modbus", "EtherNet/IP"}, AttackMapping: []string{"ATT&CK for ICS T0843"}, Severity: "medium", Simulation: true, GroupOperator: "AND", Groups: []RuleGroup{{Operator: "AND", Conditions: []RuleCondition{{Field: RuleFieldDstPort, Operator: "in", Value: "102,502,44818"}, {Field: RuleFieldPacketSize, Operator: "gte", Value: "1200"}}}}, Suppression: RuleSuppression{Mode: "aggregate"}},
 	}
 	out := map[string]*Rule{}
 	for _, r := range seed {
@@ -169,6 +194,14 @@ func (e *Engine) RestoreRules(rules []*Rule) { e.ReplaceManagedRules(rules) }
 func normalizeRule(r *Rule) error {
 	if strings.TrimSpace(r.Name) == "" {
 		return fmt.Errorf("name must not be empty")
+	}
+	if r.Scope == "" {
+		r.Scope = RuleScopeUniversal
+	}
+	switch r.Scope {
+	case RuleScopeIT, RuleScopeOT, RuleScopeITOT, RuleScopeUniversal:
+	default:
+		return fmt.Errorf("unsupported rule scope %q", r.Scope)
 	}
 	if r.Severity == "" {
 		r.Severity = "medium"
@@ -339,7 +372,7 @@ func (e *Engine) handleCustomRules(packet core.Packet) {
 	e.mutex.RLock()
 	rules := make([]*Rule, 0)
 	for _, r := range e.rules {
-		if r.Kind == RuleKindCustom && r.Enabled && ruleMatches(r, packet) {
+		if r.Enabled && len(r.Groups) > 0 && ruleMatches(r, packet) {
 			c := *r
 			rules = append(rules, &c)
 		}
@@ -519,8 +552,16 @@ func (e *Engine) ReplaceManagedRules(rules []*Rule) {
 		clone := *r
 		if clone.Kind == RuleKindBuiltin {
 			if x := e.rules[clone.ID]; x != nil {
+				// Preserve operator-controlled settings while retaining the
+				// product definition, metadata and detector implementation.
 				x.Enabled = clone.Enabled
-				x.Version = clone.Version
+				x.Severity = clone.Severity
+				x.Simulation = clone.Simulation
+				x.Suppression = clone.Suppression
+				x.Schedule = clone.Schedule
+				if clone.Version > x.Version {
+					x.Version = clone.Version
+				}
 			}
 			continue
 		}

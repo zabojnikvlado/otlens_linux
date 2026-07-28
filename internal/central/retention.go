@@ -36,6 +36,9 @@ type retentionTable struct {
 }
 
 var retentionTables = []retentionTable{
+	{"flow_observations", "bucket_end", func(c RetentionConfig) int { return c.TelemetryDays }},
+	{"dns_observations", "observed_at", func(c RetentionConfig) int { return c.TelemetryDays }},
+	{"smb_observations", "observed_at", func(c RetentionConfig) int { return c.TelemetryDays }},
 	{"topology_edges", "last_seen", func(c RetentionConfig) int { return c.TelemetryDays }},
 	{"topology_nodes", "last_seen", func(c RetentionConfig) int { return c.TelemetryDays }},
 	{"analysis_jobs", "created_at", func(c RetentionConfig) int { return c.TelemetryDays }},

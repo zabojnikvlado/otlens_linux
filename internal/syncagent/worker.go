@@ -13,6 +13,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
+	"github.com/zabojnikvlado/otlens_linux/internal/threatintel"
 )
 
 type Worker struct {
@@ -27,6 +28,7 @@ type Worker struct {
 	Snapshot        func() (management.TelemetrySnapshot, error)
 	ApplyCommand    func(management.Command)
 	ProcessAnalysis func(context.Context)
+	ThreatIntel     *threatintel.Store
 
 	mu              sync.Mutex
 	lastAttempt     time.Time
@@ -88,7 +90,17 @@ func (w *Worker) sync(ctx context.Context) {
 		return
 	}
 
-	commands, err := w.Client.PullRules(ctx, func(rules []*detect.Rule) error { w.Detect.ReplaceManagedRules(rules); return nil })
+	commands, err := w.Client.PullRules(ctx, func(rules []*detect.Rule) error { w.Detect.ReplaceManagedRules(rules); return nil }, func(snapshot management.ThreatIntelSnapshot) error {
+		if w.ThreatIntel == nil {
+			return nil
+		}
+		items := make([]threatintel.Indicator, 0, len(snapshot.Indicators))
+		for _, indicator := range snapshot.Indicators {
+			items = append(items, threatintel.Indicator{Type: indicator.Type, Value: indicator.Value, Provider: indicator.Provider, ThreatType: indicator.ThreatType, Confidence: indicator.Confidence, ValidUntil: indicator.ValidUntil})
+		}
+		w.ThreatIntel.ApplySnapshot(items)
+		return nil
+	})
 	if err != nil {
 		log.Printf("OTLens Central rule synchronization failed: %v", err)
 	} else if w.ApplyCommand != nil {

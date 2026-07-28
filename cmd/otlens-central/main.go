@@ -119,20 +119,34 @@ func main() {
 		DayOfWeek: cfg.Reports.DayOfWeek, HourUTC: cfg.Reports.HourUTC, Recipients: cfg.Reports.Recipients,
 	}
 
-	srv := &central.Server{
+	srv := &central.Server{StartedAt: time.Now().UTC(),
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
 		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
 		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,
-		AnalysisMaxBytes:     cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
-		Vuln:                 vulnDB,
-		SensorOfflineAfter:   cfg.Sensors.OfflineAfter,
-		SensorCheckInterval:  cfg.Sensors.CheckInterval,
-		WebTLSEnabled:        cfg.Web.TLS.Enabled,
-		SensorAPITLSEnabled:  cfg.SensorAPI.TLS.Enabled,
-		SessionDuration:      cfg.Auth.SessionDuration,
-		Retention:            retentionCfg,
-		Notifications:        notificationsCfg,
-		Reports:              reportsCfg,
+		AnalysisMaxBytes:    cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
+		Vuln:                vulnDB,
+		SensorOfflineAfter:  cfg.Sensors.OfflineAfter,
+		SensorCheckInterval: cfg.Sensors.CheckInterval,
+		WebTLSEnabled:       cfg.Web.TLS.Enabled,
+		SensorAPITLSEnabled: cfg.SensorAPI.TLS.Enabled,
+		SessionDuration:     cfg.Auth.SessionDuration,
+		Retention:           retentionCfg,
+		Notifications:       notificationsCfg,
+		Reports:             reportsCfg,
+		RuntimeConfig: map[string]map[string]interface{}{
+			"Web listener":                  {"host": cfg.Web.Host, "port": cfg.Web.Port, "tls.enabled": cfg.Web.TLS.Enabled, "tls.min_version": cfg.Web.TLS.MinVersion, "tls.cipher_suites": cfg.Web.TLS.CipherSuites},
+			"Sensor API":                    {"host": cfg.SensorAPI.Host, "port": cfg.SensorAPI.Port, "tls.enabled": cfg.SensorAPI.TLS.Enabled, "tls.min_version": cfg.SensorAPI.TLS.MinVersion, "tls.cipher_suites": cfg.SensorAPI.TLS.CipherSuites},
+			"Database":                      {"host": cfg.Database.Host, "port": cfg.Database.Port, "name": cfg.Database.Name, "user": cfg.Database.User, "sslmode": cfg.Database.SSLMode},
+			"Authentication":                {"session_duration": cfg.Auth.SessionDuration.String(), "bootstrap_username": cfg.Auth.BootstrapUsername},
+			"Sensors":                       {"offline_after": cfg.Sensors.OfflineAfter.String(), "check_interval": cfg.Sensors.CheckInterval.String()},
+			"Analysis":                      {"enabled": cfg.Analysis.Enabled, "allow_import": cfg.Analysis.AllowImport, "upload_directory": cfg.Analysis.UploadDirectory, "max_upload_size_mb": cfg.Analysis.MaxUploadSizeMB, "job_timeout": cfg.Analysis.JobTimeout.String(), "retain_pcap": cfg.Analysis.RetainPCAP.String()},
+			"SIEM":                          {"enabled": cfg.SIEM.Enabled, "url": cfg.SIEM.URL, "export_alerts": cfg.SIEM.ExportAlerts, "export_audit": cfg.SIEM.ExportAudit, "source": cfg.SIEM.Source, "timeout": cfg.SIEM.Timeout.String(), "retry_interval": cfg.SIEM.RetryInterval.String(), "batch_size": cfg.SIEM.BatchSize, "max_attempts": cfg.SIEM.MaxAttempts, "tls.insecure_skip_verify": cfg.SIEM.TLS.InsecureSkipVerify, "tls.ca_cert_file": cfg.SIEM.TLS.CACertFile, "tls.client_cert_file": cfg.SIEM.TLS.ClientCertFile, "tls.server_name": cfg.SIEM.TLS.ServerName},
+			"Vulnerability":                 {"enabled": cfg.Vulnerability.Enabled, "csv_path": cfg.Vulnerability.CSVPath},
+			"Database retention":            {"enabled": cfg.DatabaseRetention.Enabled, "interval": cfg.DatabaseRetention.Interval.String(), "telemetry_days": cfg.DatabaseRetention.TelemetryDays, "alerts_days": cfg.DatabaseRetention.AlertsDays, "audit_days": cfg.DatabaseRetention.AuditDays, "max_database_size_gb": cfg.DatabaseRetention.MaxDatabaseSizeGB, "target_database_size_gb": cfg.DatabaseRetention.TargetDatabaseSizeGB, "delete_batch_size": cfg.DatabaseRetention.DeleteBatchSize},
+			"Notifications":                 {"enabled": cfg.Notifications.Enabled, "min_severity": cfg.Notifications.MinSeverity, "email.enabled": cfg.Notifications.Email.Enabled, "email.smtp_host": cfg.Notifications.Email.SMTPHost, "email.smtp_port": cfg.Notifications.Email.SMTPPort, "email.username": cfg.Notifications.Email.Username, "email.from": cfg.Notifications.Email.From, "email.to": cfg.Notifications.Email.To, "email.use_tls": cfg.Notifications.Email.UseTLS, "webhook.enabled": cfg.Notifications.Webhook.Enabled, "webhook.url": cfg.Notifications.Webhook.URL},
+			"Reports":                       {"enabled": cfg.Reports.Enabled, "schedule": cfg.Reports.Schedule, "day_of_week": cfg.Reports.DayOfWeek, "hour_utc": cfg.Reports.HourUTC, "recipients": cfg.Reports.Recipients},
+			"Sensor-side security features": {"configuration_file": "sensor.config.yaml", "tcp_reassembly": "capture.tcp_reassembly", "threat_intelligence": "detect.threatintel.enabled plus Central-managed feeds", "ot_value_anomaly": "detect.otvalueanomaly", "lateral_movement": "detect.lateralmovement", "c2_correlation": "detect.c2correlation"},
+		},
 	}
 	exporter, err := siem.New(siem.Config{
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,
@@ -148,6 +162,7 @@ func main() {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	go exporter.Run(workerCtx)
+	go srv.RunThreatIntelFeeds(workerCtx)
 
 	// Nothing else flips a sensor's status away from whatever it last
 	// reported in a heartbeat — if a sensor's process dies, its host loses

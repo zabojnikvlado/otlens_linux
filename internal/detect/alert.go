@@ -76,6 +76,12 @@ const (
 	// to one external destination+port happen at a suspiciously
 	// regular interval — see c2beacon.go's doc comment.
 	AlertC2Beacon AlertType = "c2_beacon"
+
+	AlertMaliciousIP     AlertType = "malicious_ip"
+	AlertMaliciousDomain AlertType = "malicious_domain"
+	AlertOTValueAnomaly  AlertType = "ot_value_anomaly"
+	AlertLateralMovement AlertType = "lateral_movement"
+	AlertC2Correlated    AlertType = "c2_correlated"
 )
 
 // AlertStatus is an operator's review verdict on an Alert.
@@ -113,6 +119,9 @@ type Alert struct {
 	Message  string
 
 	IP string
+
+	// Structured evidence for enriched detections such as threat intelligence.
+	Evidence map[string]interface{} `json:"evidence,omitempty"`
 
 	// ARP-spoofing-specific fields; empty for other alert types.
 	PreviousMAC string

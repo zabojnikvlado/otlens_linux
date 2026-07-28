@@ -22,9 +22,10 @@ type Config struct {
 	Timeout                                                   time.Duration
 }
 type Client struct {
-	cfg          Config
-	http         *http.Client
-	rulesVersion int64
+	cfg                Config
+	http               *http.Client
+	rulesVersion       int64
+	threatIntelVersion int64
 }
 
 func New(cfg Config) *Client {
@@ -44,6 +45,7 @@ func New(cfg Config) *Client {
 		MaxIdleConnsPerHost:   4,
 	}}}
 }
+
 // syncErr builds an error from a non-2xx response that includes Central's
 // actual response body (typically a JSON {"error":"..."} with the real
 // failure reason), not just the HTTP status line. resp.Status alone tells
@@ -101,8 +103,9 @@ func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	}
 	return nil
 }
-func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error) ([]management.Command, error) {
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/sync", nil)
+func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error, applyThreatIntel func(management.ThreatIntelSnapshot) error) ([]management.Command, error) {
+	syncURL := fmt.Sprintf("%s/v1/sensors/%s/sync?threat_intel_version=%d", strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.SensorID, c.threatIntelVersion)
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, syncURL, nil)
 	if e != nil {
 		return nil, e
 	}
@@ -122,14 +125,40 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	if out.RuleSet != nil && out.RulesVersion > c.rulesVersion {
 		rules := make([]*detect.Rule, 0, len(out.RuleSet.Rules))
 		for _, r := range out.RuleSet.Rules {
-			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Field: detect.RuleField(r.Field), Value: r.Value, Severity: r.Severity, AlertType: detect.AlertType(r.AlertType)})
+			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Description: r.Description, Category: r.Category, Scope: detect.RuleScope(r.Scope), Protocols: append([]string(nil), r.Protocols...), AttackMapping: append([]string(nil), r.AttackMapping...), Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Severity: r.Severity, Priority: r.Priority, Simulation: r.Simulation, Version: r.Version, Groups: convertRuleGroups(r.Groups), GroupOperator: r.GroupOperator, Actions: convertRuleActions(r.Actions), Suppression: detect.RuleSuppression{Mode: r.Suppression.Mode, IntervalSeconds: r.Suppression.IntervalSeconds}, Schedule: r.Schedule, Field: detect.RuleField(r.Field), Value: r.Value, AlertType: detect.AlertType(r.AlertType)})
 		}
 		if e := apply(rules); e != nil {
 			return nil, e
 		}
 		c.rulesVersion = out.RulesVersion
 	}
+	if out.ThreatIntel != nil && out.ThreatIntelVersion > c.threatIntelVersion && applyThreatIntel != nil {
+		if e := applyThreatIntel(*out.ThreatIntel); e != nil {
+			return nil, e
+		}
+		c.threatIntelVersion = out.ThreatIntelVersion
+	}
 	return out.Commands, nil
+}
+
+func convertRuleGroups(groups []management.RuleGroup) []detect.RuleGroup {
+	out := make([]detect.RuleGroup, 0, len(groups))
+	for _, group := range groups {
+		conditions := make([]detect.RuleCondition, 0, len(group.Conditions))
+		for _, condition := range group.Conditions {
+			conditions = append(conditions, detect.RuleCondition{Field: detect.RuleField(condition.Field), Operator: condition.Operator, Value: condition.Value})
+		}
+		out = append(out, detect.RuleGroup{Operator: group.Operator, Conditions: conditions})
+	}
+	return out
+}
+
+func convertRuleActions(actions []management.RuleAction) []detect.RuleAction {
+	out := make([]detect.RuleAction, 0, len(actions))
+	for _, action := range actions {
+		out = append(out, detect.RuleAction{Type: action.Type})
+	}
+	return out
 }
 
 func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) (management.TelemetryAck, error) {
@@ -227,6 +256,27 @@ func (c *Client) PushAnalysisResult(ctx context.Context, jobID string, result ma
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return syncErr("analysis result upload failed", resp)
+	}
+	return nil
+}
+
+func (c *Client) PushReconResult(ctx context.Context, jobID string, results []management.ReconResult, runErr string) error {
+	body, err := json.Marshal(map[string]interface{}{"results": results, "error": runErr})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/"+c.cfg.SensorID+"/reconnaissance/jobs/"+jobID+"/result", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	c.headers(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return syncErr("reconnaissance result upload failed", resp)
 	}
 	return nil
 }

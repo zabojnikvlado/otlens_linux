@@ -190,11 +190,11 @@ func (s *Server) sendWebhookNotification(ctx context.Context, alert AlertHistory
 		return fmt.Errorf("webhook notifications enabled but url is not configured")
 	}
 	payload, err := json.Marshal(map[string]interface{}{
-		"sensor_id": alert.SensorID,
-		"severity":  alert.Severity,
-		"type":      alert.Type,
-		"message":   alert.Message,
-		"ip":        alert.IP,
+		"sensor_id":  alert.SensorID,
+		"severity":   alert.Severity,
+		"type":       alert.Type,
+		"message":    alert.Message,
+		"ip":         alert.IP,
 		"first_seen": alert.FirstSeen,
 	})
 	if err != nil {

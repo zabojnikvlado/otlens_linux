@@ -23,6 +23,15 @@ const (
 	// Ethernet/IP/TCP/UDP/ARP fields produced by internal/parser.
 	EventPacketParsed EventType = "packet.parsed"
 
+	// EventTCPStreamData carries contiguous bytes produced by the generic TCP reassembler.
+	EventTCPStreamData EventType = "tcp.stream.data"
+
+	// EventTCPStreamLifecycle carries open/close/eviction and quality events.
+	EventTCPStreamLifecycle EventType = "tcp.stream.lifecycle"
+
+	// EventTCPReassemblyStats carries a periodic TCP reassembly metrics snapshot.
+	EventTCPReassemblyStats EventType = "tcp.reassembly.stats"
+
 	// EventConnectionSeen is reserved for a future connection-level
 	// (as opposed to per-packet) event; not yet published anywhere.
 	EventConnectionSeen EventType = "connection.seen"
@@ -36,6 +45,18 @@ const (
 	// internal/hostname and consumed by internal/asset to enrich an
 	// already-discovered asset's Hostname field.
 	EventHostnameSeen EventType = "hostname.seen"
+
+	// EventDNSObservation carries a normalized passive DNS query/response.
+	EventDNSObservation EventType = "dns.observation"
+
+	// EventSMBObservation carries passive SMB2/SMB3 metadata.
+	EventSMBObservation EventType = "smb.observation"
+
+	// EventDCERPCFragment carries named-pipe payload extracted from SMB.
+	EventDCERPCFragment EventType = "dcerpc.fragment"
+
+	// EventDCERPCObservation carries decoded DCE/RPC metadata.
+	EventDCERPCObservation EventType = "dcerpc.observation"
 
 	// EventIPFIXFlow carries an ipfix.FlowRecord — a decoded flow
 	// summary exported by a router/switch/probe, produced by

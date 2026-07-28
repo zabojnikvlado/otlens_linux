@@ -180,6 +180,7 @@ func (e *Engine) clearHoneypotAlerts(ip string) {
 	}
 
 }
+
 // one specific (direction, src, dst) pair — repeated traffic on the
 // same pair updates Count/LastSeen on the same alert rather than
 // creating a new one each time, same as every other alert type here.

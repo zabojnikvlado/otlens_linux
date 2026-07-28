@@ -53,3 +53,11 @@ make test-race
 make vet
 make fmt
 ```
+
+## Advanced detection MVP
+
+This build includes OT value anomaly detection, lateral movement heuristics and correlated C2 scoring. See `docs/ADVANCED_DETECTIONS.md` for signals, configuration and limitations.
+
+## TCP stream reassembly
+
+Generic bounded TCP stream reconstruction is documented in `docs/TCP_STREAM_REASSEMBLY.md`. SMB2/SMB3 consumes reconstructed streams by default and retains packet-level fallback when disabled.

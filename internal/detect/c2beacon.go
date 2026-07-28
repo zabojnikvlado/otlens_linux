@@ -77,7 +77,15 @@ func (e *Engine) handleC2Beacon(packet core.Packet) {
 	}
 
 	key := fmt.Sprintf("%s|%s|%d", packet.SrcIP, packet.DstIP, packet.DstPort)
-	now := time.Now()
+	// packet.Timestamp, not time.Now(): this is what actually gets
+	// measured for regularity below, and during PCAP analysis packets
+	// replay as fast as the file can be read, not paced to match their
+	// original real-world spacing — using wall-clock time here would
+	// make every analyzed beacon look like it happened in a fraction of
+	// a second, destroying the very interval this rule exists to
+	// measure. See flow.Flow.FromAnalysis's doc comment for the same
+	// concern elsewhere.
+	now := packet.Timestamp
 
 	e.beaconMutex.Lock()
 
@@ -191,19 +199,31 @@ func (e *Engine) raiseC2BeaconAlert(key, srcIP, dstIP string, dstPort uint16, me
 	}
 
 	if !exists {
-
+		score := 60 + minInt(25, int((e.c2BeaconMaxCV-cv)*100))
+		signals := []string{"regular_connection_interval"}
+		evidence := map[string]interface{}{"c2_score": score, "c2_confidence": 70, "c2_signals": signals, "mean_interval_seconds": mean.Seconds(), "coefficient_of_variation": cv, "destination_ip": dstIP, "destination_port": dstPort}
+		if e.threatIntel != nil {
+			if indicator, ok := e.threatIntel.MatchIP(dstIP); ok {
+				score = minInt(100, score+40)
+				signals = append(signals, "threat_intel_match")
+				evidence["threat_intel_provider"] = indicator.Provider
+				evidence["threat_intel_confidence"] = indicator.Confidence
+			}
+		}
+		evidence["c2_score"] = score
+		evidence["c2_confidence"] = minInt(95, 65+len(signals)*10)
+		evidence["c2_signals"] = signals
+		severity := "high"
+		if score >= 85 {
+			severity = "critical"
+		}
 		alert = &Alert{
-			ID: key,
-
-			Type:     AlertC2Beacon,
-			Severity: "critical",
-			Message: fmt.Sprintf(
-				"%s connects to %s:%d at a suspiciously regular ~%s interval (%.0f%% variation) — possible C2 beaconing",
-				srcIP, dstIP, dstPort, mean.Round(time.Second), cv*100,
-			),
-
-			IP: srcIP,
-
+			ID:        key,
+			Type:      AlertC2Beacon,
+			Severity:  severity,
+			Message:   fmt.Sprintf("%s connects to %s:%d at a suspiciously regular ~%s interval (%.0f%% variation) — possible C2 beaconing", srcIP, dstIP, dstPort, mean.Round(time.Second), cv*100),
+			IP:        srcIP,
+			Evidence:  evidence,
 			FirstSeen: now,
 			Status:    AlertStatusNew,
 		}
