@@ -71,9 +71,6 @@ type Rule struct {
 	Name          string          `json:"name"`
 	Description   string          `json:"description,omitempty"`
 	Category      string          `json:"category,omitempty"`
-	Scope         string          `json:"scope,omitempty"`
-	Protocols     []string        `json:"protocols,omitempty"`
-	AttackMapping []string        `json:"attack_mapping,omitempty"`
 	Kind          string          `json:"kind"`
 	Enabled       bool            `json:"enabled"`
 	Severity      string          `json:"severity,omitempty"`

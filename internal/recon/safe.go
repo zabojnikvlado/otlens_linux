@@ -38,8 +38,8 @@ func Run(ctx context.Context, cmd management.ReconCommand) []management.ReconRes
 	return out
 }
 
-func probeTarget(ctx context.Context, target string, p management.ReconPolicy, cred *management.ReconCredentialSecret, delay time.Duration) management.ReconResult {
-	r := management.ReconResult{Target: target, StartedAt: time.Now().UTC()}
+func probeTarget(ctx context.Context, target string, p management.ReconPolicy, cred *management.ReconCredentialSecret, delay time.Duration) (r management.ReconResult) {
+	r = management.ReconResult{Target: target, StartedAt: time.Now().UTC()}
 	defer func() { r.FinishedAt = time.Now().UTC() }()
 	ip := net.ParseIP(target)
 	if ip == nil {

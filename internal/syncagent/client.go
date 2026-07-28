@@ -125,7 +125,7 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	if out.RuleSet != nil && out.RulesVersion > c.rulesVersion {
 		rules := make([]*detect.Rule, 0, len(out.RuleSet.Rules))
 		for _, r := range out.RuleSet.Rules {
-			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Description: r.Description, Category: r.Category, Scope: detect.RuleScope(r.Scope), Protocols: append([]string(nil), r.Protocols...), AttackMapping: append([]string(nil), r.AttackMapping...), Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Severity: r.Severity, Priority: r.Priority, Simulation: r.Simulation, Version: r.Version, Groups: convertRuleGroups(r.Groups), GroupOperator: r.GroupOperator, Actions: convertRuleActions(r.Actions), Suppression: detect.RuleSuppression{Mode: r.Suppression.Mode, IntervalSeconds: r.Suppression.IntervalSeconds}, Schedule: r.Schedule, Field: detect.RuleField(r.Field), Value: r.Value, AlertType: detect.AlertType(r.AlertType)})
+			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Field: detect.RuleField(r.Field), Value: r.Value, Severity: r.Severity, AlertType: detect.AlertType(r.AlertType)})
 		}
 		if e := apply(rules); e != nil {
 			return nil, e
@@ -139,26 +139,6 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 		c.threatIntelVersion = out.ThreatIntelVersion
 	}
 	return out.Commands, nil
-}
-
-func convertRuleGroups(groups []management.RuleGroup) []detect.RuleGroup {
-	out := make([]detect.RuleGroup, 0, len(groups))
-	for _, group := range groups {
-		conditions := make([]detect.RuleCondition, 0, len(group.Conditions))
-		for _, condition := range group.Conditions {
-			conditions = append(conditions, detect.RuleCondition{Field: detect.RuleField(condition.Field), Operator: condition.Operator, Value: condition.Value})
-		}
-		out = append(out, detect.RuleGroup{Operator: group.Operator, Conditions: conditions})
-	}
-	return out
-}
-
-func convertRuleActions(actions []management.RuleAction) []detect.RuleAction {
-	out := make([]detect.RuleAction, 0, len(actions))
-	for _, action := range actions {
-		out = append(out, detect.RuleAction{Type: action.Type})
-	}
-	return out
 }
 
 func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) (management.TelemetryAck, error) {

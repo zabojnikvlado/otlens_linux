@@ -84,7 +84,7 @@ type VLANConfig struct {
 // real VLAN, not just the ones someone's already configured.
 func (r *Repository) ListVLANConfig(ctx context.Context, sensorID string) ([]VLANConfig, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT o.vlan_id, COALESCE(c.name,''), c.purdue_level, COUNT(DISTINCT COALESCE(NULLIF(o.mac,''), o.ip)) AS asset_count
+		SELECT o.vlan_id, COALESCE(c.name,''), c.purdue_level, COUNT(*) AS asset_count
 		FROM topology_nodes o
 		LEFT JOIN vlan_config c ON c.sensor_id = o.sensor_id AND c.vlan_id = o.vlan_id
 		WHERE o.sensor_id = $1

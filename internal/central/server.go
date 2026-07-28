@@ -15,9 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -261,8 +259,6 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/sensors/:id/tags/import", requireAction(ActionDataManagement), s.importTagList)
 	api.GET("/assets/vulnerabilities", requireView(ViewAssets), s.assetVulnerabilities)
 	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
-	api.POST("/vulnerabilities/source/upload", requireAction(ActionDataManagement), s.uploadVulnerabilitySource)
-	api.POST("/vulnerabilities/source/url", requireAction(ActionDataManagement), s.refreshVulnerabilitySourceURL)
 	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
 	api.GET("/sensors/:id/segmentation-settings", requireView(ViewTopology), s.getMaxLevelJump)
 	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
@@ -688,104 +684,6 @@ func (s *Server) importTagList(c *gin.Context) {
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("tag list imported: %d row(s) for %s", applied, sensorID), sensorID)
 	c.JSON(200, gin.H{"applied": applied})
-}
-
-func (s *Server) loadVulnerabilityBytes(c *gin.Context, name string, data []byte) {
-	if len(data) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "empty vulnerability snapshot"})
-		return
-	}
-	if len(data) > 20<<20 {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "vulnerability snapshot exceeds 20 MB"})
-		return
-	}
-	dir := s.AnalysisDir
-	if strings.TrimSpace(dir) == "" {
-		dir = os.TempDir()
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	path := filepath.Join(dir, "vulnerability-current.csv")
-	if err := os.WriteFile(path, data, 0o640); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if s.Vuln == nil {
-		s.Vuln = vuln.New()
-	}
-	count, err := s.Vuln.LoadCSV(path)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("vulnerability source loaded: %s (%d advisories)", name, count), "")
-	c.JSON(http.StatusOK, gin.H{"loaded": count, "source": name})
-}
-
-func (s *Server) uploadVulnerabilitySource(c *gin.Context) {
-	file, header, err := c.Request.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file is required"})
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, (20<<20)+1))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	s.loadVulnerabilityBytes(c, header.Filename, data)
-}
-
-func (s *Server) refreshVulnerabilitySourceURL(c *gin.Context) {
-	var in struct {
-		URL string `json:"url"`
-	}
-	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	u, err := url.Parse(strings.TrimSpace(in.URL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only valid HTTP/HTTPS URLs are supported"})
-		return
-	}
-	ips, err := net.LookupIP(u.Hostname())
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "source host could not be resolved"})
-		return
-	}
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "private, loopback and link-local source addresses are blocked"})
-			return
-		}
-	}
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return errors.New("too many redirects")
-		}
-		return nil
-	}}
-	req, _ := http.NewRequestWithContext(c, http.MethodGet, u.String(), nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("source returned HTTP %d", resp.StatusCode)})
-		return
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, (20<<20)+1))
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	s.loadVulnerabilityBytes(c, u.String(), data)
 }
 
 // Matching is vendor-only — see package vuln's doc comment for why OTLens
@@ -1502,14 +1400,6 @@ func validateManagementRule(req *management.Rule) error {
 	if req.Kind != "custom" {
 		return fmt.Errorf("only custom rules can be created")
 	}
-	if req.Scope == "" {
-		req.Scope = "Universal"
-	}
-	switch req.Scope {
-	case "IT", "OT", "IT/OT", "Universal":
-	default:
-		return fmt.Errorf("scope must be IT, OT, IT/OT or Universal")
-	}
 	if req.Severity == "" {
 		req.Severity = "medium"
 	}
@@ -1830,63 +1720,51 @@ func basicPDF(text string) []byte {
 	if pages < 1 {
 		pages = 1
 	}
-
-	// PDF objects are explicitly one-based. Object 1 is the catalog,
-	// object 2 the pages tree and object 3 the shared Helvetica font.
-	// Each page then owns one page object and one content-stream object.
-	objectCount := 3 + pages*2
-	objects := make([]string, objectCount+1)
+	objects := []string{"", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
 	pageIDs := make([]int, pages)
 	contentIDs := make([]int, pages)
-
-	objects[1] = "<< /Type /Catalog /Pages 2 0 R >>"
-	objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
-
 	for i := 0; i < pages; i++ {
-		pageID := 4 + i*2
-		contentID := pageID + 1
-		pageIDs[i] = pageID
-		contentIDs[i] = contentID
-
+		pageIDs[i] = len(objects) + 1
+		objects = append(objects, "")
+		contentIDs[i] = len(objects) + 1
 		start := i * perPage
 		end := start + perPage
 		if end > len(lines) {
 			end = len(lines)
 		}
-		var content strings.Builder
-		content.WriteString("BT\n/F1 10 Tf\n48 790 Td\n13 TL\n")
-		for _, line := range lines[start:end] {
-			content.WriteString("(" + pdfEscape(line) + ") Tj\nT*\n")
+		var c strings.Builder
+		c.WriteString("BT /F1 10 Tf 48 790 Td 13 TL\n")
+		for _, ln := range lines[start:end] {
+			c.WriteString("(" + pdfEscape(ln) + ") Tj T*\n")
 		}
-		content.WriteString("ET\n")
-		stream := content.String()
-		objects[contentID] = fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len([]byte(stream)), stream)
-		objects[pageID] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentID)
+		c.WriteString("ET")
+		stream := c.String()
+		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
 	}
-
 	kids := make([]string, pages)
 	for i, id := range pageIDs {
 		kids[i] = fmt.Sprintf("%d 0 R", id)
 	}
+	objects[1] = fmt.Sprintf("<< /Type /Catalog /Pages 2 0 R >>")
 	objects[2] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pages)
-
+	for i := 0; i < pages; i++ {
+		objects[pageIDs[i]-1] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentIDs[i])
+	}
 	var b bytes.Buffer
-	b.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
-	offsets := make([]int, objectCount+1)
-	for id := 1; id <= objectCount; id++ {
-		offsets[id] = b.Len()
-		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", id, objects[id])
+	b.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for i, obj := range objects {
+		offsets[i+1] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, obj)
 	}
-	xrefOffset := b.Len()
-	fmt.Fprintf(&b, "xref\n0 %d\n", objectCount+1)
-	b.WriteString("0000000000 65535 f \n")
-	for id := 1; id <= objectCount; id++ {
-		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[id])
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for i := 1; i <= len(objects); i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
 	}
-	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", objectCount+1, xrefOffset)
+	fmt.Fprintf(&b, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF", len(objects)+1, xref)
 	return b.Bytes()
 }
-
 func (s *Server) downloadReportPDF(c *gin.Context) {
 	rep, err := s.Repo.GetReport(c, c.Param("id"))
 	if err != nil {

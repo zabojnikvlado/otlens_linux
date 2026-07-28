@@ -692,9 +692,6 @@ func healthFromSample(sample management.SensorMetricSample, lastSeen time.Time) 
 	if time.Since(lastSeen) > 90*time.Second {
 		return "offline", []string{"No recent heartbeat"}
 	}
-	if sample.RecordedAt.IsZero() || time.Since(sample.RecordedAt) > 2*time.Minute {
-		return "warning", []string{"Sensor heartbeat is live, but no recent metrics sample is available"}
-	}
 	number := func(path ...string) float64 {
 		var current interface{} = sample.Metrics
 		for _, key := range path {
@@ -726,8 +723,8 @@ func healthFromSample(sample management.SensorMetricSample, lastSeen time.Time) 
 	if queue >= 95 {
 		reasons = append(reasons, fmt.Sprintf("Event queue %.1f%% full", queue))
 	}
-	if sample.Sync.ConsecutiveFailures >= 3 && sample.Sync.LastError != "" {
-		reasons = append(reasons, "Repeated Central synchronization failures: "+sample.Sync.LastError)
+	if sample.Sync.ConsecutiveFailures >= 3 {
+		reasons = append(reasons, "Repeated Central synchronization failures")
 	}
 	if len(reasons) > 0 {
 		return "critical", reasons
@@ -741,7 +738,7 @@ func healthFromSample(sample management.SensorMetricSample, lastSeen time.Time) 
 	if queue >= 75 {
 		reasons = append(reasons, fmt.Sprintf("Event queue %.1f%% full", queue))
 	}
-	if sample.Sync.ConsecutiveFailures > 0 && sample.Sync.LastError != "" {
+	if sample.Sync.ConsecutiveFailures > 0 {
 		reasons = append(reasons, "Central synchronization degraded")
 	}
 	if len(reasons) > 0 {
@@ -1108,6 +1105,19 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 	if len(ids) > 0 {
 		if _, err = tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE id = ANY($1)`, ids); err != nil {
 			return nil, err
+		}
+		for _, command := range out {
+			if command.Type != "recon.safe_discovery" {
+				continue
+			}
+			var payload struct {
+				JobID string `json:"job_id"`
+			}
+			if json.Unmarshal([]byte(command.Target), &payload) == nil && payload.JobID != "" {
+				if _, err = tx.ExecContext(ctx, `UPDATE reconnaissance_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status='queued'`, payload.JobID); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if err = tx.Commit(); err != nil {

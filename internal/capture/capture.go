@@ -44,6 +44,7 @@ type Engine struct {
 	stopRequested atomic.Bool
 
 	packetCount atomic.Uint64
+	byteCount   atomic.Uint64
 }
 
 // New creates a capture engine for the given interface identifier.
@@ -328,7 +329,10 @@ func (e *Engine) IsRunning() bool {
 // core.RawFrame's doc comment for why both distinctions matter.
 func (e *Engine) process(data []byte, timestamp time.Time, fromAnalysis bool) {
 
-	e.packetCount.Add(1)
+	if !fromAnalysis {
+		e.packetCount.Add(1)
+		e.byteCount.Add(uint64(len(data)))
+	}
 
 	e.EventBus.Publish(
 		core.Event{
@@ -340,6 +344,16 @@ func (e *Engine) process(data []byte, timestamp time.Time, fromAnalysis bool) {
 			},
 		},
 	)
+}
+
+// Stats returns monotonic live-capture counters. Frames analyzed from a PCAP
+// file are excluded so operational sensor rates describe only the monitored
+// interface. The counters are safe to read while capture is running.
+func (e *Engine) Stats() (packets uint64, bytes uint64, running bool) {
+	if e == nil {
+		return 0, 0, false
+	}
+	return e.packetCount.Load(), e.byteCount.Load(), e.running.Load()
 }
 
 // logStatsPeriodically logs a packet count summary on an interval
