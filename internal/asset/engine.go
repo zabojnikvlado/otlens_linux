@@ -247,16 +247,19 @@ func (e *Engine) Count() int {
 // Restore rehydrates the engine's in-memory state from previously
 // persisted assets, e.g. at startup after loading from disk. Unlike
 // Update, this doesn't bump PacketCount/LastSeen — it's replacing the
-// map contents with persisted data, not observing new traffic.
+// map contents with known-good data, not observing new traffic.
 //
-// Confirmed is deliberately preserved exactly as persisted. A restored
-// asset may still be awaiting operator confirmation, especially when it
-// originated from post-baseline discovery or imported PCAP analysis.
-// Automatically confirming it during startup would make the NEW badge and
-// red topology state disappear after a process/browser restart.
+// Every restored asset is forced to Confirmed: true, regardless of
+// its persisted value. This matters for the upgrade path: state
+// persisted before the Confirmed field existed deserializes with Go's
+// zero value (false) for it, which would otherwise flag every
+// already-known device as newly unconfirmed the first time this
+// runs against old data — restored assets are, by definition, ones
+// this process already knew about before, so they should never need
+// re-confirming.
 //
-// Score is recomputed against the current config on every restore rather
-// than trusted as persisted — see the loop body.
+// Score is also recomputed against the current config on every
+// restore, not just trusted as-persisted — see the loop body.
 func (e *Engine) Restore(assets []*Asset) {
 
 	e.mutex.Lock()
@@ -267,6 +270,7 @@ func (e *Engine) Restore(assets []*Asset) {
 	e.assets = make(map[string]*Asset, len(assets))
 
 	for _, a := range assets {
+
 
 		// Recompute against the *current* config.Deception.Stations,
 		// not whatever Score happened to be persisted — otherwise a
