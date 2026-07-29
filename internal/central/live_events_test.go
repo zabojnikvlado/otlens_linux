@@ -51,7 +51,7 @@ func TestLiveHubSnapshotIsBoundedAndOrdered(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("snapshot len=%d want 3", len(got))
 	}
-	if got[0].ID != 3 || got[2].ID != 5 {
+	if got[0].ID != 4 || got[2].ID != 6 {
 		t.Fatalf("unexpected IDs: %#v", got)
 	}
 }

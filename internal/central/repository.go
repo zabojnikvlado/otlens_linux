@@ -13,7 +13,8 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 	"github.com/zabojnikvlado/otlens_linux/internal/topology"
 
-	"errors")
+	"errors"
+)
 
 type Repository struct {
 	db                *sql.DB
@@ -131,6 +132,21 @@ CREATE TABLE IF NOT EXISTS sensor_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_sensor_metrics_sensor_time ON sensor_metrics(sensor_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
+CREATE TABLE IF NOT EXISTS protocol_observations (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ observed_at TIMESTAMPTZ NOT NULL,
+ protocol TEXT NOT NULL,
+ transport TEXT NOT NULL DEFAULT '',
+ src_ip TEXT NOT NULL DEFAULT '', dst_ip TEXT NOT NULL DEFAULT '',
+ src_port INTEGER NOT NULL DEFAULT 0, dst_port INTEGER NOT NULL DEFAULT 0,
+ operation TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '', resource TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+ encrypted BOOLEAN NOT NULL DEFAULT FALSE, from_analysis BOOLEAN NOT NULL DEFAULT FALSE,
+ attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
+ UNIQUE(sensor_id,observed_at,protocol,src_ip,dst_ip,src_port,dst_port,operation,summary)
+);
+CREATE INDEX IF NOT EXISTS protocol_observations_sensor_time_idx ON protocol_observations(sensor_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS protocol_observations_protocol_time_idx ON protocol_observations(protocol, observed_at DESC);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -1071,6 +1087,9 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	if err := persistSMBObservations(ctx, tx, x.SensorID, x.SMBObservations); err != nil {
 		return nil, err
 	}
+	if err := persistProtocolObservations(ctx, tx, x.SensorID, x.ProtocolObservations); err != nil {
+		return nil, err
+	}
 	newAlerts, err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts)
 	if err != nil {
 		return nil, err
@@ -1388,7 +1407,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// local state and will re-report it on its next sync unless that
 		// sensor is also reset (Sensors tab / Data Management's sensor
 		// reset operations).
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, asset_risk, asset_risk_history RESTART IDENTITY`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, asset_risk, asset_risk_history, protocol_observations RESTART IDENTITY`)
 	case "alerts":
 		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
 	case "incidents":
@@ -1407,7 +1426,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// connected sensors to receive sensor.factory.reset. Deleting those
 		// rows here made the reset command disappear before the next sync and
 		// the sensor immediately uploaded all old telemetry again.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}

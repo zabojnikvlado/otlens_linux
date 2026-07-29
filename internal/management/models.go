@@ -194,20 +194,21 @@ type SyncResponse struct {
 // Central Topology, Assets and OT Tags tabs. Sensors remain the source of
 // truth for passive discovery; Central only aggregates and persists it.
 type TelemetrySnapshot struct {
-	SensorID        string          `json:"sensor_id"`
-	CapturedAt      time.Time       `json:"captured_at"`
-	Topology        json.RawMessage `json:"topology"`
-	Tags            json.RawMessage `json:"tags"`
-	TagChanges      json.RawMessage `json:"tag_changes,omitempty"`
-	TagEvents       json.RawMessage `json:"tag_events,omitempty"`
-	Alerts          json.RawMessage `json:"alerts,omitempty"`
-	Baseline        json.RawMessage `json:"baseline,omitempty"`
-	Rules           json.RawMessage `json:"rules,omitempty"`
-	DNSObservations json.RawMessage `json:"dns_observations,omitempty"`
-	SMBObservations json.RawMessage `json:"smb_observations,omitempty"`
-	BatchID         string          `json:"batch_id,omitempty"`
-	Sequence        int64           `json:"sequence,omitempty"`
-	Checksum        string          `json:"checksum,omitempty"`
+	SensorID             string          `json:"sensor_id"`
+	CapturedAt           time.Time       `json:"captured_at"`
+	Topology             json.RawMessage `json:"topology"`
+	Tags                 json.RawMessage `json:"tags"`
+	TagChanges           json.RawMessage `json:"tag_changes,omitempty"`
+	TagEvents            json.RawMessage `json:"tag_events,omitempty"`
+	Alerts               json.RawMessage `json:"alerts,omitempty"`
+	Baseline             json.RawMessage `json:"baseline,omitempty"`
+	Rules                json.RawMessage `json:"rules,omitempty"`
+	DNSObservations      json.RawMessage `json:"dns_observations,omitempty"`
+	SMBObservations      json.RawMessage `json:"smb_observations,omitempty"`
+	ProtocolObservations json.RawMessage `json:"protocol_observations,omitempty"`
+	BatchID              string          `json:"batch_id,omitempty"`
+	Sequence             int64           `json:"sequence,omitempty"`
+	Checksum             string          `json:"checksum,omitempty"`
 }
 
 type AnalysisJob struct {

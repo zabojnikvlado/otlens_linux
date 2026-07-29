@@ -479,11 +479,15 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
+				protocolJSON, err := marshal(application.ProtocolEngine.GetObservations())
+				if err != nil {
+					return management.TelemetrySnapshot{}, err
+				}
 				rulesJSON, err := marshal(application.DetectEngine.GetRules())
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON}, nil
+				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON}, nil
 			}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

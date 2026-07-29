@@ -813,3 +813,7 @@ make build-central           # bin/otlens-central, current OS
   was built from. Not user-facing documentation — kept as historical
   record of *why* things ended up the way they are, in case that context
   is ever useful.
+
+## Second-wave enterprise protocol metadata
+
+Passive metadata parsing was added for Kerberos, DCE/RPC, NFS, MSSQL TDS, DTLS, OpenVPN and BitTorrent. See `docs/SECOND_WAVE_PROTOCOL_PARSERS.md` for extracted fields and limitations. Observations are available through `/v1/protocol-observations`.

@@ -36,7 +36,6 @@ func securityHeaders() gin.HandlerFunc {
 			"font-src 'self' data:",
 			"connect-src 'self'",
 			"worker-src 'self' blob:",
-			"upgrade-insecure-requests",
 		}, "; "))
 		c.Next()
 	}

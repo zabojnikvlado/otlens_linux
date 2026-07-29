@@ -8,7 +8,7 @@ import (
 )
 
 func TestBasicPDFHasValidObjectTable(t *testing.T) {
-	pdf := basicPDF("OTLens report\nSecond line")
+	pdf := reportPDF("<h1>OTLens report</h1><p>Second line</p>", "test-report")
 	if !bytes.HasPrefix(pdf, []byte("%PDF-1.4")) {
 		t.Fatal("missing PDF header")
 	}
@@ -34,7 +34,8 @@ func TestBasicPDFHasValidObjectTable(t *testing.T) {
 		[]byte("1 0 obj\n<< /Type /Catalog"),
 		[]byte("2 0 obj\n<< /Type /Pages"),
 		[]byte("3 0 obj\n<< /Type /Font"),
-		[]byte("4 0 obj\n<< /Type /Page"),
+		[]byte("4 0 obj\n<< /Type /Font"),
+		[]byte("5 0 obj\n<< /Type /Page"),
 	} {
 		if !bytes.Contains(pdf, object) {
 			t.Fatalf("missing object %q", object)
