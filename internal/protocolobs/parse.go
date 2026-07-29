@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/udpconversation"
 )
 
 func baseUDP(p core.Packet, proto string) Observation {
@@ -19,6 +20,22 @@ func baseTCP(c core.TCPStreamChunk, proto string) Observation {
 }
 
 func parseUDP(p core.Packet) []Observation {
+	return parseUDPWithContext(p, nil)
+}
+
+func parseUDPWithContext(p core.Packet, context *udpconversation.ParseContext) []Observation {
+	observations := parseUDPPacket(p)
+	if context != nil {
+		for index := range observations {
+			observations[index].ConversationID = context.ConversationID
+			observations[index].Direction = string(context.Direction)
+			observations[index].RTTMillis = context.RTTMillis
+		}
+	}
+	return observations
+}
+
+func parseUDPPacket(p core.Packet) []Observation {
 	d := p.AppPayload
 	switch {
 	case p.SrcPort == 88 || p.DstPort == 88:
@@ -376,16 +393,34 @@ func parseSIP(o Observation, d []byte) (Observation, bool) {
 		switch strings.ToLower(strings.TrimSpace(k)) {
 		case "call-id":
 			o.Attributes["call_id"] = trim(strings.TrimSpace(v), 128)
+		case "cseq":
+			parts := strings.Fields(v)
+			if len(parts) >= 2 {
+				o.Attributes["cseq"] = parts[0]
+				o.Attributes["cseq_method"] = strings.ToUpper(parts[1])
+			}
 		case "from":
 			o.Attributes["from"] = trim(strings.TrimSpace(v), 256)
+			o.Attributes["from_tag"] = sipTag(v)
 		case "to":
 			o.Attributes["to"] = trim(strings.TrimSpace(v), 256)
+			o.Attributes["to_tag"] = sipTag(v)
 		case "user-agent":
 			o.Attributes["user_agent"] = trim(strings.TrimSpace(v), 128)
 		}
 	}
 	o.Summary = "SIP " + o.Operation
 	return o, true
+}
+
+func sipTag(value string) string {
+	for _, parameter := range strings.Split(value, ";")[1:] {
+		key, tag, found := strings.Cut(strings.TrimSpace(parameter), "=")
+		if found && strings.EqualFold(key, "tag") {
+			return trim(strings.TrimSpace(tag), 128)
+		}
+	}
+	return ""
 }
 
 func parseDHCP(p core.Packet, d []byte) (Observation, bool) {

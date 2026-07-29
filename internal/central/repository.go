@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
  alerts JSONB NOT NULL DEFAULT '[]'::jsonb,
  baseline JSONB NOT NULL DEFAULT '{}'::jsonb,
  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+ udp_conversations JSONB NOT NULL DEFAULT '[]'::jsonb,
+ udp_telemetry JSONB NOT NULL DEFAULT '{}'::jsonb,
+ udp_protocol_exchanges JSONB NOT NULL DEFAULT '[]'::jsonb,
  batch_id TEXT NOT NULL DEFAULT '',
  sequence BIGINT NOT NULL DEFAULT 0,
  checksum TEXT NOT NULL DEFAULT '',
@@ -155,6 +158,9 @@ ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS baseline JSONB NOT NULL DE
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS dns_observations JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS smb_observations JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS udp_conversations JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS udp_telemetry JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS udp_protocol_exchanges JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS sequence BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT '';
@@ -1023,9 +1029,9 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 		return nil, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,batch_id,sequence,checksum,updated_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
-WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), x.BatchID, x.Sequence, x.Checksum)
+	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,udp_conversations,udp_telemetry,udp_protocol_exchanges,batch_id,sequence,checksum,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,udp_conversations=EXCLUDED.udp_conversations,udp_telemetry=EXCLUDED.udp_telemetry,udp_protocol_exchanges=EXCLUDED.udp_protocol_exchanges,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
+WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), defaults(x.UDPConversations, "[]"), defaults(x.UDPTelemetry, "{}"), defaults(x.UDPProtocolExchanges, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,7 +1120,7 @@ func firstString(m map[string]interface{}, keys ...string) string {
 }
 
 func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,batch_id,sequence,checksum FROM sensor_telemetry ORDER BY sensor_id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,udp_conversations,udp_telemetry,udp_protocol_exchanges,batch_id,sequence,checksum FROM sensor_telemetry ORDER BY sensor_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1128,7 @@ func (r *Repository) Telemetry(ctx context.Context) ([]management.TelemetrySnaps
 	var out []management.TelemetrySnapshot
 	for rows.Next() {
 		var x management.TelemetrySnapshot
-		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules, &x.DNSObservations, &x.SMBObservations, &x.BatchID, &x.Sequence, &x.Checksum); err != nil {
+		if err := rows.Scan(&x.SensorID, &x.CapturedAt, &x.Topology, &x.Tags, &x.TagChanges, &x.TagEvents, &x.Alerts, &x.Baseline, &x.Rules, &x.DNSObservations, &x.SMBObservations, &x.UDPConversations, &x.UDPTelemetry, &x.UDPProtocolExchanges, &x.BatchID, &x.Sequence, &x.Checksum); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

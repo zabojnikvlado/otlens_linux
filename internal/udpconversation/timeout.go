@@ -2,13 +2,28 @@ package udpconversation
 
 import "time"
 
-func (m *Manager) Expire(now time.Time,idle time.Duration) int{
-m.mu.Lock();defer m.mu.Unlock()
-n:=0
-for k,c:= range m.conversations{
-if now.Sub(c.LastSeenAt)>idle{
-delete(m.conversations,k);n++;m.Expired++
+// Expire removes conversations idle strictly longer than idle.
+func (m *Manager) Expire(now time.Time, idle time.Duration) int {
+	if idle <= 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	expired := 0
+	for key, conversation := range m.conversations {
+		if now.Sub(conversation.LastSeenAt) > idle {
+			delete(m.conversations, key)
+			if node := m.lruNodes[key]; node != nil {
+				m.lru.Remove(node)
+				delete(m.lruNodes, key)
+			}
+			expired++
+			m.stats.Expired++
+		}
+	}
+	return expired
 }
-}
-return n
+
+func (m *Manager) ExpireIdle(now time.Time) int {
+	return m.Expire(now, m.config.IdleTimeout)
 }

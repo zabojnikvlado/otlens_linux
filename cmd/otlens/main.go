@@ -483,11 +483,24 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
+				udpConversationsJSON, err := marshal(application.UDPConversations.Manager().Conversations())
+				if err != nil {
+					return management.TelemetrySnapshot{}, err
+				}
+				dnsStats := application.DNSEngine.Stats()
+				udpTelemetryJSON, err := marshal(application.UDPConversations.Manager().Telemetry(time.Now(), dnsStats.DNSUnmatchedResponses, dnsStats.DNSTimeouts, dnsStats.DNSAverageRTT))
+				if err != nil {
+					return management.TelemetrySnapshot{}, err
+				}
+				udpExchangesJSON, err := marshal(application.ProtocolEngine.GetExchanges())
+				if err != nil {
+					return management.TelemetrySnapshot{}, err
+				}
 				rulesJSON, err := marshal(application.DetectEngine.GetRules())
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON}, nil
+				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON, UDPConversations: udpConversationsJSON, UDPTelemetry: udpTelemetryJSON, UDPProtocolExchanges: udpExchangesJSON}, nil
 			}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

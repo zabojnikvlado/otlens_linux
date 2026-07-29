@@ -23,6 +23,11 @@ const (
 	// Ethernet/IP/TCP/UDP/ARP fields produced by internal/parser.
 	EventPacketParsed EventType = "packet.parsed"
 
+	// EventUDPConversationPacket carries a UDP packet enriched by the UDP
+	// conversation engine. Protocol parsers consume this event so conversation
+	// accounting always happens before application-protocol parsing.
+	EventUDPConversationPacket EventType = "udp.conversation.packet"
+
 	// EventTCPStreamData carries contiguous bytes produced by the generic TCP reassembler.
 	EventTCPStreamData EventType = "tcp.stream.data"
 
@@ -48,6 +53,17 @@ const (
 
 	// EventDNSObservation carries a normalized passive DNS query/response.
 	EventDNSObservation EventType = "dns.observation"
+
+	// EventDNSExchange carries a paired DNS query/response or a timed-out query.
+	EventDNSExchange EventType = "dns.exchange"
+
+	EventDHCPExchange       EventType = "dhcp.exchange"
+	EventNTPExchange        EventType = "ntp.exchange"
+	EventSNMPExchange       EventType = "snmp.exchange"
+	EventSIPDialog          EventType = "sip.dialog"
+	EventDTLSHandshake      EventType = "dtls.handshake"
+	EventOpenVPNSession     EventType = "openvpn.session"
+	EventBitTorrentExchange EventType = "bittorrent.exchange"
 
 	// EventSMBObservation carries passive SMB2/SMB3 metadata.
 	EventSMBObservation EventType = "smb.observation"

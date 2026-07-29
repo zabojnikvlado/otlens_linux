@@ -19,7 +19,7 @@ const DOMAIN_PATHS={
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/dns-observations?limit=1000','/smb-observations?limit=1000'],
   incidents:['/incidents','/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],settings:['/settings'],audit:['/audit'],
-  topology:[],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],smb:['/smb-observations?limit=1000'],threatintel:[]
+  topology:[],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
 };
 function activeTab(){return document.querySelector('.tab.active')?.dataset.tab||'dashboard'}
 function loadPath(path){if(pendingLoads.has(path))return pendingLoads.get(path);const q=api(path).finally(()=>pendingLoads.delete(path));pendingLoads.set(path,q);return q}

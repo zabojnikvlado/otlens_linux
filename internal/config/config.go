@@ -91,6 +91,29 @@ type Config struct {
 			OverlapPolicy         string        `mapstructure:"overlap_policy"`
 		}
 
+		UDPConversations struct {
+			Enabled                   bool          `mapstructure:"enabled"`
+			MaxActive                 int           `mapstructure:"max_active"`
+			MaxPacketsPerConversation uint64        `mapstructure:"max_packets_per_conversation"`
+			MaxPendingRequests        int           `mapstructure:"max_pending_requests_per_conversation"`
+			IdleTimeout               time.Duration `mapstructure:"idle_timeout"`
+			RetainPayload             bool          `mapstructure:"retain_payload"`
+			Protocols                 struct {
+				DNS struct {
+					Timeout time.Duration `mapstructure:"timeout"`
+				} `mapstructure:"dns"`
+				DHCP struct {
+					Timeout time.Duration `mapstructure:"timeout"`
+				} `mapstructure:"dhcp"`
+				SNMP struct {
+					Timeout time.Duration `mapstructure:"timeout"`
+				} `mapstructure:"snmp"`
+				SIP struct {
+					Timeout time.Duration `mapstructure:"timeout"`
+				} `mapstructure:"sip"`
+			} `mapstructure:"protocols"`
+		} `mapstructure:"udp_conversations"`
+
 		IPFIX struct {
 			// ListenAddr is the UDP address to receive IPFIX export
 			// packets on, e.g. "0.0.0.0:4739" (4739 is IPFIX's
@@ -689,6 +712,16 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("capture.tcp_reassembly.gap_recovery_timeout", 2*time.Second)
 	viper.SetDefault("capture.tcp_reassembly.shard_count", 32)
 	viper.SetDefault("capture.tcp_reassembly.overlap_policy", "first_seen")
+	viper.SetDefault("capture.udp_conversations.max_active", 100000)
+	viper.SetDefault("capture.udp_conversations.enabled", true)
+	viper.SetDefault("capture.udp_conversations.max_packets_per_conversation", 100000)
+	viper.SetDefault("capture.udp_conversations.max_pending_requests_per_conversation", 256)
+	viper.SetDefault("capture.udp_conversations.idle_timeout", 30*time.Second)
+	viper.SetDefault("capture.udp_conversations.retain_payload", false)
+	viper.SetDefault("capture.udp_conversations.protocols.dns.timeout", 5*time.Second)
+	viper.SetDefault("capture.udp_conversations.protocols.dhcp.timeout", 60*time.Second)
+	viper.SetDefault("capture.udp_conversations.protocols.snmp.timeout", 10*time.Second)
+	viper.SetDefault("capture.udp_conversations.protocols.sip.timeout", 5*time.Minute)
 
 	viper.SetDefault("ics.modbusport", 502)
 	viper.SetDefault("ics.s7port", 102)

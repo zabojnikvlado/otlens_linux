@@ -146,7 +146,7 @@ const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete
 // service password change, Users, Roles) — it's gated by the same
 // permission as Settings rather than a separate one, since splitting the
 // page into two tabs didn't change who's supposed to see it.
-const TAB_PERMISSION_ALIAS={health:'sensors',users:'settings',threatintel:'alerts',dns:'alerts',smb:'alerts'};
+const TAB_PERMISSION_ALIAS={health:'sensors',users:'settings',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts'};
 function applyNavFiltering(){
   document.querySelectorAll('.tab').forEach(btn=>{
     const tab=btn.dataset.tab;

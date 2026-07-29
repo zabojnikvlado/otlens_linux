@@ -6,9 +6,11 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/udpconversation"
 )
 
 const maxNamePointerHops = 32
@@ -18,37 +20,107 @@ type Engine struct {
 	mu              sync.RWMutex
 	observations    []Observation
 	maxObservations int
+	tracker         *Tracker
+	stop            chan struct{}
+	stopOnce        sync.Once
+	wg              sync.WaitGroup
 }
 
 func New(bus *core.EventBus, maxObservations int) *Engine {
+	return NewWithTimeout(bus, maxObservations, defaultExchangeTimeout)
+}
+
+func NewWithTimeout(bus *core.EventBus, maxObservations int, timeout time.Duration) *Engine {
 	if maxObservations <= 0 {
 		maxObservations = 5000
 	}
-	return &Engine{bus: bus, maxObservations: maxObservations}
+	return &Engine{
+		bus:             bus,
+		maxObservations: maxObservations,
+		tracker:         NewTracker(timeout, maxObservations),
+		stop:            make(chan struct{}),
+	}
 }
 
 func (e *Engine) Start() {
-	logger.Log.Info("Passive DNS engine started")
-	ch := e.bus.Subscribe(core.EventPacketParsed)
+	if logger.Log != nil {
+		logger.Log.Info("Passive DNS engine started")
+	}
+	ch := e.bus.Subscribe(core.EventUDPConversationPacket)
+	e.wg.Add(2)
 	go func() {
-		for event := range ch {
-			p, ok := event.Data.(core.Packet)
-			if !ok || p.L4Protocol != "UDP" || len(p.AppPayload) < 12 || !isDNSPort(p.SrcPort, p.DstPort) {
-				continue
+		defer e.wg.Done()
+		for {
+			select {
+			case <-e.stop:
+				return
+			case event := <-ch:
+				contextual, ok := event.Data.(udpconversation.ContextualPacket)
+				if !ok {
+					continue
+				}
+				p := contextual.Packet
+				if len(p.AppPayload) < 12 || !isDNSPort(p.SrcPort, p.DstPort) {
+					continue
+				}
+				observation, ok := parse(p)
+				if !ok {
+					continue
+				}
+				observation.ConversationID = contextual.Context.ConversationID
+				observation.Direction = string(contextual.Context.Direction)
+				e.addObservation(observation)
+				if contextual.Context.ConversationID != "" {
+					if exchange := e.tracker.Observe(observation, contextual.Context); exchange != nil {
+						e.publishExchange(*exchange)
+					}
+				}
 			}
-			obs, ok := parse(p)
-			if !ok {
-				continue
-			}
-			e.mu.Lock()
-			e.observations = append(e.observations, obs)
-			if len(e.observations) > e.maxObservations {
-				e.observations = e.observations[len(e.observations)-e.maxObservations:]
-			}
-			e.mu.Unlock()
-			e.bus.Publish(core.Event{Type: core.EventDNSObservation, Timestamp: p.Timestamp, Data: obs})
 		}
 	}()
+	go func() {
+		defer e.wg.Done()
+		interval := e.tracker.timeout / 2
+		if interval < 100*time.Millisecond {
+			interval = 100 * time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-e.stop:
+				return
+			case now := <-ticker.C:
+				for _, exchange := range e.tracker.Expire(now) {
+					e.publishExchange(exchange)
+				}
+			}
+		}
+	}()
+}
+
+func (e *Engine) Stop() {
+	e.stopOnce.Do(func() { close(e.stop) })
+	e.wg.Wait()
+}
+
+func (e *Engine) addObservation(observation Observation) {
+	e.mu.Lock()
+	e.observations = append(e.observations, observation)
+	if len(e.observations) > e.maxObservations {
+		copy(e.observations, e.observations[len(e.observations)-e.maxObservations:])
+		e.observations = e.observations[:e.maxObservations]
+	}
+	e.mu.Unlock()
+	e.bus.Publish(core.Event{Type: core.EventDNSObservation, Timestamp: observation.Timestamp, Data: observation})
+}
+
+func (e *Engine) publishExchange(exchange DNSExchange) {
+	timestamp := exchange.RespondedAt
+	if timestamp.IsZero() {
+		timestamp = exchange.RequestedAt
+	}
+	e.bus.Publish(core.Event{Type: core.EventDNSExchange, Timestamp: timestamp, Data: exchange})
 }
 
 func (e *Engine) GetObservations() []Observation {
@@ -59,15 +131,22 @@ func (e *Engine) GetObservations() []Observation {
 	return out
 }
 
+func (e *Engine) GetExchanges() []DNSExchange { return e.tracker.Exchanges() }
+
+func (e *Engine) Stats() Telemetry { return e.tracker.Stats() }
+
 func isDNSPort(a, b uint16) bool { return a == 53 || b == 53 }
 
 func parse(p core.Packet) (Observation, bool) {
 	data := p.AppPayload
+	if len(data) < 12 {
+		return Observation{}, false
+	}
 	flags := binary.BigEndian.Uint16(data[2:4])
 	isResponse := flags&0x8000 != 0
 	qd := int(binary.BigEndian.Uint16(data[4:6]))
 	an := int(binary.BigEndian.Uint16(data[6:8]))
-	obs := Observation{Timestamp: p.Timestamp, QueryName: "", ResponseCode: uint8(flags & 0x000f), IsResponse: isResponse}
+	obs := Observation{Timestamp: p.Timestamp, TransactionID: binary.BigEndian.Uint16(data[0:2]), QueryName: "", ResponseCode: uint8(flags & 0x000f), IsResponse: isResponse, AnswerCount: an}
 	if isResponse {
 		obs.ClientIP, obs.ServerIP = p.DstIP, p.SrcIP
 	} else {

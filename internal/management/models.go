@@ -206,6 +206,9 @@ type TelemetrySnapshot struct {
 	DNSObservations      json.RawMessage `json:"dns_observations,omitempty"`
 	SMBObservations      json.RawMessage `json:"smb_observations,omitempty"`
 	ProtocolObservations json.RawMessage `json:"protocol_observations,omitempty"`
+	UDPConversations     json.RawMessage `json:"udp_conversations,omitempty"`
+	UDPTelemetry         json.RawMessage `json:"udp_telemetry,omitempty"`
+	UDPProtocolExchanges json.RawMessage `json:"udp_protocol_exchanges,omitempty"`
 	BatchID              string          `json:"batch_id,omitempty"`
 	Sequence             int64           `json:"sequence,omitempty"`
 	Checksum             string          `json:"checksum,omitempty"`

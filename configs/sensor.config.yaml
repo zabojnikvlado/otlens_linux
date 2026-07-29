@@ -34,6 +34,22 @@ debug:
   enabled: false
 
 capture:
+  udp_conversations:
+    enabled: true
+    idle_timeout: 30s
+    max_active: 100000
+    max_packets_per_conversation: 100000
+    max_pending_requests_per_conversation: 256
+    retain_payload: false
+    protocols:
+      dns:
+        timeout: 5s
+      dhcp:
+        timeout: 60s
+      snmp:
+        timeout: 10s
+      sip:
+        timeout: 5m
   tcp_reassembly:
     enabled: true
     max_connections: 50000
