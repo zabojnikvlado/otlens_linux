@@ -2988,9 +2988,9 @@ func (s *Server) deleteCorrelationRule(c *gin.Context) {
 
 func (s *Server) protocolObservations(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
-	rows, err := s.repo.ListProtocolObservations(c.Request.Context(), c.Query("sensor_id"), c.Query("protocol"), c.Query("ip"), limit)
+	rows, err := s.Repo.ListProtocolObservations(c.Request.Context(), c.Query("sensor_id"), c.Query("protocol"), c.Query("ip"), limit)
 	if err != nil {
-		respondInternalError(c, "listing protocol observations", err)
+		respondInternalError(c, fmt.Errorf("listing protocol observations: %w", err))
 		return
 	}
 	c.JSON(http.StatusOK, rows)

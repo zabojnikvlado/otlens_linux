@@ -37,6 +37,31 @@ func TestSSH(t *testing.T) {
 	}
 }
 
+func TestTLSClientHelloRecord(t *testing.T) {
+	d := []byte{0x16, 0x03, 0x03, 0, 4, 1, 0, 0, 0}
+	o, ok := parseTLS(core.TCPStreamChunk{SrcPort: 50000, DstPort: 443}, d)
+	if !ok || o.Protocol != "tls" || o.Operation != "client_hello" || !o.Encrypted {
+		t.Fatalf("unexpected TLS observation: %#v, ok=%v", o, ok)
+	}
+	if _, ok := parseTLS(core.TCPStreamChunk{}, d[:4]); ok {
+		t.Fatal("truncated TLS record was accepted")
+	}
+}
+
+func TestSNMPGetAndTrap(t *testing.T) {
+	// SEQUENCE, version=v2c(1), community=public, GetRequest PDU.
+	d := []byte{0x30, 0x0d, 0x02, 0x01, 0x01, 0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c', 0xa0, 0x00}
+	o, ok := parseSNMP(core.Packet{SrcPort: 50000, DstPort: 161}, d)
+	if !ok || o.Operation != "get" || o.Attributes["version"] != "1" ||
+		o.Attributes["community"] != "public" {
+		t.Fatalf("unexpected SNMP observation: %#v, ok=%v", o, ok)
+	}
+	o, ok = parseSNMP(core.Packet{SrcPort: 162, DstPort: 50000}, []byte{0x30, 6, 0x02, 1, 1, 0x04, 0, 0xa4})
+	if !ok || o.Operation != "trap_v1" {
+		t.Fatalf("unexpected SNMP trap: %#v, ok=%v", o, ok)
+	}
+}
+
 func TestKerberosASReq(t *testing.T) {
 	p := core.Packet{SrcPort: 55000, DstPort: 88, AppPayload: []byte{0x6a, 0x01, 0x00}}
 	o, ok := parseKerberosUDP(p, p.AppPayload)
