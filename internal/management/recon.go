@@ -18,6 +18,7 @@ type ReconPolicy struct {
 type ReconJob struct {
 	ID          string        `json:"id"`
 	SensorID    string        `json:"sensor_id"`
+	CampaignID  string        `json:"campaign_id,omitempty"`
 	Targets     []string      `json:"targets"`
 	Profile     string        `json:"profile"`
 	Status      string        `json:"status"`
@@ -29,6 +30,27 @@ type ReconJob struct {
 	Results     []ReconResult `json:"results,omitempty"`
 }
 
+type ReconCampaign struct {
+	ID        string      `json:"id"`
+	Name      string      `json:"name"`
+	SensorID  string      `json:"sensor_id"`
+	Targets   []string    `json:"targets"`
+	Profile   string      `json:"profile"`
+	Policy    ReconPolicy `json:"policy"`
+	Enabled   bool        `json:"enabled"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	LastRunAt *time.Time  `json:"last_run_at,omitempty"`
+}
+
+type ReconChange struct {
+	Kind     string `json:"kind"`
+	Field    string `json:"field"`
+	Previous string `json:"previous,omitempty"`
+	Current  string `json:"current,omitempty"`
+	Severity string `json:"severity"`
+}
+
 type ReconService struct {
 	Port       int    `json:"port"`
 	Transport  string `json:"transport"`
@@ -38,6 +60,7 @@ type ReconService struct {
 	Banner     string `json:"banner,omitempty"`
 	TLSSubject string `json:"tls_subject,omitempty"`
 	TLSIssuer  string `json:"tls_issuer,omitempty"`
+	Hostname   string `json:"hostname,omitempty"`
 }
 
 type ReconEvidence struct {
@@ -45,6 +68,13 @@ type ReconEvidence struct {
 	Value      string    `json:"value"`
 	Source     string    `json:"source"`
 	Confidence int       `json:"confidence"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+type ReconAuditStep struct {
+	Stage      string    `json:"stage"`
+	Status     string    `json:"status"`
+	Detail     string    `json:"detail,omitempty"`
 	ObservedAt time.Time `json:"observed_at"`
 }
 
@@ -60,6 +90,8 @@ type ReconResult struct {
 	OTIdentity map[string]string `json:"ot_identity,omitempty"`
 	Services   []ReconService    `json:"services,omitempty"`
 	Evidence   []ReconEvidence   `json:"evidence,omitempty"`
+	Audit      []ReconAuditStep  `json:"audit,omitempty"`
+	Changes    []ReconChange     `json:"changes,omitempty"`
 	Error      string            `json:"error,omitempty"`
 	StartedAt  time.Time         `json:"started_at"`
 	FinishedAt time.Time         `json:"finished_at"`

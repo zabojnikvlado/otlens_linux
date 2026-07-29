@@ -84,10 +84,12 @@ type VLANConfig struct {
 // real VLAN, not just the ones someone's already configured.
 func (r *Repository) ListVLANConfig(ctx context.Context, sensorID string) ([]VLANConfig, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT o.vlan_id, COALESCE(c.name,''), c.purdue_level, COUNT(*) AS asset_count
+		SELECT o.vlan_id, COALESCE(c.name,''), c.purdue_level,
+               COUNT(DISTINCT COALESCE(NULLIF(o.mac,''), o.ip)) AS asset_count
 		FROM topology_nodes o
 		LEFT JOIN vlan_config c ON c.sensor_id = o.sensor_id AND c.vlan_id = o.vlan_id
 		WHERE o.sensor_id = $1
+          AND o.last_seen >= COALESCE((SELECT MAX(last_seen) FROM topology_nodes WHERE sensor_id=$1) - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes')
 		GROUP BY o.vlan_id, c.name, c.purdue_level
 		ORDER BY o.vlan_id ASC`,
 		sensorID,
@@ -133,7 +135,9 @@ func (r *Repository) SetVLANConfig(ctx context.Context, sensorID string, vlanID 
 func (r *Repository) ListVLANAssets(ctx context.Context, sensorID string, vlanID int) ([]topologyNodeRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen
-		FROM topology_nodes WHERE sensor_id=$1 AND vlan_id=$2 ORDER BY ip`,
+		FROM topology_nodes WHERE sensor_id=$1 AND vlan_id=$2
+          AND last_seen >= COALESCE((SELECT MAX(last_seen) FROM topology_nodes WHERE sensor_id=$1) - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes')
+        ORDER BY ip`,
 		sensorID, vlanID,
 	)
 	if err != nil {

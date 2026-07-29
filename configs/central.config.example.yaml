@@ -7,8 +7,8 @@
 #   web        = management/web-facing listener (default 8443)
 #   sensor_api = sensor registration/heartbeat/rules listener (default 9443)
 #
-# IMPORTANT: TLS is disabled by default for local development. For production,
-# enable TLS on both listeners and use trusted certificates.
+# PRODUCTION-SAFE TEMPLATE: TLS is enabled on both listeners. Copy the separate
+# central.config.development.example.yaml only for isolated local development.
 
 web:
   # Address to bind the management/web listener.
@@ -18,7 +18,7 @@ web:
   port: 8443
   tls:
     # Serve this listener over HTTPS when true.
-    enabled: false
+    enabled: true
     # PEM certificate and private key. Both must exist when TLS is enabled.
     certfile: central-web.crt
     keyfile: central-web.key
@@ -34,7 +34,7 @@ sensor_api:
   port: 9443
   tls:
     # Serve sensor API over HTTPS when true.
-    enabled: false
+    enabled: true
     certfile: central-sensor-api.crt
     keyfile: central-sensor-api.key
     minversion: "1.2"
@@ -65,7 +65,7 @@ auth:
   # Token used only by Linux sensors on the sensor API port 9443.
   # It must match central.token in every sensor config.
   # Environment override: OTLENS_CENTRAL_AUTH_SENSOR_TOKEN
-  sensor_token: "CHANGE_SENSOR_TOKEN"
+  sensor_token: "CHANGE_SENSOR_ENROLLMENT_TOKEN"
 
   # Sliding-expiry window for a logged-in Web UI session: it resets on
   # every request, so an active user is never logged out mid-session, but
@@ -79,7 +79,7 @@ auth:
   # password. Change these before first startup if even that brief
   # window is a concern in your environment.
   bootstrap_username: "administrator"
-  bootstrap_password: "administrator"
+  bootstrap_password: "CHANGE_BOOTSTRAP_PASSWORD"
 
 # Optional export of Central alerts and management audit events to a SIEM
 # HTTP collector. Events are stored in PostgreSQL first and retried after

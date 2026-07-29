@@ -302,7 +302,7 @@ func parseTICSV(r io.Reader, source, defaultType string, confidence int) ([]Thre
 func (s *Server) listThreatIntelSources(c *gin.Context) {
 	v, e := s.Repo.ListThreatIntelSources(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, v)
@@ -311,7 +311,7 @@ func (s *Server) listThreatIntelIndicators(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "5000"))
 	v, e := s.Repo.ListThreatIntelIndicators(c, limit)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, v)
@@ -337,7 +337,7 @@ func (s *Server) createThreatIntelSource(c *gin.Context) {
 	var id int64
 	err := s.Repo.db.QueryRowContext(c, `INSERT INTO threat_intel_sources(name,source_type,url,format,indicator_type,default_confidence,refresh_interval_seconds,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, x.Name, x.SourceType, x.URL, x.Format, x.IndicatorType, x.DefaultConfidence, x.RefreshIntervalSeconds, x.Enabled).Scan(&id)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	x.ID = id
@@ -350,7 +350,7 @@ func (s *Server) deleteThreatIntelSource(c *gin.Context) {
 		return
 	}
 	if _, e = s.Repo.db.ExecContext(c, `DELETE FROM threat_intel_sources WHERE id=$1`, id); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	_ = s.Repo.bumpThreatIntelVersion(c)
@@ -363,7 +363,7 @@ func (s *Server) deleteThreatIntelIndicator(c *gin.Context) {
 		return
 	}
 	if _, e = s.Repo.db.ExecContext(c, `DELETE FROM threat_intel_indicators WHERE id=$1`, id); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	_ = s.Repo.bumpThreatIntelVersion(c)
@@ -379,7 +379,7 @@ func (s *Server) addThreatIntelIndicator(c *gin.Context) {
 	x.Enabled = true
 	a, r, e := s.Repo.upsertThreatIntel(c, []ThreatIntelIndicator{x}, nil)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	if a == 0 {
@@ -424,7 +424,7 @@ func (s *Server) importThreatIntel(c *gin.Context) {
 	}
 	a, r, e := s.Repo.upsertThreatIntel(c, items, nil)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"accepted": a, "rejected": r})
@@ -508,7 +508,7 @@ func (s *Server) refreshThreatIntelSourceHTTP(c *gin.Context) {
 	}
 	if e = s.refreshThreatIntelSource(c, id); e != nil {
 		_, _ = s.Repo.db.ExecContext(c, `UPDATE threat_intel_sources SET last_sync_at=NOW(),last_error=$2 WHERE id=$1`, id, e.Error())
-		c.JSON(502, gin.H{"error": e.Error()})
+		respondUpstreamError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"status": "refreshed"})

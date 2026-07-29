@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS sensors (
  version TEXT NOT NULL DEFAULT '',
  hostname TEXT NOT NULL DEFAULT '',
  certificate_fingerprint TEXT,
+ auth_token_hash TEXT NOT NULL DEFAULT '',
+ auth_token_rotated_at TIMESTAMPTZ,
  go_version TEXT NOT NULL DEFAULT '',
  libpcap_version TEXT NOT NULL DEFAULT '',
  gopacket_version TEXT NOT NULL DEFAULT '',

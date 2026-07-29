@@ -58,6 +58,9 @@ const (
 	// EventDCERPCObservation carries decoded DCE/RPC metadata.
 	EventDCERPCObservation EventType = "dcerpc.observation"
 
+	// EventProtocolObservation carries normalized metadata for first-wave IT protocols.
+	EventProtocolObservation EventType = "protocol.observation"
+
 	// EventIPFIXFlow carries an ipfix.FlowRecord — a decoded flow
 	// summary exported by a router/switch/probe, produced by
 	// internal/ipfix when capture.mode is "ipfix" instead of

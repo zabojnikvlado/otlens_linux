@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
@@ -27,14 +30,62 @@ func reconID() string {
 	return "recon-" + hex.EncodeToString(b)
 }
 
+func serviceKeys(in []management.ReconService) []string {
+	out := make([]string, 0, len(in))
+	for _, x := range in {
+		out = append(out, fmt.Sprintf("%d/%s %s %s %s", x.Port, x.Transport, x.Service, x.Product, x.Version))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func reconChanges(previous *management.ReconResult, current management.ReconResult) []management.ReconChange {
+	if previous == nil {
+		return []management.ReconChange{{Kind: "baseline", Field: "asset", Current: "Initial discovery baseline created", Severity: "info"}}
+	}
+	var out []management.ReconChange
+	fields := []struct{ name, old, next string }{
+		{"hostname", previous.Hostname, current.Hostname}, {"vendor", previous.Vendor, current.Vendor}, {"operating_system", previous.OS, current.OS},
+		{"model", previous.Model, current.Model}, {"firmware", previous.Firmware, current.Firmware}, {"serial", previous.Serial, current.Serial},
+	}
+	for _, f := range fields {
+		if f.old != f.next && f.next != "" {
+			severity := "info"
+			if f.name == "firmware" || f.name == "operating_system" {
+				severity = "medium"
+			}
+			out = append(out, management.ReconChange{Kind: "changed", Field: f.name, Previous: f.old, Current: f.next, Severity: severity})
+		}
+	}
+	oldServices, newServices := serviceKeys(previous.Services), serviceKeys(current.Services)
+	oldSet, newSet := map[string]bool{}, map[string]bool{}
+	for _, x := range oldServices {
+		oldSet[x] = true
+	}
+	for _, x := range newServices {
+		newSet[x] = true
+	}
+	for _, x := range newServices {
+		if !oldSet[x] {
+			out = append(out, management.ReconChange{Kind: "added", Field: "service", Current: x, Severity: "medium"})
+		}
+	}
+	for _, x := range oldServices {
+		if !newSet[x] {
+			out = append(out, management.ReconChange{Kind: "removed", Field: "service", Previous: x, Severity: "info"})
+		}
+	}
+	return out
+}
+
 func (r *Repository) CreateReconJob(ctx context.Context, j management.ReconJob) error {
 	t, _ := json.Marshal(j.Targets)
 	p, _ := json.Marshal(j.Policy)
-	_, err := r.db.ExecContext(ctx, `INSERT INTO reconnaissance_jobs(id,sensor_id,profile,targets,policy,status) VALUES($1,$2,$3,$4,$5,$6)`, j.ID, j.SensorID, j.Profile, t, p, j.Status)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO reconnaissance_jobs(id,sensor_id,campaign_id,profile,targets,policy,status) VALUES($1,$2,NULLIF($3,''),$4,$5,$6,$7)`, j.ID, j.SensorID, j.CampaignID, j.Profile, t, p, j.Status)
 	return err
 }
 func (r *Repository) ListReconJobs(ctx context.Context) ([]management.ReconJob, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,profile,targets,policy,status,error,created_at,started_at,completed_at FROM reconnaissance_jobs ORDER BY created_at DESC LIMIT 500`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,COALESCE(campaign_id,''),profile,targets,policy,status,error,created_at,started_at,completed_at FROM reconnaissance_jobs ORDER BY created_at DESC LIMIT 500`)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +94,7 @@ func (r *Repository) ListReconJobs(ctx context.Context) ([]management.ReconJob, 
 	for rows.Next() {
 		var j management.ReconJob
 		var t, p []byte
-		if err := rows.Scan(&j.ID, &j.SensorID, &j.Profile, &t, &p, &j.Status, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.SensorID, &j.CampaignID, &j.Profile, &t, &p, &j.Status, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(t, &j.Targets)
@@ -82,16 +133,32 @@ func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results
 	if err = tx.QueryRowContext(ctx, `SELECT sensor_id FROM reconnaissance_jobs WHERE id=$1`, jobID).Scan(&sensorID); err != nil {
 		return err
 	}
-	for _, x := range results {
-		b, _ := json.Marshal(x)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO reconnaissance_results(job_id,target,result) VALUES($1,$2,$3)`, jobID, x.Target, b); err != nil {
-			return err
+	for i := range results {
+		x := &results[i]
+		var previous management.ReconResult
+		var previousServices []byte
+		previous.Target = x.Target
+		errPrev := tx.QueryRowContext(ctx, `SELECT hostname,vendor,operating_system,model,firmware,serial,services FROM asset_recon_profile WHERE sensor_id=$1 AND ip=$2`, sensorID, x.Target).Scan(&previous.Hostname, &previous.Vendor, &previous.OS, &previous.Model, &previous.Firmware, &previous.Serial, &previousServices)
+		var previousPtr *management.ReconResult
+		if errPrev == nil {
+			_ = json.Unmarshal(previousServices, &previous.Services)
+			previousPtr = &previous
 		}
+		x.Changes = reconChanges(previousPtr, *x)
 		services, _ := json.Marshal(x.Services)
 		evidence, _ := json.Marshal(x.Evidence)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_profile(sensor_id,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
 			ON CONFLICT(sensor_id,ip) DO UPDATE SET hostname=COALESCE(NULLIF(EXCLUDED.hostname,''),asset_recon_profile.hostname),vendor=COALESCE(NULLIF(EXCLUDED.vendor,''),asset_recon_profile.vendor),operating_system=COALESCE(NULLIF(EXCLUDED.operating_system,''),asset_recon_profile.operating_system),model=COALESCE(NULLIF(EXCLUDED.model,''),asset_recon_profile.model),firmware=COALESCE(NULLIF(EXCLUDED.firmware,''),asset_recon_profile.firmware),serial=COALESCE(NULLIF(EXCLUDED.serial,''),asset_recon_profile.serial),ot_identity=CASE WHEN EXCLUDED.ot_identity='{}'::jsonb THEN asset_recon_profile.ot_identity ELSE EXCLUDED.ot_identity END,services=EXCLUDED.services,evidence=EXCLUDED.evidence,last_profiled_at=NOW()`, sensorID, x.Target, x.Hostname, x.Vendor, x.OS, x.Model, x.Firmware, x.Serial, mustJSON(x.OTIdentity), services, evidence); err != nil {
+			return err
+		}
+		x.Audit = append(x.Audit, management.ReconAuditStep{Stage: "persist_results", Status: "ok", Detail: "result stored and asset profile updated", ObservedAt: time.Now().UTC()})
+		b, _ := json.Marshal(x)
+		changes, _ := json.Marshal(x.Changes)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_history(sensor_id,ip,job_id,result,changes) VALUES($1,$2,$3,$4,$5)`, sensorID, x.Target, jobID, b, changes); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO reconnaissance_results(job_id,target,result) VALUES($1,$2,$3)`, jobID, x.Target, b); err != nil {
 			return err
 		}
 	}
@@ -115,7 +182,7 @@ func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results
 func (s *Server) listReconJobs(c *gin.Context) {
 	x, e := s.Repo.ListReconJobs(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, x)
@@ -167,7 +234,7 @@ func (s *Server) createReconJob(c *gin.Context) {
 	j.ID = reconID()
 	j.Status = "queued"
 	if err := s.Repo.CreateReconJob(c, j); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	cmd := management.ReconCommand{JobID: j.ID, Targets: j.Targets, Profile: j.Profile, Policy: j.Policy}
@@ -182,7 +249,7 @@ func (s *Server) createReconJob(c *gin.Context) {
 	b, _ := json.Marshal(cmd)
 	if err := s.Repo.QueueCommands(c, j.SensorID, "recon.safe_discovery", []string{string(b)}); err != nil {
 		_, _ = s.Repo.db.ExecContext(c, `UPDATE reconnaissance_jobs SET status='failed',error=$2,completed_at=NOW() WHERE id=$1`, j.ID, "failed to queue sensor command: "+err.Error())
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, j)
@@ -200,10 +267,179 @@ func (s *Server) reconResult(c *gin.Context) {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
+	status := "completed"
+	if strings.TrimSpace(body.Error) != "" {
+		status = "failed"
+	}
+	s.publishLive(LiveEvent{Type: "discovery.completed", SensorID: c.GetHeader("X-OTLens-Sensor-ID"), EntityID: c.Param("job"), Message: "discovery " + status, Data: gin.H{"status": status, "result_count": len(body.Results)}})
 	c.JSON(200, gin.H{"accepted": true})
+}
+
+func (r *Repository) ListReconCampaigns(ctx context.Context) ([]management.ReconCampaign, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,name,sensor_id,profile,targets,policy,enabled,created_at,updated_at,last_run_at FROM reconnaissance_campaigns ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []management.ReconCampaign
+	for rows.Next() {
+		var x management.ReconCampaign
+		var targets, policy []byte
+		if err := rows.Scan(&x.ID, &x.Name, &x.SensorID, &x.Profile, &targets, &policy, &x.Enabled, &x.CreatedAt, &x.UpdatedAt, &x.LastRunAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(targets, &x.Targets)
+		_ = json.Unmarshal(policy, &x.Policy)
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+func (s *Server) listReconCampaigns(c *gin.Context) {
+	x, err := s.Repo.ListReconCampaigns(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, x)
+}
+
+func normalizeReconPolicy(profile string, p *management.ReconPolicy) error {
+	if profile == "" {
+		profile = "safe-discovery"
+	}
+	if profile != "safe-discovery" && profile != "ot-conservative" && profile != "authenticated-inventory" {
+		return errors.New("unsupported discovery profile")
+	}
+	if p.PacketsPerSecond <= 0 {
+		p.PacketsPerSecond = 5
+	}
+	if p.PacketsPerSecond > 20 {
+		return errors.New("packets_per_second may not exceed 20")
+	}
+	if p.ConcurrentTargets <= 0 {
+		p.ConcurrentTargets = 1
+	}
+	if p.ConcurrentTargets > 10 {
+		return errors.New("concurrent_targets may not exceed 10")
+	}
+	if p.TimeoutSeconds <= 0 {
+		p.TimeoutSeconds = 3
+	}
+	if profile == "ot-conservative" {
+		if !p.RequireManualApproval {
+			return errors.New("OT conservative discovery requires manual approval")
+		}
+		if len(p.OTProtocols) == 0 {
+			p.OTProtocols = []string{"modbus", "ethernet-ip", "s7", "opcua", "bacnet"}
+		}
+	}
+	if profile == "authenticated-inventory" && (!p.RequireManualApproval || p.CredentialID == "") {
+		return errors.New("authenticated inventory requires approval and credential_id")
+	}
+	return nil
+}
+
+func (s *Server) createReconCampaign(c *gin.Context) {
+	var x management.ReconCampaign
+	if c.ShouldBindJSON(&x) != nil || strings.TrimSpace(x.Name) == "" || strings.TrimSpace(x.SensorID) == "" || len(x.Targets) == 0 {
+		c.JSON(400, gin.H{"error": "name, sensor_id and targets are required"})
+		return
+	}
+	if x.Profile == "" {
+		x.Profile = "safe-discovery"
+	}
+	if err := normalizeReconPolicy(x.Profile, &x.Policy); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	x.ID = "campaign-" + strings.TrimPrefix(reconID(), "recon-")
+	x.Enabled = true
+	targets, _ := json.Marshal(x.Targets)
+	policy, _ := json.Marshal(x.Policy)
+	_, err := s.Repo.db.ExecContext(c, `INSERT INTO reconnaissance_campaigns(id,name,sensor_id,profile,targets,policy,enabled) VALUES($1,$2,$3,$4,$5,$6,$7)`, x.ID, x.Name, x.SensorID, x.Profile, targets, policy, x.Enabled)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, x)
+}
+
+func (s *Server) runReconCampaign(c *gin.Context) {
+	var x management.ReconCampaign
+	var targets, policy []byte
+	if err := s.Repo.db.QueryRowContext(c, `SELECT id,name,sensor_id,profile,targets,policy,enabled,created_at,updated_at,last_run_at FROM reconnaissance_campaigns WHERE id=$1`, c.Param("id")).Scan(&x.ID, &x.Name, &x.SensorID, &x.Profile, &targets, &policy, &x.Enabled, &x.CreatedAt, &x.UpdatedAt, &x.LastRunAt); err != nil {
+		c.JSON(404, gin.H{"error": "campaign not found"})
+		return
+	}
+	if !x.Enabled {
+		c.JSON(409, gin.H{"error": "campaign is disabled"})
+		return
+	}
+	_ = json.Unmarshal(targets, &x.Targets)
+	_ = json.Unmarshal(policy, &x.Policy)
+	j := management.ReconJob{ID: reconID(), SensorID: x.SensorID, CampaignID: x.ID, Targets: x.Targets, Profile: x.Profile, Policy: x.Policy, Status: "queued"}
+	if err := s.Repo.CreateReconJob(c, j); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	cmd := management.ReconCommand{JobID: j.ID, Targets: j.Targets, Profile: j.Profile, Policy: j.Policy}
+	if j.Policy.CredentialID != "" {
+		cred, err := s.Repo.GetReconCredential(c, j.Policy.CredentialID)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "credential not found or unavailable"})
+			return
+		}
+		cmd.Credential = &cred
+	}
+	b, _ := json.Marshal(cmd)
+	if err := s.Repo.QueueCommands(c, j.SensorID, "recon.safe_discovery", []string{string(b)}); err != nil {
+		_, _ = s.Repo.db.ExecContext(c, `UPDATE reconnaissance_jobs SET status='failed',error=$2,completed_at=NOW() WHERE id=$1`, j.ID, err.Error())
+		respondInternalError(c, err)
+		return
+	}
+	_, _ = s.Repo.db.ExecContext(c, `UPDATE reconnaissance_campaigns SET last_run_at=NOW(),updated_at=NOW() WHERE id=$1`, x.ID)
+	c.JSON(http.StatusCreated, j)
+}
+
+func (s *Server) deleteReconCampaign(c *gin.Context) {
+	res, err := s.Repo.db.ExecContext(c, `DELETE FROM reconnaissance_campaigns WHERE id=$1`, c.Param("id"))
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		c.JSON(404, gin.H{"error": "campaign not found"})
+		return
+	}
+	c.Status(204)
+}
+
+func (s *Server) assetReconHistory(c *gin.Context) {
+	rows, err := s.Repo.db.QueryContext(c, `SELECT job_id,result,changes,observed_at FROM asset_recon_history WHERE sensor_id=$1 AND ip=$2 ORDER BY observed_at DESC LIMIT 50`, c.Param("id"), c.Param("ip"))
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var job string
+		var result, changes []byte
+		var at time.Time
+		if rows.Scan(&job, &result, &changes, &at) == nil {
+			var r management.ReconResult
+			var ch []management.ReconChange
+			_ = json.Unmarshal(result, &r)
+			_ = json.Unmarshal(changes, &ch)
+			out = append(out, gin.H{"job_id": job, "observed_at": at, "result": r, "changes": ch})
+		}
+	}
+	c.JSON(200, out)
 }
 
 type AssetReconProfile struct {

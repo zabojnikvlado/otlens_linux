@@ -31,6 +31,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/oui"
 	"github.com/zabojnikvlado/otlens_linux/internal/recon"
 	"github.com/zabojnikvlado/otlens_linux/internal/syncagent"
+	"github.com/zabojnikvlado/otlens_linux/internal/vuln"
 	"go.uber.org/zap"
 )
 
@@ -140,7 +141,7 @@ func main() {
 		hostname, _ := os.Hostname()
 		client := syncagent.New(syncagent.Config{
 			BaseURL: cfg.Central.URL, Token: cfg.Central.Token, SensorID: cfg.Central.SensorID,
-			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname,
+			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname, CredentialFile: cfg.Central.CredentialFile,
 			Interval: cfg.Central.Interval, Timeout: cfg.Central.Timeout, InsecureSkipVerify: cfg.Central.InsecureSkipVerify,
 		})
 		marshal := func(v interface{}) (json.RawMessage, error) {
@@ -149,7 +150,7 @@ func main() {
 		}
 		metricStarted := time.Now()
 		var previousMetricAt time.Time
-		var previousPackets, previousBytes uint64
+		var previousPackets, previousBytes, previousTCPSegments uint64
 		metricsSnapshot := func() map[string]interface{} {
 			now := time.Now()
 			var mem runtime.MemStats
@@ -176,9 +177,18 @@ func main() {
 			}
 			packetsPerSecond := float64(packetDelta) / elapsed
 			bytesPerSecond := float64(byteDelta) / elapsed
-			previousMetricAt, previousPackets, previousBytes = now, packets, bytes
+			tcpSegmentDelta := uint64(0)
+			if tcp.SegmentsSeen >= previousTCPSegments {
+				tcpSegmentDelta = tcp.SegmentsSeen - previousTCPSegments
+			}
+			tcpPacketsPerSecond := float64(tcpSegmentDelta) / elapsed
+			tcpPacketPercent := float64(0)
+			if packetDelta > 0 {
+				tcpPacketPercent = float64(tcpSegmentDelta) * 100 / float64(packetDelta)
+			}
+			previousMetricAt, previousPackets, previousBytes, previousTCPSegments = now, packets, bytes, tcp.SegmentsSeen
 			return map[string]interface{}{
-				"schema_version": 3,
+				"schema_version": 4,
 				"system": map[string]interface{}{
 					"goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": mem.Alloc,
 					"memory_sys_bytes": mem.Sys, "heap_objects": mem.HeapObjects,
@@ -188,7 +198,17 @@ func main() {
 					"packets_total": packets, "bytes_total": bytes,
 					"kernel_drops_total": 0, "interface_drops_total": 0, "drop_rate_percent": 0,
 				},
-				"tcp_reassembly": tcp,
+				"tcp_reassembly": map[string]interface{}{
+					"enabled": tcp.Enabled, "running": tcp.Running,
+					"active_connections": tcp.ActiveConnections, "connections_opened_total": tcp.ConnectionsOpened, "connections_closed_total": tcp.ConnectionsClosed,
+					"segments_seen": tcp.SegmentsSeen, "bytes_seen": tcp.BytesSeen, "chunks_emitted": tcp.ChunksEmitted, "bytes_emitted": tcp.BytesEmitted,
+					"tcp_packets_per_second": tcpPacketsPerSecond, "tcp_packet_percent": tcpPacketPercent,
+					"buffered_bytes": tcp.BufferedBytes, "out_of_order_segments": tcp.OutOfOrderSegments, "retransmitted_bytes": tcp.RetransmittedBytes,
+					"overlap_segments": tcp.OverlapSegments, "overlap_conflicts": tcp.OverlapConflicts, "gap_recoveries": tcp.GapRecoveries,
+					"evicted_connections": tcp.EvictedConnections, "dropped_segments": tcp.DroppedSegments,
+					"packet_events_received": tcp.PacketEventsReceived, "tcp_packets_received": tcp.TCPPacketsReceived, "type_assertion_failures": tcp.TypeAssertionFailures,
+					"pipeline_issue": map[bool]string{true: "packet events are not reaching TCP reassembly", false: ""}[captureRunning && packets > 0 && tcp.PacketEventsReceived == 0],
+				},
 				"pipeline": map[string]interface{}{
 					"event_queue_depth": 0, "event_queue_percent": 0, "events_per_second": packetsPerSecond, "dropped_events_total": 0,
 				},
@@ -302,6 +322,13 @@ func main() {
 					}
 				case "rule.delete":
 					application.DetectEngine.DeleteRule(command.Target)
+				case "vulnerability.snapshot":
+					var advisories []vuln.Advisory
+					if err := json.Unmarshal([]byte(command.Target), &advisories); err != nil {
+						log.Printf("OTLens invalid vulnerability snapshot: %v", err)
+					} else {
+						log.Printf("OTLens vulnerability snapshot applied: %d advisories", application.VulnerabilityDB.Replace(advisories))
+					}
 				case "segmentation.config":
 					var request struct {
 						VLANLevels   map[uint16]float64 `json:"vlan_levels"`
@@ -452,11 +479,15 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
+				protocolJSON, err := marshal(application.ProtocolEngine.GetObservations())
+				if err != nil {
+					return management.TelemetrySnapshot{}, err
+				}
 				rulesJSON, err := marshal(application.DetectEngine.GetRules())
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON}, nil
+				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON}, nil
 			}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

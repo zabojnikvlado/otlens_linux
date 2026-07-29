@@ -208,57 +208,73 @@ func (r *Repository) GenerateReport(ctx context.Context, periodStart, periodEnd 
 func renderReportHTML(d reportData) string {
 	esc := html.EscapeString
 	var sb strings.Builder
-	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-body{font-family:-apple-system,Segoe UI,sans-serif;background:#f4f6f8;color:#1a2332;margin:0;padding:24px}
-.card{background:#fff;border-radius:8px;padding:24px;max-width:640px;margin:0 auto}
-h1{font-size:20px;margin:0 0 4px} .period{color:#64748b;font-size:13px;margin-bottom:20px}
-h2{font-size:14px;color:#334155;border-bottom:1px solid #e2e8f0;padding-bottom:6px;margin-top:24px}
-.kpi{display:inline-block;background:#f1f5f9;border-radius:6px;padding:10px 16px;margin:4px 8px 4px 0}
-.kpi b{display:block;font-size:20px} .kpi span{font-size:12px;color:#64748b}
-.warn{color:#b45309} .crit{color:#b91c1c} table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{text-align:left;padding:4px 8px;border-bottom:1px solid #eef1f4}
-</style></head><body><div class="card">`)
-	sb.WriteString(fmt.Sprintf(`<h1>OTLens weekly summary</h1><div class="period">%s &ndash; %s</div>`,
+	availability := 100
+	if d.TotalSensors > 0 {
+		availability = ((d.TotalSensors - len(d.OfflineSensors)) * 100) / d.TotalSensors
+	}
+	severityTotal := 0
+	for _, n := range d.AlertsBySeverity {
+		severityTotal += n
+	}
+
+	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+*{box-sizing:border-box}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#eef2f6;color:#172033;margin:0;padding:32px 16px;line-height:1.45}
+.report{background:#fff;max-width:900px;margin:0 auto;border:1px solid #dce3eb;border-radius:14px;overflow:hidden;box-shadow:0 16px 40px rgba(15,23,42,.08)}
+.hero{background:linear-gradient(135deg,#0f2942,#174f73);color:#fff;padding:30px 36px}.brand{font-size:12px;letter-spacing:.16em;text-transform:uppercase;opacity:.78}.hero h1{font-size:28px;line-height:1.2;margin:8px 0 6px}.period{font-size:14px;opacity:.82}.content{padding:30px 36px 38px}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:28px}.kpi{border:1px solid #dce3eb;border-radius:10px;padding:16px;background:#f8fafc}.kpi b{display:block;font-size:27px;line-height:1;color:#0f2942}.kpi span{display:block;font-size:12px;color:#64748b;margin-top:8px}.kpi small{display:block;font-size:11px;color:#94a3b8;margin-top:3px}
+section{margin-top:28px}h2{font-size:16px;color:#0f2942;margin:0 0 12px;padding-bottom:9px;border-bottom:2px solid #dbe8f1}.section-note{font-size:12px;color:#64748b;margin:-6px 0 12px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;border:1px solid #dce3eb;border-radius:9px;overflow:hidden}th{background:#f1f5f9;color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:.05em}td,th{text-align:left;padding:10px 12px;border-bottom:1px solid #e8edf2}tr:last-child td{border-bottom:0}.number{text-align:right;font-variant-numeric:tabular-nums}.severity{display:inline-block;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700;text-transform:uppercase}.critical{background:#fee2e2;color:#991b1b}.high{background:#ffedd5;color:#9a3412}.medium{background:#fef3c7;color:#92400e}.low{background:#e0f2fe;color:#075985}
+.health{display:flex;align-items:center;gap:16px;padding:15px 16px;border-radius:9px;background:#f8fafc;border:1px solid #dce3eb}.health-score{font-size:25px;font-weight:750;color:#0f2942}.muted{color:#64748b}.warning{color:#9a3412;font-weight:600}.empty{padding:16px;border:1px dashed #cbd5e1;border-radius:9px;color:#64748b;background:#f8fafc}.footer{border-top:1px solid #e5eaf0;padding:16px 36px;color:#64748b;font-size:11px;background:#f8fafc}
+@media(max-width:700px){body{padding:0}.report{border-radius:0;border:0}.hero,.content{padding-left:20px;padding-right:20px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media print{body{background:#fff;padding:0}.report{box-shadow:none;border:0;max-width:none}.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}.content{padding-bottom:18px}section{break-inside:avoid}.footer{position:fixed;bottom:0;left:0;right:0}}
+</style></head><body><article class="report">`)
+	sb.WriteString(fmt.Sprintf(`<header class="hero"><div class="brand">OTLens Security Operations</div><h1>Weekly security summary</h1><div class="period">%s - %s</div></header><main class="content">`,
 		esc(d.PeriodStart.Format("Jan 2, 2006")), esc(d.PeriodEnd.Format("Jan 2, 2006"))))
 
-	sb.WriteString(`<h2>At a glance</h2>`)
-	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>new assets</span></div>`, d.NewAssets))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>open alerts</span></div>`, d.OpenAlerts))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>new alerts this period</span></div>`, d.NewAlertsThisPeriod))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>new connections</span></div>`, d.TopologyEdgeGrowth))
+	sb.WriteString(`<div class="summary">`)
+	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>New assets</span><small>First observed this period</small></div>`, d.NewAssets))
+	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>Open alerts</span><small>%d newly observed</small></div>`, d.OpenAlerts, d.NewAlertsThisPeriod))
+	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>New connections</span><small>Topology growth</small></div>`, d.TopologyEdgeGrowth))
+	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d%%</b><span>Sensor availability</span><small>%d of %d online</small></div>`, availability, d.TotalSensors-len(d.OfflineSensors), d.TotalSensors))
+	sb.WriteString(`</div>`)
 
-	sb.WriteString(`<h2>Open alerts by severity</h2><table>`)
+	sb.WriteString(`<section><h2>Alert posture</h2>`)
+	sb.WriteString(fmt.Sprintf(`<p class="section-note">%d open alerts grouped by severity.</p><table><thead><tr><th>Severity</th><th class="number">Open alerts</th><th class="number">Share</th></tr></thead><tbody>`, severityTotal))
 	for _, sev := range []string{"critical", "high", "medium", "low"} {
 		n := d.AlertsBySeverity[sev]
-		class := ""
-		if sev == "critical" {
-			class = "crit"
-		} else if sev == "high" {
-			class = "warn"
+		share := 0
+		if severityTotal > 0 {
+			share = n * 100 / severityTotal
 		}
-		sb.WriteString(fmt.Sprintf(`<tr><td class="%s">%s</td><td>%d</td></tr>`, class, esc(strings.Title(sev)), n))
+		sb.WriteString(fmt.Sprintf(`<tr><td><span class="severity %s">%s</span></td><td class="number">%d</td><td class="number muted">%d%%</td></tr>`, sev, esc(strings.ToUpper(sev)), n, share))
 	}
-	sb.WriteString(`</table>`)
+	sb.WriteString(`</tbody></table></section>`)
 
-	sb.WriteString(`<h2>Incidents (2+ related alert types, same sensor+IP)</h2>`)
+	sb.WriteString(`<section><h2>Correlated incidents</h2><p class="section-note">Incidents with two or more related alert types on the same sensor and IP.</p>`)
 	if len(d.NewIncidents) == 0 {
-		sb.WriteString(`<p>None.</p>`)
+		sb.WriteString(`<div class="empty">No correlated incidents were identified in this reporting window.</div>`)
 	} else {
-		sb.WriteString(`<table><tr><th>Sensor</th><th>IP</th><th>Severity</th><th>Types</th></tr>`)
+		sb.WriteString(`<table><thead><tr><th>Sensor</th><th>IP address</th><th>Severity</th><th>Detection types</th></tr></thead><tbody>`)
 		for _, inc := range d.NewIncidents {
-			sb.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
-				esc(inc.SensorID), esc(inc.IP), esc(inc.Severity), esc(strings.Join(inc.Types, ", "))))
+			sev := strings.ToLower(inc.Severity)
+			if sev == "" {
+				sev = "low"
+			}
+			sb.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td><span class="severity %s">%s</span></td><td>%s</td></tr>`,
+				esc(inc.SensorID), esc(inc.IP), esc(sev), esc(strings.ToUpper(inc.Severity)), esc(strings.Join(inc.Types, ", "))))
 		}
-		sb.WriteString(`</table>`)
+		sb.WriteString(`</tbody></table>`)
 	}
+	sb.WriteString(`</section>`)
 
-	sb.WriteString(`<h2>Sensors</h2>`)
-	sb.WriteString(fmt.Sprintf(`<p>%d total, %d offline.</p>`, d.TotalSensors, len(d.OfflineSensors)))
+	sb.WriteString(`<section><h2>Sensor health</h2>`)
+	sb.WriteString(fmt.Sprintf(`<div class="health"><div class="health-score">%d%%</div><div><strong>%d of %d sensors online</strong><div class="muted">Availability at report generation time</div></div></div>`, availability, d.TotalSensors-len(d.OfflineSensors), d.TotalSensors))
 	if len(d.OfflineSensors) > 0 {
-		sb.WriteString(`<p class="warn">Offline: ` + esc(strings.Join(d.OfflineSensors, ", ")) + `</p>`)
+		sb.WriteString(`<p class="warning">Offline sensors: ` + esc(strings.Join(d.OfflineSensors, ", ")) + `</p>`)
 	}
-
-	sb.WriteString(`</div></body></html>`)
+	sb.WriteString(`</section></main>`)
+	sb.WriteString(fmt.Sprintf(`<footer class="footer">Generated by OTLens on %s UTC. This report is intended for operational review and does not replace incident validation.</footer>`, time.Now().UTC().Format("Jan 2, 2006 15:04")))
+	sb.WriteString(`</article></body></html>`)
 	return sb.String()
 }
 

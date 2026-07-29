@@ -71,3 +71,25 @@ func TestOverlapPolicyLastSeen(t *testing.T) {
 		t.Fatal("expected overlap conflict metric")
 	}
 }
+
+func TestACKOnlyPacketCreatesTrackedConnection(t *testing.T) {
+	bus := core.NewEventBus()
+	e := New(bus, Config{Enabled: true, ShardCount: 1})
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 12345, DstPort: 22, TCPSeq: 100, TCPFlags: "ACK", Timestamp: time.Now()})
+	stats := e.Stats()
+	if stats.SegmentsSeen != 1 || stats.ActiveConnections != 1 || stats.ConnectionsOpened != 1 {
+		t.Fatalf("ACK-only TCP packet was not tracked: %+v", stats)
+	}
+}
+
+func TestClosedConnectionCounters(t *testing.T) {
+	bus := core.NewEventBus()
+	e := New(bus, Config{Enabled: true, ShardCount: 1, ClosedTimeout: time.Millisecond})
+	now := time.Now()
+	e.Push(core.Packet{L4Protocol: "TCP", SrcIP: "10.0.0.1", DstIP: "10.0.0.2", SrcPort: 12345, DstPort: 22, TCPSeq: 100, TCPFlags: "FIN,ACK", Timestamp: now})
+	e.cleanup(now.Add(time.Second))
+	stats := e.Stats()
+	if stats.ActiveConnections != 0 || stats.ConnectionsOpened != 1 || stats.ConnectionsClosed != 1 {
+		t.Fatalf("unexpected connection counters: %+v", stats)
+	}
+}

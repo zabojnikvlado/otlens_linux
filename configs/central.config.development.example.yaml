@@ -1,0 +1,216 @@
+# DEVELOPMENT ONLY — DO NOT USE ON A SHARED OR PRODUCTION NETWORK.
+# OTLens Central Management configuration.
+# Default deployment path: config.yaml in the same directory as
+# otlens-central.exe — Central looks there automatically if you don't pass
+# --config. Put this file wherever you actually run the binary from.
+#
+# The Central process has two listeners:
+#   web        = management/web-facing listener (default 8443)
+#   sensor_api = sensor registration/heartbeat/rules listener (default 9443)
+#
+# IMPORTANT: TLS is disabled by default for local development. For production,
+# enable TLS on both listeners and use trusted certificates.
+
+web:
+  # Address to bind the management/web listener.
+  # 0.0.0.0 = all network interfaces; 127.0.0.1 = local machine only.
+  host: 127.0.0.1
+  # TCP port used by administrators/browser clients.
+  port: 8443
+  tls:
+    # Serve this listener over HTTPS when true.
+    enabled: false
+    # PEM certificate and private key. Both must exist when TLS is enabled.
+    certfile: central-web.crt
+    keyfile: central-web.key
+    # Minimum TLS version: 1.0, 1.1, 1.2, or 1.3.
+    minversion: "1.2"
+    # Optional Go/IANA TLS 1.2 cipher suite names. Empty = Go secure defaults.
+    ciphersuites: []
+
+sensor_api:
+  # Address to bind the sensor-facing API listener.
+  host: 127.0.0.1
+  # TCP port used by Linux sensors for registration, heartbeat and rule sync.
+  port: 9443
+  tls:
+    # Serve sensor API over HTTPS when true.
+    enabled: false
+    certfile: central-sensor-api.crt
+    keyfile: central-sensor-api.key
+    minversion: "1.2"
+    ciphersuites: []
+
+database:
+  # PostgreSQL is expected to run on the same Windows server as Central.
+  # Keep PostgreSQL bound to localhost so sensors cannot access port 5432.
+  host: 127.0.0.1
+  port: 5432
+  name: otlens
+  user: otlens
+  # Prefer OTLENS_CENTRAL_DATABASE_PASSWORD environment variable in production.
+  password: "CHANGE_ME"
+  # PostgreSQL SSL mode: disable, require, verify-ca, verify-full, etc.
+  sslmode: disable
+
+auth:
+  # Emergency/break-glass access only — normal use is username+password
+  # login through the Web UI, which issues a session cookie (see below).
+  # Requests bearing this token as "Authorization: Bearer <token>" get
+  # full access with no per-user identity, so keep it for operational
+  # emergencies (e.g. the users table or Postgres itself is broken) rather
+  # than day-to-day use. Leave empty to disable this fallback entirely.
+  # Environment override: OTLENS_CENTRAL_AUTH_MANAGEMENT_TOKEN
+  management_token: ""
+
+  # Token used only by Linux sensors on the sensor API port 9443.
+  # It must match central.token in every sensor config.
+  # Environment override: OTLENS_CENTRAL_AUTH_SENSOR_TOKEN
+  sensor_token: "CHANGE_SENSOR_ENROLLMENT_TOKEN"
+
+  # Sliding-expiry window for a logged-in Web UI session: it resets on
+  # every request, so an active user is never logged out mid-session, but
+  # an idle one is logged out this long after their last request.
+  session_duration: 6h
+
+  # Used exactly once — the first time Central starts against a database
+  # with no users at all — to create the initial administrator account.
+  # That account is created with must_change_password set, so this
+  # default only ever works to log in and immediately set a real
+  # password. Change these before first startup if even that brief
+  # window is a concern in your environment.
+  bootstrap_username: "administrator"
+  bootstrap_password: "administrator"
+
+# Optional export of Central alerts and management audit events to a SIEM
+# HTTP collector. Events are stored in PostgreSQL first and retried after
+# temporary SIEM/network failures, so SIEM availability does not affect Central.
+siem:
+  enabled: false
+  # HTTP(S) endpoint accepting one JSON event per POST.
+  url: "https://siem.example.local/api/events"
+  export_alerts: true
+  export_audit: true
+  # Value placed in the top-level JSON source field.
+  source: "otlens-central"
+
+  # Optional HTTP authentication. Prefer environment variable:
+  # OTLENS_CENTRAL_SIEM_BEARER_TOKEN
+  bearer_token: ""
+
+  # Request and retry settings. max_attempts: 0 means retry indefinitely.
+  timeout: 10s
+  retry_interval: 15s
+  batch_size: 100
+  max_attempts: 0
+
+  # Optional static HTTP headers required by the SIEM collector.
+  headers:
+    # X-API-Key: "CHANGE_ME"
+
+  tls:
+    # Only for temporary testing with an untrusted certificate.
+    insecure_skip_verify: false
+    # PEM CA used to validate a SIEM certificate issued by an internal CA.
+    ca_cert_file: ""
+    # Optional mutual TLS client identity. Configure both or neither.
+    client_cert_file: ""
+    client_key_file: ""
+    # Optional TLS SNI/certificate name override.
+    server_name: ""
+
+# A sensor is shown "online" from registration/heartbeat until Central
+# hasn't heard from it for offline_after, at which point it's flipped to
+# "offline" — checked every check_interval. Sensors sync (and therefore
+# heartbeat) every sensor.central.interval, 30s by default; offline_after
+# should be a few multiples of whatever that's actually set to on your
+# sensors, not equal to it, so one slow/missed sync doesn't flap the
+# status.
+sensors:
+  offline_after: 90s
+  check_interval: 20s
+
+# Offline, vendor-only lookup against a locally-loaded CSV snapshot — never
+# a live network call (OT networks are routinely air-gapped on purpose).
+# Prepare the CSV out of band from a public ICS advisory feed (see
+# ics_advisories.csv.example for the expected columns) and copy it in like
+# any other definition update. Matching is by device vendor only; Central
+# has no passive way to fingerprint exact product/firmware, so results are
+# "known issues affecting this vendor," not confirmed for this specific
+# device. The Assets tab looks this up when you click a row.
+vulnerability:
+  enabled: false
+  csv_path: ""
+
+# Bounds PostgreSQL growth over time. Only ever touches telemetry-derived
+# history (topology_edges, topology_nodes, analysis_jobs), alert_history,
+# and audit_log — configuration (rule_sets, sensors, sites), accounts
+# (users, roles, sessions), and system_backups are never affected,
+# regardless of size pressure. Age-based cutoffs (*_days) run first on
+# every sweep; the size backstop only kicks in afterward, and only for
+# these same five tables — see DOCUMENTATION.md's Architecture section.
+database_retention:
+  enabled: true
+  # How often the retention sweep runs.
+  interval: 6h
+  # Age-based cutoffs, one per category — a row older than this (by its
+  # own last-activity timestamp, not creation) is deleted every sweep
+  # regardless of database size. 0 disables that category's age cutoff
+  # (it's still subject to the size backstop below).
+  telemetry_days: 30
+  alerts_days: 180
+  audit_days: 365
+  # If the combined size of just the five tables above still exceeds
+  # this after the age-based pass, the globally oldest rows across all
+  # of them (not a fixed per-category order) are deleted in batches
+  # until back at or under target_database_size_gb.
+  max_database_size_gb: 80
+  target_database_size_gb: 70
+  # Deletes are chunked into batches this size, with a short pause
+  # between, so a big backlog doesn't hold a long-running lock or spike
+  # load in one shot.
+  delete_batch_size: 10000
+
+# Out-of-band notification when a new alert at or above min_severity is
+# recorded — independent of SIEM export (see siem.export_alerts above),
+# this is for "someone should look at this now," not a compliance trail.
+notifications:
+  enabled: false
+  min_severity: high # low | medium | high | critical
+  email:
+    # Off even when notifications.enabled is true — needs real SMTP
+    # credentials below to do anything useful, and shipping with it
+    # silently active would mean a fresh install occasionally tries
+    # (and fails) to send mail through unconfigured settings.
+    enabled: false
+    smtp_host: ""
+    smtp_port: 587
+    username: ""
+    password: ""
+    from: ""
+    to: []
+    use_tls: true
+  webhook:
+    enabled: false
+    url: ""
+    headers: {}
+
+# Weekly summary (new assets, alert counts by severity, incidents, sensor
+# health) — generated and saved to report_history regardless of whether
+# email delivery is configured; viewable from the Reports tab either way.
+# Uses notifications.email above for the actual SMTP connection when
+# recipients are set here — there's no separate SMTP config for reports.
+reports:
+  enabled: false
+  schedule: weekly
+  day_of_week: monday
+  hour_utc: 8
+  recipients: []
+
+analysis:
+  enabled: true
+  upload_directory: "./data/pcap-uploads"
+  max_upload_size_mb: 2048
+  job_timeout: 2h
+  retain_pcap: 24h
+  allow_import: true

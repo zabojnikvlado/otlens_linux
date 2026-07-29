@@ -115,7 +115,7 @@ func (r *Repository) DeleteReconCredential(ctx context.Context, id string) error
 func (s *Server) listReconCredentials(c *gin.Context) {
 	x, e := s.Repo.ListReconCredentials(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, x)
@@ -128,14 +128,14 @@ func (s *Server) createReconCredential(c *gin.Context) {
 	}
 	x.ID = credentialID()
 	if e := s.Repo.SaveReconCredential(c, x); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(201, gin.H{"id": x.ID, "name": x.Name, "type": x.Type, "username": x.Username, "created_at": time.Now().UTC()})
 }
 func (s *Server) deleteReconCredential(c *gin.Context) {
 	if e := s.Repo.DeleteReconCredential(c, c.Param("id")); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"deleted": true})

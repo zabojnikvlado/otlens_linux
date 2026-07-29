@@ -83,13 +83,10 @@ func main() {
 	// and a failed/missing snapshot logs a warning rather than crashing
 	// Central over what's a supplementary lookup, not a core function.
 	vulnDB := vuln.New()
-	if cfg.Vulnerability.Enabled && cfg.Vulnerability.CSVPath != "" {
-		count, err := vulnDB.LoadCSV(cfg.Vulnerability.CSVPath)
-		if err != nil {
-			log.Printf("vulnerability snapshot not loaded: %v", err)
-		} else {
-			log.Printf("vulnerability snapshot loaded: %d advisories", count)
-		}
+	if rows, loadErr := repo.ListVulnerabilityAdvisories(context.Background()); loadErr != nil {
+		log.Printf("vulnerability database load failed: %v", loadErr)
+	} else {
+		log.Printf("vulnerability database loaded: %d advisories", vulnDB.Replace(rows))
 	}
 
 	retentionCfg := central.RetentionConfig{

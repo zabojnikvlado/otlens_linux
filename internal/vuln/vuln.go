@@ -136,6 +136,28 @@ func (db *Database) LoadCSV(path string) (int, error) {
 	return loadedCount, nil
 }
 
+// Replace atomically replaces the in-memory advisory snapshot.
+func (db *Database) Replace(advisories []Advisory) int {
+	byVendor := make(map[string][]Advisory)
+	for _, advisory := range advisories {
+		advisory.CVEID = strings.TrimSpace(advisory.CVEID)
+		advisory.Vendor = strings.TrimSpace(advisory.Vendor)
+		if advisory.CVEID == "" || advisory.Vendor == "" {
+			continue
+		}
+		key := strings.ToLower(advisory.Vendor)
+		byVendor[key] = append(byVendor[key], advisory)
+	}
+	db.mutex.Lock()
+	db.byVendor = byVendor
+	db.mutex.Unlock()
+	count := 0
+	for _, rows := range byVendor {
+		count += len(rows)
+	}
+	return count
+}
+
 // Lookup returns every advisory whose vendor matches (case-
 // insensitive, exact match on the vendor name as loaded — not a
 // substring search, since e.g. "Siemens" matching against a snapshot

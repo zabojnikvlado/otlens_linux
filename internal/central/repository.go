@@ -12,6 +12,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/zabojnikvlado/otlens_linux/internal/management"
 	"github.com/zabojnikvlado/otlens_linux/internal/topology"
+
+	"errors"
 )
 
 type Repository struct {
@@ -32,6 +34,11 @@ func OpenPostgres(dsn string) (*Repository, error) {
 	// be able to start against a newly-created, empty PostgreSQL database without
 	// requiring the operator to run db/central_phase3.sql manually first.
 	schema := `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+ version BIGINT PRIMARY KEY,
+ name TEXT NOT NULL,
+ applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS sites (
  id TEXT PRIMARY KEY,
  name TEXT NOT NULL,
@@ -45,6 +52,8 @@ CREATE TABLE IF NOT EXISTS sensors (
  version TEXT NOT NULL DEFAULT '',
  hostname TEXT NOT NULL DEFAULT '',
  certificate_fingerprint TEXT,
+ auth_token_hash TEXT NOT NULL DEFAULT '',
+ auth_token_rotated_at TIMESTAMPTZ,
  go_version TEXT NOT NULL DEFAULT '',
  libpcap_version TEXT NOT NULL DEFAULT '',
  gopacket_version TEXT NOT NULL DEFAULT '',
@@ -123,6 +132,21 @@ CREATE TABLE IF NOT EXISTS sensor_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_sensor_metrics_sensor_time ON sensor_metrics(sensor_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS sensors_last_seen_idx ON sensors(last_seen);
+CREATE TABLE IF NOT EXISTS protocol_observations (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ observed_at TIMESTAMPTZ NOT NULL,
+ protocol TEXT NOT NULL,
+ transport TEXT NOT NULL DEFAULT '',
+ src_ip TEXT NOT NULL DEFAULT '', dst_ip TEXT NOT NULL DEFAULT '',
+ src_port INTEGER NOT NULL DEFAULT 0, dst_port INTEGER NOT NULL DEFAULT 0,
+ operation TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '', resource TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+ encrypted BOOLEAN NOT NULL DEFAULT FALSE, from_analysis BOOLEAN NOT NULL DEFAULT FALSE,
+ attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
+ UNIQUE(sensor_id,observed_at,protocol,src_ip,dst_ip,src_port,dst_port,operation,summary)
+);
+CREATE INDEX IF NOT EXISTS protocol_observations_sensor_time_idx ON protocol_observations(sensor_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS protocol_observations_protocol_time_idx ON protocol_observations(protocol, observed_at DESC);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_changes JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE sensor_telemetry ADD COLUMN IF NOT EXISTS tag_events JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -143,6 +167,18 @@ CREATE TABLE IF NOT EXISTS reconnaissance_credentials (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS reconnaissance_campaigns (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ profile TEXT NOT NULL DEFAULT 'safe-discovery',
+ targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+ policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+ enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ last_run_at TIMESTAMPTZ
+);
 CREATE TABLE IF NOT EXISTS reconnaissance_jobs (
  id TEXT PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -155,6 +191,17 @@ CREATE TABLE IF NOT EXISTS reconnaissance_jobs (
  started_at TIMESTAMPTZ,
  completed_at TIMESTAMPTZ
 );
+ALTER TABLE reconnaissance_jobs ADD COLUMN IF NOT EXISTS campaign_id TEXT REFERENCES reconnaissance_campaigns(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS asset_recon_history (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ ip TEXT NOT NULL,
+ job_id TEXT NOT NULL REFERENCES reconnaissance_jobs(id) ON DELETE CASCADE,
+ result JSONB NOT NULL,
+ changes JSONB NOT NULL DEFAULT '[]'::jsonb,
+ observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_asset_recon_history_asset ON asset_recon_history(sensor_id,ip,observed_at DESC);
 CREATE TABLE IF NOT EXISTS asset_recon_profile (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  ip TEXT NOT NULL,
@@ -564,9 +611,45 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
 		db.Close()
 		return nil, fmt.Errorf("ensure central database schema: %w", err)
 	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(1,'central bootstrap schema') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record central schema migration: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(2,'discovery campaigns and asset recon history') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record discovery campaign migration: %w", err)
+	}
+	if _, err := db.Exec(vulnerabilitySchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("bootstrap vulnerability schema: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(3,'vulnerability finding lifecycle') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record vulnerability lifecycle migration: %w", err)
+	}
 	if _, err := db.Exec(threatIntelSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ensure threat intelligence schema: %w", err)
+	}
+	if _, err := db.Exec(incidentManagementSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ensure incident management schema: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(4,'incident management correlation and asset risk') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record incident management migration: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(5,'advanced correlation rules and MITRE mapping') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record advanced correlation migration: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(6,'advanced contextual asset risk engine') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record advanced asset risk migration: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE sensors ADD COLUMN IF NOT EXISTS auth_token_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE sensors ADD COLUMN IF NOT EXISTS auth_token_rotated_at TIMESTAMPTZ; INSERT INTO schema_migrations(version,name) VALUES(7,'per-sensor authentication tokens and live RBAC') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sensor authentication migration: %w", err)
 	}
 	return &Repository{db: db}, nil
 }
@@ -596,6 +679,33 @@ ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,versio
 		return err
 	}
 	return tx.Commit()
+}
+
+// SetSensorAuthToken binds a cryptographically random bearer token to one
+// sensor. Only its SHA-256 digest is persisted; the plaintext is returned once
+// during enrollment and never becomes queryable through the API.
+func (r *Repository) SetSensorAuthToken(ctx context.Context, sensorID, tokenHash string) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE sensors SET auth_token_hash=$2, auth_token_rotated_at=NOW() WHERE id=$1`, sensorID, tokenHash)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) SensorAuthTokenHash(ctx context.Context, sensorID string) (string, error) {
+	var hash string
+	err := r.db.QueryRowContext(ctx, `SELECT auth_token_hash FROM sensors WHERE id=$1`, sensorID).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return hash, err
 }
 
 // RuleName looks up a rule's human-readable Name from a sensor's current
@@ -799,6 +909,14 @@ func (r *Repository) LatestSensorMetrics(ctx context.Context) ([]management.Sens
 	return out, rows.Err()
 }
 
+func (r *Repository) SchemaVersion(ctx context.Context) int64 {
+	var version int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0
+	}
+	return version
+}
+
 func (r *Repository) ListSensors(ctx context.Context) ([]management.Sensor, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,name,COALESCE(site_id,''),status,version,hostname,last_seen,COALESCE(certificate_fingerprint,''),
 COALESCE(go_version,''),COALESCE(libpcap_version,''),COALESCE(gopacket_version,''),COALESCE(capture_backend,''),
@@ -967,6 +1085,9 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 		return nil, err
 	}
 	if err := persistSMBObservations(ctx, tx, x.SensorID, x.SMBObservations); err != nil {
+		return nil, err
+	}
+	if err := persistProtocolObservations(ctx, tx, x.SensorID, x.ProtocolObservations); err != nil {
 		return nil, err
 	}
 	newAlerts, err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts)
@@ -1286,13 +1407,12 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// local state and will re-report it on its next sync unless that
 		// sensor is also reset (Sensors tab / Data Management's sensor
 		// reset operations).
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes RESTART IDENTITY`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, asset_risk, asset_risk_history, protocol_observations RESTART IDENTITY`)
 	case "alerts":
 		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
 	case "incidents":
-		// Incidents are derived from alert_history. Malware/contact-tracing
-		// incidents are persisted separately, so clear both sources.
-		_, err = tx.ExecContext(ctx, `TRUNCATE alert_history, malware_incidents RESTART IDENTITY CASCADE`)
+		// Clear both correlated investigation records and malware/contact-tracing incidents.
+		_, err = tx.ExecContext(ctx, `TRUNCATE incident_comments, incident_events, incidents, alert_history, malware_incidents RESTART IDENTITY CASCADE`)
 	case "siem":
 		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
 	case "analysis":
@@ -1306,7 +1426,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// connected sensors to receive sensor.factory.reset. Deleting those
 		// rows here made the reset command disappear before the next sync and
 		// the sensor immediately uploaded all old telemetry again.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}
