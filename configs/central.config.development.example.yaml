@@ -1,3 +1,4 @@
+# DEVELOPMENT ONLY — DO NOT USE ON A SHARED OR PRODUCTION NETWORK.
 # OTLens Central Management configuration.
 # Default deployment path: config.yaml in the same directory as
 # otlens-central.exe — Central looks there automatically if you don't pass
@@ -7,18 +8,18 @@
 #   web        = management/web-facing listener (default 8443)
 #   sensor_api = sensor registration/heartbeat/rules listener (default 9443)
 #
-# PRODUCTION-SAFE TEMPLATE: TLS is enabled on both listeners. Copy the separate
-# central.config.development.example.yaml only for isolated local development.
+# IMPORTANT: TLS is disabled by default for local development. For production,
+# enable TLS on both listeners and use trusted certificates.
 
 web:
   # Address to bind the management/web listener.
   # 0.0.0.0 = all network interfaces; 127.0.0.1 = local machine only.
-  host: 0.0.0.0
+  host: 127.0.0.1
   # TCP port used by administrators/browser clients.
   port: 8443
   tls:
     # Serve this listener over HTTPS when true.
-    enabled: true
+    enabled: false
     # PEM certificate and private key. Both must exist when TLS is enabled.
     certfile: central-web.crt
     keyfile: central-web.key
@@ -29,12 +30,12 @@ web:
 
 sensor_api:
   # Address to bind the sensor-facing API listener.
-  host: 0.0.0.0
+  host: 127.0.0.1
   # TCP port used by Linux sensors for registration, heartbeat and rule sync.
   port: 9443
   tls:
     # Serve sensor API over HTTPS when true.
-    enabled: true
+    enabled: false
     certfile: central-sensor-api.crt
     keyfile: central-sensor-api.key
     minversion: "1.2"
@@ -60,7 +61,7 @@ auth:
   # emergencies (e.g. the users table or Postgres itself is broken) rather
   # than day-to-day use. Leave empty to disable this fallback entirely.
   # Environment override: OTLENS_CENTRAL_AUTH_MANAGEMENT_TOKEN
-  management_token: "CHANGE_MANAGEMENT_TOKEN"
+  management_token: ""
 
   # Token used only by Linux sensors on the sensor API port 9443.
   # It must match central.token in every sensor config.
@@ -79,7 +80,7 @@ auth:
   # password. Change these before first startup if even that brief
   # window is a concern in your environment.
   bootstrap_username: "administrator"
-  bootstrap_password: "CHANGE_BOOTSTRAP_PASSWORD"
+  bootstrap_password: "administrator"
 
 # Optional export of Central alerts and management audit events to a SIEM
 # HTTP collector. Events are stored in PostgreSQL first and retried after

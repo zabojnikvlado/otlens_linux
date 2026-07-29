@@ -18,6 +18,7 @@ type ReconPolicy struct {
 type ReconJob struct {
 	ID          string        `json:"id"`
 	SensorID    string        `json:"sensor_id"`
+	CampaignID  string        `json:"campaign_id,omitempty"`
 	Targets     []string      `json:"targets"`
 	Profile     string        `json:"profile"`
 	Status      string        `json:"status"`
@@ -27,6 +28,27 @@ type ReconJob struct {
 	CompletedAt *time.Time    `json:"completed_at,omitempty"`
 	Error       string        `json:"error,omitempty"`
 	Results     []ReconResult `json:"results,omitempty"`
+}
+
+type ReconCampaign struct {
+	ID        string      `json:"id"`
+	Name      string      `json:"name"`
+	SensorID  string      `json:"sensor_id"`
+	Targets   []string    `json:"targets"`
+	Profile   string      `json:"profile"`
+	Policy    ReconPolicy `json:"policy"`
+	Enabled   bool        `json:"enabled"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	LastRunAt *time.Time  `json:"last_run_at,omitempty"`
+}
+
+type ReconChange struct {
+	Kind     string `json:"kind"`
+	Field    string `json:"field"`
+	Previous string `json:"previous,omitempty"`
+	Current  string `json:"current,omitempty"`
+	Severity string `json:"severity"`
 }
 
 type ReconService struct {
@@ -69,6 +91,7 @@ type ReconResult struct {
 	Services   []ReconService    `json:"services,omitempty"`
 	Evidence   []ReconEvidence   `json:"evidence,omitempty"`
 	Audit      []ReconAuditStep  `json:"audit,omitempty"`
+	Changes    []ReconChange     `json:"changes,omitempty"`
 	Error      string            `json:"error,omitempty"`
 	StartedAt  time.Time         `json:"started_at"`
 	FinishedAt time.Time         `json:"finished_at"`

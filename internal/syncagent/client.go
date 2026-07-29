@@ -11,17 +11,21 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Config struct {
-	BaseURL, Token, SensorID, Name, SiteID, Version, Hostname string
-	InsecureSkipVerify                                        bool
-	Interval                                                  time.Duration
-	Timeout                                                   time.Duration
+	BaseURL, Token, SensorID, Name, SiteID, Version, Hostname, CredentialFile string
+	InsecureSkipVerify                                                        bool
+	Interval                                                                  time.Duration
+	Timeout                                                                   time.Duration
 }
 type Client struct {
+	cfgMu              sync.RWMutex
 	cfg                Config
 	http               *http.Client
 	rulesVersion       int64
@@ -29,6 +33,13 @@ type Client struct {
 }
 
 func New(cfg Config) *Client {
+	if strings.TrimSpace(cfg.CredentialFile) == "" {
+		safeID := regexp.MustCompile(`[^A-Za-z0-9_.-]+`).ReplaceAllString(cfg.SensorID, "_")
+		cfg.CredentialFile = filepath.Join(".", ".otlens-sensor-"+safeID+".token")
+	}
+	if token, err := os.ReadFile(cfg.CredentialFile); err == nil && strings.TrimSpace(string(token)) != "" {
+		cfg.Token = strings.TrimSpace(string(token))
+	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
@@ -63,10 +74,13 @@ func syncErr(prefix string, resp *http.Response) error {
 }
 
 func (c *Client) headers(r *http.Request) {
-	if c.cfg.Token != "" {
-		r.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	c.cfgMu.RLock()
+	token, sensorID := c.cfg.Token, c.cfg.SensorID
+	c.cfgMu.RUnlock()
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set("X-OTLens-Sensor-ID", c.cfg.SensorID)
+	r.Header.Set("X-OTLens-Sensor-ID", sensorID)
 	r.Header.Set("Content-Type", "application/json")
 }
 func (c *Client) Register(ctx context.Context) error {
@@ -83,6 +97,26 @@ func (c *Client) Register(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return syncErr("registration failed", resp)
+	}
+	var out struct {
+		SensorID    string `json:"sensor_id"`
+		SensorToken string `json:"sensor_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode sensor enrollment response: %w", err)
+	}
+	if out.SensorID != c.cfg.SensorID || strings.TrimSpace(out.SensorToken) == "" {
+		return fmt.Errorf("central returned an invalid sensor credential")
+	}
+	c.cfgMu.Lock()
+	c.cfg.Token = out.SensorToken
+	credentialFile := c.cfg.CredentialFile
+	c.cfgMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(credentialFile), 0700); err != nil {
+		return fmt.Errorf("create sensor credential directory: %w", err)
+	}
+	if err := os.WriteFile(credentialFile, []byte(out.SensorToken+"\n"), 0600); err != nil {
+		return fmt.Errorf("persist sensor credential: %w", err)
 	}
 	return nil
 }

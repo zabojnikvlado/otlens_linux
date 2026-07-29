@@ -283,7 +283,7 @@ func (s *Server) login(c *gin.Context) {
 	}
 	expiresAt := time.Now().Add(s.SessionDuration)
 	if err := s.Repo.CreateSession(c, sessionID, auth.ID, expiresAt, c.Request.UserAgent(), c.ClientIP()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	_ = s.Repo.TouchLogin(c, auth.ID)
@@ -291,7 +291,7 @@ func (s *Server) login(c *gin.Context) {
 
 	user, role, err := s.loadUserAndRole(c, auth.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, user.Username, "login", "")
@@ -334,7 +334,7 @@ func (s *Server) me(c *gin.Context) {
 	}
 	user, role, err := s.loadUserAndRole(c, identity.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -363,7 +363,7 @@ func (s *Server) changePassword(c *gin.Context) {
 	}
 	auth, err := s.Repo.userAuthByUsername(c, identity.Username)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	// A forced change (must_change_password/expired) doesn't require
@@ -377,17 +377,17 @@ func (s *Server) changePassword(c *gin.Context) {
 	}
 	user, err := s.Repo.GetUser(c, identity.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	hash, err := hashPassword(req.NewPassword)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	expiresAt := computeExpiry(user.PasswordValidityDays)
 	if err := s.Repo.SetUserPassword(c, identity.UserID, hash, false, expiresAt); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identity.Username, fmt.Sprintf("password changed: %s", identity.Username), "")
@@ -419,7 +419,7 @@ func (s *Server) loadUserAndRole(ctx context.Context, userID string) (*User, *Ro
 func (s *Server) listUsers(c *gin.Context) {
 	users, err := s.Repo.ListUsers(c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, users)
@@ -446,17 +446,17 @@ func (s *Server) createUser(c *gin.Context) {
 	}
 	hash, err := hashPassword(req.Password)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	id, err := newRandomToken(8)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	expiresAt := computeExpiry(req.PasswordValidityDays)
 	if err := s.Repo.CreateUser(c, "user-"+id, req.Username, hash, req.RoleID, req.DisplayName, req.MustChangePassword, expiresAt, req.PasswordValidityDays); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("user created: %s", req.Username), "")
@@ -482,7 +482,7 @@ func (s *Server) updateUser(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.UpdateUser(c, id, req.RoleID, req.DisplayName, req.Enabled, req.PasswordValidityDays); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	if !req.Enabled {
@@ -504,7 +504,7 @@ func (s *Server) deleteUser(c *gin.Context) {
 	target, _ := s.Repo.GetUser(c, id)
 	_ = s.Repo.DeleteSessionsForUser(c, id)
 	if err := s.Repo.DeleteUser(c, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	label := id
@@ -534,22 +534,22 @@ func (s *Server) resetUserPassword(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	temp, err := newRandomToken(9) // 18 hex chars — short enough to read aloud, long enough to not matter that it's shown once
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	hash, err := hashPassword(temp)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	expiresAt := computeExpiry(user.PasswordValidityDays)
 	if err := s.Repo.SetUserPassword(c, id, hash, true, expiresAt); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	_ = s.Repo.DeleteSessionsForUser(c, id)
@@ -560,7 +560,7 @@ func (s *Server) resetUserPassword(c *gin.Context) {
 func (s *Server) listRoles(c *gin.Context) {
 	roles, err := s.Repo.ListRoles(c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, roles)
@@ -579,7 +579,7 @@ func (s *Server) upsertRole(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.UpsertRole(c, req.ID, req.Name, req.Permissions); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("role changed: %s (%s)", req.Name, req.ID), "")
@@ -597,7 +597,7 @@ func (s *Server) deleteRole(c *gin.Context) {
 		case errors.Is(err, ErrNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "role not found"})
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 		}
 		return
 	}

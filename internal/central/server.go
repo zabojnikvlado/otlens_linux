@@ -80,6 +80,13 @@ type Server struct {
 	}
 	sensorAPI *http.Server
 
+	liveOnce     sync.Once
+	live         *LiveHub
+	livePresence struct {
+		mu    sync.Mutex
+		items map[string]LivePresence
+	}
+
 	// topoCache holds the last built /topology response keyed by a
 	// fingerprint of every sensor's telemetry sequence number. As long as
 	// no sensor has posted new telemetry, repeated polls (the UI polls
@@ -96,7 +103,7 @@ type Server struct {
 
 // serverErrorLogger logs the response body whenever a handler answers with
 // a 5xx status. Central's handlers already return the real failure reason
-// in the response body (c.JSON(500, gin.H{"error": err.Error()})), but
+// in the response body (respondInternalError(c, err)), but
 // that only helps whoever's inspecting that specific response — a sensor
 // that only logs resp.Status, or an operator who wasn't watching at the
 // exact moment, never sees it. This puts it in Central's own log
@@ -138,6 +145,49 @@ func bearerAuth(token string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
+		c.Next()
+	}
+}
+
+// sensorAuth binds every non-enrollment Sensor API request to the sensor ID
+// carried by the per-sensor token. A token issued to sensor A can therefore
+// never be used against sensor B's URL or payload, even if A is compromised.
+func (s *Server) sensorAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		sensorID := strings.TrimSpace(c.GetHeader("X-OTLens-Sensor-ID"))
+		if paramID := strings.TrimSpace(c.Param("id")); paramID != "" {
+			if sensorID != "" && sensorID != paramID {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "sensor identity mismatch"})
+				return
+			}
+			sensorID = paramID
+		}
+		if sensorID == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "sensor identity required"})
+			return
+		}
+		auth := c.GetHeader("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		expected, err := s.Repo.SensorAuthTokenHash(c, sensorID)
+		if err != nil || expected == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "sensor is not enrolled"})
+			return
+		}
+		digest := sha256.Sum256([]byte(token))
+		got := hex.EncodeToString(digest[:])
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Set("sensor_id", sensorID)
 		c.Next()
 	}
 }
@@ -201,6 +251,7 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 
 func (s *Server) WebRouter() *gin.Engine {
 	r := gin.Default()
+	r.Use(securityHeaders())
 	webDir := centralWebDir()
 	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/ui/") })
 	r.GET("/ui", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/ui/") })
@@ -250,6 +301,11 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.DELETE("/reconnaissance/credentials/:id", requireAction(ActionDataManagement), s.deleteReconCredential)
 	api.GET("/reconnaissance/jobs", requireView(ViewAssets), s.listReconJobs)
 	api.POST("/reconnaissance/jobs", requireAction(ActionAssetConfirmDelete), s.createReconJob)
+	api.GET("/reconnaissance/campaigns", requireView(ViewAssets), s.listReconCampaigns)
+	api.POST("/reconnaissance/campaigns", requireAction(ActionAssetConfirmDelete), s.createReconCampaign)
+	api.POST("/reconnaissance/campaigns/:id/run", requireAction(ActionAssetConfirmDelete), s.runReconCampaign)
+	api.DELETE("/reconnaissance/campaigns/:id", requireAction(ActionAssetConfirmDelete), s.deleteReconCampaign)
+	api.GET("/sensors/:id/assets/:ip/recon-history", requireView(ViewAssets), s.assetReconHistory)
 	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
 	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
@@ -261,14 +317,17 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/vulnerabilities", requireView(ViewAssets), s.vulnerabilities)
 	api.POST("/vulnerabilities/import", requireAction(ActionDataManagement), s.importVulnerabilities)
 	api.POST("/vulnerabilities/feed", requireAction(ActionDataManagement), s.importVulnerabilityFeed)
+	api.PUT("/vulnerabilities/findings", requireAction(ActionDataManagement), s.updateVulnerabilityFinding)
 	api.GET("/sensors/:id/vlans", requireView(ViewTopology), s.listVLANConfig)
 	api.GET("/sensors/:id/segmentation-settings", requireView(ViewTopology), s.getMaxLevelJump)
 	api.PUT("/sensors/:id/vlans/:vlanid", requireAction(ActionDataManagement), s.setVLANConfig)
 	api.PUT("/sensors/:id/segmentation-settings", requireAction(ActionDataManagement), s.setMaxLevelJump)
 	api.GET("/sensors/:id/vlans/:vlanid/assets", requireView(ViewTopology), s.listVLANAssets)
-	api.GET("/sensors/:id/assets/:mac/ip-history", requireView(ViewAssets), s.assetIPHistory)
+	api.GET("/sensors/:id/assets/by-mac/:mac/ip-history", requireView(ViewAssets), s.assetIPHistory)
 	api.GET("/settings", requireView(ViewSettings), s.settings)
 	api.GET("/audit", requireView(ViewAudit), s.auditLog)
+	api.GET("/security/permission-audit", requireAction(ActionUsersRolesManage), s.permissionAudit)
+	api.GET("/data/diagnostics", requireAction(ActionDataManagement), s.diagnosticsBundle)
 	api.GET("/topology", requireView(ViewTopology), s.topology)
 	api.GET("/sensors/:id/purdue-topology", requireView(ViewTopology), s.purdueTopology)
 	api.GET("/sensors/:id/itot-paths", requireView(ViewTopology), s.observedITOTPaths)
@@ -288,7 +347,21 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
 	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
 	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
+	api.GET("/live/events", s.liveEvents)
+	api.GET("/live/history", s.liveHistory)
+	api.GET("/live/presence", s.livePresenceList)
+	api.POST("/live/presence", s.livePresenceUpdate)
 	api.GET("/incidents", requireView(ViewAlerts), s.incidents)
+	api.GET("/incidents/:id", requireView(ViewAlerts), s.incidentDetail)
+	api.PATCH("/incidents/:id", requireAction(ActionAlertConfirmApprove), s.updateIncident)
+	api.POST("/incidents/:id/comments", requireAction(ActionAlertConfirmApprove), s.addIncidentComment)
+	api.GET("/correlation-rules", requireView(ViewAlerts), s.listCorrelationRules)
+	api.POST("/correlation-rules", requireAction(ActionDataManagement), s.saveCorrelationRule)
+	api.DELETE("/correlation-rules/:id", requireAction(ActionDataManagement), s.deleteCorrelationRule)
+	api.GET("/asset-risk", requireView(ViewAssets), s.assetRisk)
+	api.GET("/asset-risk/:sensor/:ip/history", requireView(ViewAssets), s.assetRiskHistory)
+	api.GET("/asset-risk/:sensor/:ip/exception", requireView(ViewAssets), s.assetRiskException)
+	api.PUT("/asset-risk/:sensor/:ip/exception", requireAction(ActionAssetConfirmDelete), s.setAssetRiskException)
 	api.GET("/asset-security-status", requireView(ViewAssets), s.assetSecurityStatuses)
 	api.PUT("/sensors/:id/assets/:ip/security-status", requireAction(ActionAssetConfirmDelete), s.setAssetSecurityStatus)
 	api.POST("/malware-incidents/contact-trace", requireAction(ActionAlertConfirmApprove), s.createMalwareContactTrace)
@@ -338,9 +411,11 @@ func (s *Server) WebRouter() *gin.Engine {
 
 func (s *Server) SensorRouter() *gin.Engine {
 	r := gin.Default()
+	r.Use(securityHeaders())
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
-	api := r.Group("/v1", serverErrorLogger("sensor-api"), bearerAuth(s.SensorToken))
-	api.POST("/sensors/register", s.register)
+	enrollment := r.Group("/v1", serverErrorLogger("sensor-api"))
+	enrollment.POST("/sensors/register", s.register)
+	api := r.Group("/v1", serverErrorLogger("sensor-api"), s.sensorAuth())
 	api.POST("/sensors/heartbeat", s.heartbeat)
 	api.POST("/sensors/telemetry", s.telemetry)
 	api.GET("/sensors/:id/sync", s.sync)
@@ -382,7 +457,7 @@ func (s *Server) telemetry(c *gin.Context) {
 	}
 	newAlerts, err := s.Repo.PutTelemetry(c, x)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	// Fire-and-forget: notification delivery (SMTP/webhook, both
@@ -393,17 +468,32 @@ func (s *Server) telemetry(c *gin.Context) {
 	// returns).
 	if len(newAlerts) > 0 {
 		go s.dispatchNotifications(context.Background(), newAlerts)
+		for _, alert := range newAlerts {
+			s.publishLive(LiveEvent{Type: "alert.created", SensorID: alert.SensorID, EntityID: alert.AlertKey, Severity: alert.Severity, Message: alert.Message, Data: gin.H{"ip": alert.IP, "alert_type": alert.Type}})
+		}
 	}
+	s.publishLive(LiveEvent{Type: "telemetry.updated", SensorID: x.SensorID, EntityID: x.BatchID, Message: "sensor telemetry updated", Data: gin.H{"sequence": x.Sequence, "new_alerts": len(newAlerts)}})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if s.Repo.SyncCorrelatedIncidents(ctx) == nil {
+			s.publishLive(LiveEvent{Type: "incidents.changed", SensorID: x.SensorID, Message: "incident correlation refreshed"})
+		}
+		if s.Repo.RecalculateAssetRisk(ctx) == nil {
+			s.publishLive(LiveEvent{Type: "asset-risk.changed", SensorID: x.SensorID, Message: "asset risk recalculated"})
+		}
+	}()
 	c.JSON(http.StatusOK, management.TelemetryAck{Accepted: true, BatchID: x.BatchID, AcceptedSequence: x.Sequence, StoredAt: time.Now().UTC()})
 }
 
 func (s *Server) assets(c *gin.Context) {
 	snapshots, err := s.Repo.Telemetry(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	profiles, _ := s.Repo.AssetReconProfiles(c)
+	identityMeta, _ := s.Repo.AssetIdentityMetadata(c)
 	out := make([]map[string]interface{}, 0)
 	for _, snapshot := range snapshots {
 		var graph struct {
@@ -420,6 +510,16 @@ func (s *Server) assets(c *gin.Context) {
 		for _, node := range graph.Nodes {
 			node["SensorID"] = snapshot.SensorID
 			ip := fmt.Sprint(node["IP"])
+			if im, ok := identityMeta[snapshot.SensorID+"\x00"+ip]; ok {
+				node["CanonicalIdentity"] = im.CanonicalID
+				node["IdentityFirstSeen"] = im.FirstSeen
+				node["IdentityLastSeen"] = im.LastSeen
+				node["IdentityIPCount"] = im.IPCount
+				node["IdentitySourceCount"] = im.SourceCount
+				node["IdentityConfidence"] = im.IdentityConfidence
+				node["IdentityAliases"] = im.Aliases
+				node["IdentityActive"] = time.Since(im.LastSeen) <= 10*time.Minute
+			}
 			if rp, ok := profiles[snapshot.SensorID+"\x00"+ip]; ok {
 				if rp.Hostname != "" {
 					node["ReconHostname"] = rp.Hostname
@@ -457,7 +557,7 @@ func (s *Server) assets(c *gin.Context) {
 func (s *Server) devices(c *gin.Context) {
 	snapshots, err := s.Repo.Telemetry(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	out := make([]map[string]interface{}, 0)
@@ -471,7 +571,7 @@ func (s *Server) devices(c *gin.Context) {
 		}
 		overrides, err := s.Repo.ListAssetOverrides(c, snapshot.SensorID)
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		threshold := graph.HoneypotThreshold
@@ -516,7 +616,7 @@ func (s *Server) setDeviceCategory(c *gin.Context) {
 	}
 	sensorID, mac := c.Param("id"), c.Param("mac")
 	if err := s.Repo.SetAssetCategory(c, sensorID, mac, req.Category, req.Name, identityFromContext(c).Username); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device category set: %s (%s) -> %s", mac, sensorID, req.Category), sensorID)
@@ -584,7 +684,7 @@ func (s *Server) importDeviceList(c *gin.Context) {
 	}
 	applied, err := s.Repo.ImportAssetOverrides(c, sensorID, rows, identityFromContext(c).Username)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device list imported: %d row(s) for %s", applied, sensorID), sensorID)
@@ -662,7 +762,7 @@ func (s *Server) importTagList(c *gin.Context) {
 	}
 	tx, err := s.Repo.db.BeginTx(c, nil)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	defer tx.Rollback()
@@ -675,13 +775,13 @@ func (s *Server) importTagList(c *gin.Context) {
 		}
 		blob, _ := json.Marshal(tag)
 		if _, err = tx.ExecContext(c, `INSERT INTO imported_tags(sensor_id,tag_key,tag,imported_at,imported_by) VALUES($1,$2,$3,NOW(),$4) ON CONFLICT(sensor_id,tag_key) DO UPDATE SET tag=EXCLUDED.tag,imported_at=NOW(),imported_by=EXCLUDED.imported_by`, sensorID, key, blob, identityFromContext(c).Username); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		applied++
 	}
 	if err = tx.Commit(); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("tag list imported: %d row(s) for %s", applied, sensorID), sensorID)
@@ -722,7 +822,12 @@ func (s *Server) vulnerabilities(c *gin.Context) {
 	}
 	snapshots, err := s.Repo.Telemetry(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
+		return
+	}
+	findings, err := s.Repo.ListVulnerabilityFindings(c)
+	if err != nil {
+		respondInternalError(c, err)
 		return
 	}
 	assetsByVendor := make(map[string][]gin.H)
@@ -738,8 +843,14 @@ func (s *Server) vulnerabilities(c *gin.Context) {
 			if vendor == "" || vendor == "<nil>" {
 				continue
 			}
+			mac := strings.ToLower(strings.TrimSpace(fmt.Sprint(node["MAC"])))
+			ip := strings.TrimSpace(fmt.Sprint(node["IP"]))
+			identity := "ip:" + ip
+			if mac != "" && mac != "<nil>" {
+				identity = "mac:" + strings.ReplaceAll(mac, "-", ":")
+			}
 			assetsByVendor[vendor] = append(assetsByVendor[vendor], gin.H{
-				"SensorID": snapshot.SensorID, "IP": node["IP"], "MAC": node["MAC"], "Hostname": node["Hostname"],
+				"SensorID": snapshot.SensorID, "IP": node["IP"], "MAC": node["MAC"], "Hostname": node["Hostname"], "AssetIdentity": identity,
 			})
 		}
 	}
@@ -747,10 +858,24 @@ func (s *Server) vulnerabilities(c *gin.Context) {
 	out := make([]gin.H, 0, len(advisories))
 	for _, adv := range advisories {
 		matched := assetsByVendor[strings.ToLower(strings.TrimSpace(adv.Vendor))]
+		statusCounts := map[string]int{"potential": 0, "confirmed": 0, "accepted_risk": 0, "false_positive": 0, "remediated": 0}
+		for _, asset := range matched {
+			key := adv.CVEID + "|" + fmt.Sprint(asset["SensorID"]) + "|" + fmt.Sprint(asset["AssetIdentity"])
+			status := "potential"
+			notes, updatedBy, updatedAt := "", "", ""
+			if f, ok := findings[key]; ok {
+				status, notes, updatedBy, updatedAt = f.Status, f.Notes, f.UpdatedBy, f.UpdatedAt.Format(time.RFC3339)
+			}
+			asset["FindingStatus"] = status
+			asset["FindingNotes"] = notes
+			asset["FindingUpdatedBy"] = updatedBy
+			asset["FindingUpdatedAt"] = updatedAt
+			statusCounts[status]++
+		}
 		out = append(out, gin.H{
 			"CVEID": adv.CVEID, "Vendor": adv.Vendor, "Product": adv.Product, "Severity": adv.Severity,
 			"Title": adv.Title, "PublishedDate": adv.PublishedDate, "URL": adv.URL,
-			"AffectedAssets": matched, "AffectedCount": len(matched),
+			"AffectedAssets": matched, "AffectedCount": len(matched), "StatusCounts": statusCounts,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -769,7 +894,7 @@ func (s *Server) vulnerabilities(c *gin.Context) {
 func (s *Server) listVLANConfig(c *gin.Context) {
 	vlans, err := s.Repo.ListVLANConfig(c, c.Param("id"))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, vlans)
@@ -778,7 +903,7 @@ func (s *Server) listVLANConfig(c *gin.Context) {
 func (s *Server) getMaxLevelJump(c *gin.Context) {
 	jump, err := s.Repo.GetMaxLevelJump(c, c.Param("id"))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"max_level_jump": jump})
@@ -809,7 +934,7 @@ func (s *Server) setVLANConfig(c *gin.Context) {
 	}
 	sensorID := c.Param("id")
 	if err := s.Repo.SetVLANConfig(c, sensorID, vlanID, req.Name, req.PurdueLevel, identityFromContext(c).Username); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
@@ -832,7 +957,7 @@ func (s *Server) setMaxLevelJump(c *gin.Context) {
 	}
 	sensorID := c.Param("id")
 	if err := s.Repo.SetMaxLevelJump(c, sensorID, req.MaxLevelJump, identityFromContext(c).Username); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
@@ -866,7 +991,7 @@ func (s *Server) listVLANAssets(c *gin.Context) {
 	}
 	assets, err := s.Repo.ListVLANAssets(c, c.Param("id"), vlanID)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, assets)
@@ -877,7 +1002,7 @@ func (s *Server) listVLANAssets(c *gin.Context) {
 func (s *Server) assetIPHistory(c *gin.Context) {
 	entries, err := s.Repo.ListIPHistory(c, c.Param("id"), c.Param("mac"))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, entries)
@@ -916,6 +1041,7 @@ func (s *Server) settings(c *gin.Context) {
 		"NotificationsEmailEnabled":   s.Notifications.Email.Enabled,
 		"NotificationsWebhookEnabled": s.Notifications.Webhook.Enabled,
 		"RuntimeConfig":               s.RuntimeConfig,
+		"SchemaVersion":               s.Repo.SchemaVersion(c),
 	})
 }
 
@@ -949,9 +1075,9 @@ func summarizeTargets(targets []string) string {
 }
 
 func (s *Server) auditLog(c *gin.Context) {
-	entries, err := s.Repo.ListAuditLog(c, 500)
+	entries, err := s.Repo.ListAuditLogFiltered(c, auditFilterFromRequest(c))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, entries)
@@ -960,7 +1086,7 @@ func (s *Server) auditLog(c *gin.Context) {
 func (s *Server) tags(c *gin.Context) {
 	snapshots, err := s.Repo.Telemetry(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 
@@ -1278,7 +1404,7 @@ func topologyFingerprint(seqBySensor map[string]int64) string {
 func (s *Server) topology(c *gin.Context) {
 	seq, err := s.Repo.TelemetryFingerprint(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	fingerprint := topologyFingerprint(seq)
@@ -1295,7 +1421,7 @@ func (s *Server) topology(c *gin.Context) {
 		// JSONB, so an idle network with no new telemetry never pays it.
 		newBody, err := s.buildTopologyResponse(c)
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		etag = `"` + fingerprint + `"`
@@ -1338,7 +1464,7 @@ func aggregateRaw(c *gin.Context, snapshots []management.TelemetrySnapshot, pick
 func (s *Server) tagChanges(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.TagChanges })
@@ -1346,7 +1472,7 @@ func (s *Server) tagChanges(c *gin.Context) {
 func (s *Server) tagEvents(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.TagEvents })
@@ -1354,7 +1480,7 @@ func (s *Server) tagEvents(c *gin.Context) {
 func (s *Server) alerts(c *gin.Context) {
 	entries, err := s.Repo.ListAlertHistory(c, 2000)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	out := make([]gin.H, 0, len(entries))
@@ -1369,24 +1495,158 @@ func (s *Server) alerts(c *gin.Context) {
 }
 
 func (s *Server) incidents(c *gin.Context) {
-	incidents, err := s.Repo.ListIncidents(c, 24*time.Hour, 2)
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if err := s.Repo.SyncCorrelatedIncidents(c); err != nil {
+		respondInternalError(c, err)
 		return
 	}
-	out := make([]gin.H, 0, len(incidents))
-	for _, inc := range incidents {
-		out = append(out, gin.H{
-			"SensorID": inc.SensorID, "IP": inc.IP, "Types": inc.Types, "AlertKeys": inc.AlertKeys,
-			"Severity": inc.Severity, "AlertCount": inc.AlertCount, "FirstSeen": inc.FirstSeen, "LastSeen": inc.LastSeen,
-		})
+	incidents, err := s.Repo.ListManagedIncidents(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
 	}
-	c.JSON(http.StatusOK, out)
+	c.JSON(http.StatusOK, incidents)
 }
+
+func (s *Server) incidentDetail(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"error": "invalid incident id"})
+		return
+	}
+	events, err := s.Repo.IncidentEvents(c, id)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	comments, err := s.Repo.IncidentComments(c, id)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"Events": events, "Comments": comments})
+}
+
+func (s *Server) updateIncident(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"error": "invalid incident id"})
+		return
+	}
+	var req struct {
+		Status  string `json:"status"`
+		Owner   string `json:"owner"`
+		Summary string `json:"summary"`
+	}
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, gin.H{"error": "invalid JSON"})
+		return
+	}
+	valid := map[string]bool{"new": true, "investigating": true, "contained": true, "resolved": true, "closed": true}
+	if !valid[req.Status] {
+		c.JSON(400, gin.H{"error": "invalid incident status"})
+		return
+	}
+	if err := s.Repo.UpdateIncident(c, id, req.Status, strings.TrimSpace(req.Owner), strings.TrimSpace(req.Summary)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "incident not found"})
+			return
+		}
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("incident %d moved to %s", id, req.Status), "")
+	s.publishLive(LiveEvent{Type: "incident.updated", EntityID: strconv.FormatInt(id, 10), Message: "incident moved to " + req.Status, Data: gin.H{"status": req.Status, "owner": strings.TrimSpace(req.Owner)}})
+	c.JSON(200, gin.H{"updated": true})
+}
+
+func (s *Server) addIncidentComment(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"error": "invalid incident id"})
+		return
+	}
+	var req struct {
+		Body string `json:"body"`
+	}
+	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Body) == "" {
+		c.JSON(400, gin.H{"error": "comment body is required"})
+		return
+	}
+	actor := identityFromContext(c).Username
+	if err := s.Repo.AddIncidentComment(c, id, actor, strings.TrimSpace(req.Body)); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, actor, fmt.Sprintf("comment added to incident %d", id), "")
+	s.publishLive(LiveEvent{Type: "incident.comment", EntityID: strconv.FormatInt(id, 10), Message: "new incident comment", Data: gin.H{"actor": actor}})
+	c.JSON(201, gin.H{"created": true})
+}
+
+func (s *Server) assetRisk(c *gin.Context) {
+	if err := s.Repo.RecalculateAssetRisk(c); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	risks, err := s.Repo.ListAssetRisk(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, risks)
+}
+
+func (s *Server) assetRiskHistory(c *gin.Context) {
+	v, err := s.Repo.AssetRiskHistory(c, c.Param("sensor"), c.Param("ip"))
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, v)
+}
+func (s *Server) assetRiskException(c *gin.Context) {
+	v, err := s.Repo.GetAssetRiskException(c, c.Param("sensor"), c.Param("ip"))
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(200, gin.H{"sensor_id": c.Param("sensor"), "asset_ip": c.Param("ip"), "disposition": "none"})
+		return
+	}
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, v)
+}
+func (s *Server) setAssetRiskException(c *gin.Context) {
+	var req AssetRiskException
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, gin.H{"error": "invalid JSON"})
+		return
+	}
+	valid := map[string]bool{"none": true, "accepted_risk": true, "false_positive": true, "compensating_control": true}
+	if !valid[req.Disposition] {
+		c.JSON(400, gin.H{"error": "invalid disposition"})
+		return
+	}
+	req.SensorID = c.Param("sensor")
+	req.AssetIP = c.Param("ip")
+	req.UpdatedBy = identityFromContext(c).Username
+	if req.ScoreOverride != nil && (*req.ScoreOverride < 0 || *req.ScoreOverride > 100) {
+		c.JSON(400, gin.H{"error": "score override must be 0-100"})
+		return
+	}
+	if err := s.Repo.SetAssetRiskException(c, req); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	_ = s.Repo.RecalculateAssetRisk(c)
+	s.logAudit(c, req.UpdatedBy, "asset risk exception updated", req.SensorID+"/"+req.AssetIP)
+	s.publishLive(LiveEvent{Type: "asset-risk.changed", SensorID: req.SensorID, EntityID: req.AssetIP, Message: "asset risk exception updated"})
+	c.JSON(200, gin.H{"updated": true})
+}
+
 func (s *Server) rules(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.Rules })
@@ -1453,7 +1713,7 @@ func (s *Server) replaceRule(c *gin.Context) {
 	req.Version++
 	payload, _ := json.Marshal(req)
 	if err := s.Repo.QueueCommands(c, c.Param("id"), "rule.upsert", []string{string(payload)}); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, req)
@@ -1502,7 +1762,7 @@ func (s *Server) importRules(c *gin.Context) {
 		payloads = append(payloads, string(data))
 	}
 	if err := s.Repo.QueueCommands(c, req.SensorID, "rule.add", payloads); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"queued": len(payloads)})
@@ -1511,7 +1771,7 @@ func (s *Server) importRules(c *gin.Context) {
 func (s *Server) exportRules(c *gin.Context) {
 	v, err := s.Repo.Telemetry(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	result := make([]map[string]interface{}, 0)
@@ -1541,11 +1801,11 @@ func (s *Server) createRule(c *gin.Context) {
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	if err := s.Repo.QueueCommands(c, c.Param("id"), "rule.add", []string{string(payload)}); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.Status(http.StatusAccepted)
@@ -1562,7 +1822,7 @@ func (s *Server) updateRule(c *gin.Context) {
 	sensorID, ruleID := c.Param("id"), c.Param("rule")
 	payload, _ := json.Marshal(map[string]interface{}{"id": ruleID, "enabled": *req.Enabled})
 	if err := s.Repo.QueueCommands(c, sensorID, "rule.toggle", []string{string(payload)}); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	state := "disabled"
@@ -1579,7 +1839,7 @@ func (s *Server) updateRule(c *gin.Context) {
 
 func (s *Server) deleteRule(c *gin.Context) {
 	if err := s.Repo.QueueCommands(c, c.Param("id"), "rule.delete", []string{c.Param("rule")}); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.Status(http.StatusAccepted)
@@ -1588,7 +1848,7 @@ func (s *Server) deleteRule(c *gin.Context) {
 func (s *Server) baseline(c *gin.Context) {
 	v, e := s.Repo.Telemetry(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	out := make([]map[string]interface{}, 0)
@@ -1607,12 +1867,12 @@ func (s *Server) baseline(c *gin.Context) {
 func (s *Server) dashboardTrends(c *gin.Context) {
 	alertsByDay, err := s.Repo.AlertsByDay(c, 30)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	assetsByDay, err := s.Repo.NewAssetsByDay(c, 30)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, gin.H{"AlertsByDay": alertsByDay, "NewAssetsByDay": assetsByDay})
@@ -1621,7 +1881,7 @@ func (s *Server) dashboardTrends(c *gin.Context) {
 func (s *Server) listReports(c *gin.Context) {
 	reports, err := s.Repo.ListReports(c, 50)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, reports)
@@ -1648,7 +1908,7 @@ func (s *Server) deleteReport(c *gin.Context) {
 			c.JSON(404, gin.H{"error": "report not found"})
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, "report deleted: "+id, "")
@@ -1656,9 +1916,15 @@ func (s *Server) deleteReport(c *gin.Context) {
 }
 
 var reportTagRE = regexp.MustCompile(`<[^>]+>`)
+var reportStyleRE = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+var reportScriptRE = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
 
 func reportPlainText(htmlBody string) string {
-	x := strings.ReplaceAll(htmlBody, "&ndash;", "-")
+	// Remove CSS and JavaScript together with their contents before stripping tags.
+	// Removing only the tags leaves raw stylesheet text in the generated PDF.
+	x := reportStyleRE.ReplaceAllString(htmlBody, "")
+	x = reportScriptRE.ReplaceAllString(x, "")
+	x = strings.ReplaceAll(x, "&ndash;", "-")
 	x = strings.ReplaceAll(x, "&mdash;", "-")
 	x = strings.ReplaceAll(x, "&nbsp;", " ")
 	x = strings.ReplaceAll(x, "&amp;", "&")
@@ -1783,7 +2049,7 @@ func (s *Server) downloadReportPDF(c *gin.Context) {
 func (s *Server) generateReportNow(c *gin.Context) {
 	now := time.Now().UTC()
 	if err := s.GenerateAndDispatchReport(c, now.AddDate(0, 0, -7), now); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, "report generated manually", "")
@@ -1801,7 +2067,7 @@ func (s *Server) assetActions(c *gin.Context) {
 	}
 	sensorID := c.Param("id")
 	if err := s.Repo.QueueCommands(c, sensorID, "asset."+req.Action, req.Targets); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	verb := "asset confirmed"
@@ -1822,7 +2088,7 @@ func (s *Server) alertActions(c *gin.Context) {
 	}
 	sensorID := c.Param("id")
 	if err := s.Repo.QueueCommands(c, sensorID, "alert."+req.Action, req.Targets); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	// Best-effort: Central already knows who did this and when, right
@@ -1847,15 +2113,54 @@ func (s *Server) alertActions(c *gin.Context) {
 }
 func (s *Server) register(c *gin.Context) {
 	var x management.SensorRegistration
-	if c.ShouldBindJSON(&x) != nil || x.ID == "" {
+	if c.ShouldBindJSON(&x) != nil || strings.TrimSpace(x.ID) == "" {
 		c.JSON(400, gin.H{"error": "invalid registration"})
 		return
 	}
-	if err := s.Repo.RegisterSensor(c, x); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	auth := c.GetHeader("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	c.JSON(200, gin.H{"sensor_id": x.ID, "status": "registered"})
+	presented := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	if presented == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	existingHash, lookupErr := s.Repo.SensorAuthTokenHash(c, x.ID)
+	switch {
+	case lookupErr == nil && existingHash != "":
+		digest := sha256.Sum256([]byte(presented))
+		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(digest[:])), []byte(existingHash)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "existing sensor credential required"})
+			return
+		}
+	case errors.Is(lookupErr, ErrNotFound) || existingHash == "":
+		if s.SensorToken == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(s.SensorToken)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "valid enrollment credential required"})
+			return
+		}
+	case lookupErr != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor enrollment lookup failed"})
+		return
+	}
+	if err := s.Repo.RegisterSensor(c, x); err != nil {
+		c.JSON(500, gin.H{"error": "sensor registration failed"})
+		return
+	}
+	token, err := newRandomToken(32)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential generation failed"})
+		return
+	}
+	digest := sha256.Sum256([]byte(token))
+	if err := s.Repo.SetSensorAuthToken(c, x.ID, hex.EncodeToString(digest[:])); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential enrollment failed"})
+		return
+	}
+	s.publishLive(LiveEvent{Type: "sensor.registered", SensorID: x.ID, EntityID: x.ID, Message: "sensor registered"})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(200, gin.H{"sensor_id": x.ID, "status": "registered", "sensor_token": token})
 }
 func (s *Server) heartbeat(c *gin.Context) {
 	var x management.Heartbeat
@@ -1863,10 +2168,15 @@ func (s *Server) heartbeat(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid heartbeat"})
 		return
 	}
-	if err := s.Repo.Heartbeat(c, x); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if authenticatedID, _ := c.Get("sensor_id"); authenticatedID != x.SensorID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "sensor id mismatch"})
 		return
 	}
+	if err := s.Repo.Heartbeat(c, x); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	s.publishLive(LiveEvent{Type: "sensor.health", SensorID: x.SensorID, EntityID: x.SensorID, Message: "sensor heartbeat received"})
 	c.Status(204)
 }
 
@@ -1902,7 +2212,7 @@ func (s *Server) sensorActions(c *gin.Context) {
 		}
 		seen[sensorID] = struct{}{}
 		if err := s.Repo.QueueCommands(c, sensorID, commandType, []string{sensorID}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		s.logAudit(c, actor, fmt.Sprintf("sensor capture %s: %s", strings.ToLower(strings.TrimSpace(request.Action)), sensorID), sensorID)
@@ -1926,7 +2236,7 @@ func (s *Server) deleteSensor(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.DeleteSensor(c, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("sensor deleted: %s", id), id)
@@ -1945,10 +2255,83 @@ func metricRange(value string) time.Duration {
 		return time.Hour
 	}
 }
+
+func nestedMetric(root map[string]interface{}, path ...string) float64 {
+	var current interface{} = root
+	for _, key := range path {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return 0
+		}
+		current = m[key]
+	}
+	switch v := current.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case json.Number:
+		n, _ := v.Float64()
+		return n
+	default:
+		return 0
+	}
+}
+
+func nestedBool(root map[string]interface{}, path ...string) bool {
+	var current interface{} = root
+	for _, key := range path {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		current = m[key]
+	}
+	switch v := current.(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return strings.EqualFold(v, "true") || strings.EqualFold(v, "running") || v == "1"
+	default:
+		return false
+	}
+}
+
+func sensorPipelineDiagnostics(sample management.SensorMetricSample) []gin.H {
+	pps := nestedMetric(sample.Metrics, "capture", "packets_per_second")
+	tcp := nestedMetric(sample.Metrics, "tcp_reassembly", "tcp_packets_per_second")
+	segments := nestedMetric(sample.Metrics, "tcp_reassembly", "segments_seen")
+	queue := nestedMetric(sample.Metrics, "pipeline", "event_queue_depth")
+	assertFailures := nestedMetric(sample.Metrics, "tcp_reassembly", "type_assertion_failures")
+	reassemblyEnabled := nestedBool(sample.Metrics, "tcp_reassembly", "enabled")
+	status := func(ok, warning bool) string {
+		if !ok {
+			return "failed"
+		}
+		if warning {
+			return "degraded"
+		}
+		return "healthy"
+	}
+	return []gin.H{
+		{"stage": "Capture", "status": status(pps > 0, false), "value": pps, "unit": "packets/s", "detail": "Packets received from the capture backend"},
+		{"stage": "Event bus", "status": status(pps == 0 || queue < 100000, queue > 50000), "value": queue, "unit": "queued", "detail": "Packet delivery queue between capture and consumers"},
+		{"stage": "TCP classification", "status": status(pps == 0 || tcp > 0 || segments > 0, pps > 0 && tcp == 0), "value": tcp, "unit": "packets/s", "detail": "TCP packets accepted by the stream pipeline"},
+		{"stage": "TCP reassembly", "status": status(reassemblyEnabled, reassemblyEnabled && segments == 0 && pps > 0), "value": segments, "unit": "segments", "detail": "Reassembly engine state and accepted segments"},
+		{"stage": "Packet type contract", "status": status(assertFailures == 0, assertFailures > 0), "value": assertFailures, "unit": "failures", "detail": "Publisher/subscriber packet type compatibility"},
+		{"stage": "Central sync", "status": status(sample.Sync.ConsecutiveFailures == 0, sample.Sync.ConsecutiveFailures > 0), "value": sample.Sync.ConsecutiveFailures, "unit": "failures", "detail": "Consecutive sensor-to-Central synchronization failures"},
+	}
+}
 func (s *Server) sensorMetricsHistory(c *gin.Context) {
 	samples, err := s.Repo.SensorMetricHistory(c, c.Param("id"), time.Now().UTC().Add(-metricRange(c.Query("range"))), 10000)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, samples)
@@ -1956,7 +2339,7 @@ func (s *Server) sensorMetricsHistory(c *gin.Context) {
 func (s *Server) sensorMetricsOverview(c *gin.Context) {
 	samples, err := s.Repo.LatestSensorMetrics(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, samples)
@@ -1967,7 +2350,7 @@ func (s *Server) healthcheck(c *gin.Context) {
 	latency := float64(time.Since(start).Microseconds()) / 1000
 	samples, err := s.Repo.LatestSensorMetrics(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	var ms runtime.MemStats
@@ -1989,13 +2372,17 @@ func (s *Server) healthcheck(c *gin.Context) {
 			h.SensorsOffline++
 		}
 	}
-	c.JSON(200, gin.H{"central": h, "sensors": samples})
+	diagnostics := make(map[string][]gin.H, len(samples))
+	for _, sample := range samples {
+		diagnostics[sample.SensorID] = sensorPipelineDiagnostics(sample)
+	}
+	c.JSON(200, gin.H{"central": h, "sensors": samples, "diagnostics": diagnostics, "schema_version": s.Repo.SchemaVersion(c)})
 }
 
 func (s *Server) sensors(c *gin.Context) {
 	v, e := s.Repo.ListSensors(c)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, v)
@@ -2023,19 +2410,19 @@ func (s *Server) putRuleset(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.PutRuleSet(c, rs); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	out, e := s.Repo.GetRuleSet(c, rs.ID)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	c.JSON(200, out)
 }
 func (s *Server) assign(c *gin.Context) {
 	if err := s.Repo.AssignRuleSet(c, c.Param("id"), c.Param("ruleset")); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.Status(204)
@@ -2098,7 +2485,7 @@ func randomAnalysisID() string {
 func (s *Server) analysisJobs(c *gin.Context) {
 	jobs, err := s.Repo.ListAnalysisJobs(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, jobs)
@@ -2134,14 +2521,14 @@ func (s *Server) createAnalysisJob(c *gin.Context) {
 	}
 	lr := http.MaxBytesReader(c.Writer, file, s.AnalysisMaxBytes)
 	if err := os.MkdirAll(s.AnalysisDir, 0700); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	id := randomAnalysisID()
 	path := filepath.Join(s.AnalysisDir, id+ext)
 	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	h := sha256.New()
@@ -2171,7 +2558,7 @@ func (s *Server) createAnalysisJob(c *gin.Context) {
 	job := management.AnalysisJob{ID: id, SensorID: sensorID, Filename: filepath.Base(header.Filename), SHA256: hex.EncodeToString(h.Sum(nil)), SizeBytes: n, Status: "queued", Protocols: protocols, CreatedAt: time.Now().UTC()}
 	if err := s.Repo.CreateAnalysisJob(c, job, path); err != nil {
 		_ = os.Remove(path)
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, job)
@@ -2194,7 +2581,7 @@ func (s *Server) nextAnalysisJob(c *gin.Context) {
 			c.Status(204)
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, job)
@@ -2214,7 +2601,7 @@ func (s *Server) analysisResult(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.FinishAnalysisJob(c, c.Param("job"), c.Param("id"), result); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.Status(204)
@@ -2251,19 +2638,19 @@ func (s *Server) resetData(c *gin.Context) {
 		if command, ok := commandByOperation[op]; ok {
 			sensors, err := s.Repo.ListSensors(c)
 			if err != nil {
-				c.JSON(500, gin.H{"error": err.Error()})
+				respondInternalError(c, err)
 				return
 			}
 			for _, sensor := range sensors {
 				if err := s.Repo.QueueCommands(c, sensor.ID, command, []string{sensor.ID}); err != nil {
-					c.JSON(500, gin.H{"error": err.Error()})
+					respondInternalError(c, err)
 					return
 				}
 				queued++
 			}
 		}
 		if err := s.Repo.ResetCentral(c, op); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: central/%s", op), "")
@@ -2279,7 +2666,7 @@ func (s *Server) resetData(c *gin.Context) {
 		}
 		for _, id := range req.SensorIDs {
 			if err := s.Repo.QueueCommands(c, strings.TrimSpace(id), command, []string{strings.TrimSpace(id)}); err != nil {
-				c.JSON(500, gin.H{"error": err.Error()})
+				respondInternalError(c, err)
 				return
 			}
 		}
@@ -2315,7 +2702,7 @@ func (s *Server) createBackup(c *gin.Context) {
 	id := fmt.Sprintf("bkp-%d", time.Now().UTC().UnixNano())
 	b, err := s.Repo.CreateCentralBackup(c, id, req.Name)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup created: central (%s)", id), "")
@@ -2324,7 +2711,7 @@ func (s *Server) createBackup(c *gin.Context) {
 func (s *Server) listBackups(c *gin.Context) {
 	b, err := s.Repo.ListBackups(c)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, b)
@@ -2332,7 +2719,7 @@ func (s *Server) listBackups(c *gin.Context) {
 func (s *Server) deleteBackup(c *gin.Context) {
 	backupID := c.Param("backup")
 	if err := s.Repo.DeleteBackup(c, backupID); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup deleted: %s", backupID), "")
@@ -2351,7 +2738,7 @@ func (s *Server) downloadBackup(c *gin.Context) {
 func (s *Server) assetSecurityStatuses(c *gin.Context) {
 	rows, err := s.Repo.ListAssetSecurityStatuses(c, strings.TrimSpace(c.Query("sensor_id")))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(200, rows)
@@ -2377,14 +2764,14 @@ func (s *Server) setAssetSecurityStatus(c *gin.Context) {
 	}
 	v := AssetSecurityStatus{SensorID: c.Param("id"), AssetIP: c.Param("ip"), Status: strings.ToLower(in.Status), Reason: in.Reason, Source: in.Source, DetectedAt: in.DetectedAt, UpdatedBy: in.UpdatedBy}
 	if err := s.Repo.SetAssetSecurityStatus(c, v); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	out := gin.H{"status": v}
 	if in.AutoTrace && (v.Status == "infected" || v.Status == "suspected") {
 		incident, err := s.Repo.CreateContactTrace(c, v.SensorID, v.AssetIP, in.LookbackHours, in.MaxHops)
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 			return
 		}
 		out["incident"] = incident
@@ -2406,7 +2793,7 @@ func (s *Server) createMalwareContactTrace(c *gin.Context) {
 	}
 	v, err := s.Repo.CreateContactTrace(c, in.SensorID, in.AssetIP, in.LookbackHours, in.MaxHops)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("malware contact trace created: incident %d for %s", v.ID, v.InitialAssetIP), v.SensorID)
@@ -2423,7 +2810,7 @@ func (s *Server) getMalwareIncident(c *gin.Context) {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(404, gin.H{"error": "incident not found"})
 		} else {
-			c.JSON(500, gin.H{"error": err.Error()})
+			respondInternalError(c, err)
 		}
 		return
 	}
@@ -2452,7 +2839,7 @@ func (s *Server) dnsObservations(c *gin.Context) {
 	}
 	rows, err := s.Repo.ListDNSObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("query")), strings.TrimSpace(c.Query("client_ip")), limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, rows)
@@ -2467,8 +2854,59 @@ func (s *Server) smbObservations(c *gin.Context) {
 	}
 	rows, err := s.Repo.ListSMBObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func (s *Server) listCorrelationRules(c *gin.Context) {
+	rules, err := s.Repo.ListCorrelationRules(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(200, rules)
+}
+func (s *Server) saveCorrelationRule(c *gin.Context) {
+	var req CorrelationRule
+	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Name) == "" {
+		c.JSON(400, gin.H{"error": "name is required"})
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Description = strings.TrimSpace(req.Description)
+	if req.Severity == "" {
+		req.Severity = "high"
+	}
+	valid := map[string]bool{"low": true, "medium": true, "high": true, "critical": true}
+	if !valid[req.Severity] {
+		c.JSON(400, gin.H{"error": "invalid severity"})
+		return
+	}
+	id, err := s.Repo.SaveCorrelationRule(c, req)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, "correlation rule saved: "+req.Name, "")
+	s.publishLive(LiveEvent{Type: "correlation.rules.changed", EntityID: strconv.FormatInt(id, 10), Message: "correlation rule updated"})
+	c.JSON(200, gin.H{"ID": id})
+}
+func (s *Server) deleteCorrelationRule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"error": "invalid rule id"})
+		return
+	}
+	if err = s.Repo.DeleteCorrelationRule(c, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "custom rule not found"})
+			return
+		}
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("correlation rule %d deleted", id), "")
+	c.JSON(200, gin.H{"deleted": true})
 }

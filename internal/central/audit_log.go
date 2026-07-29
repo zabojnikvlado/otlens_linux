@@ -2,11 +2,11 @@ package central
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
-// AuditEntry is one row of audit_log — see that table's doc comment in
-// the embedded schema for why it's independent of siem_outbox.
 type AuditEntry struct {
 	ID        int64
 	Actor     string
@@ -20,24 +20,54 @@ type AuditEntry struct {
 	CreatedAt time.Time
 }
 
+type AuditFilter struct {
+	Limit    int
+	Offset   int
+	Actor    string
+	Action   string
+	SensorID string
+	Success  *bool
+}
+
 func (r *Repository) InsertAuditLog(ctx context.Context, e AuditEntry) error {
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO audit_log(actor,action,method,path,status,success,source_ip,sensor_id)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		e.Actor, e.Action, e.Method, e.Path, e.Status, e.Success, e.SourceIP, e.SensorID,
-	)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO audit_log(actor,action,method,path,status,success,source_ip,sensor_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, e.Actor, e.Action, e.Method, e.Path, e.Status, e.Success, e.SourceIP, e.SensorID)
 	return err
 }
 
-// ListAuditLog returns the most recent audit entries, newest first —
-// this is what the Audit tab shows.
 func (r *Repository) ListAuditLog(ctx context.Context, limit int) ([]AuditEntry, error) {
-	if limit <= 0 || limit > 5000 {
-		limit = 500
+	return r.ListAuditLogFiltered(ctx, AuditFilter{Limit: limit})
+}
+
+func (r *Repository) ListAuditLogFiltered(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 250
 	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id,actor,action,method,path,status,success,source_ip,sensor_id,created_at
-		FROM audit_log ORDER BY created_at DESC LIMIT $1`, limit)
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	where := []string{"1=1"}
+	args := []interface{}{}
+	add := func(clause string, value interface{}) {
+		args = append(args, value)
+		where = append(where, fmt.Sprintf(clause, len(args)))
+	}
+	if strings.TrimSpace(f.Actor) != "" {
+		add("actor ILIKE '%%' || $%d || '%%'", strings.TrimSpace(f.Actor))
+	}
+	if strings.TrimSpace(f.Action) != "" {
+		args = append(args, strings.TrimSpace(f.Action))
+		n := len(args)
+		where = append(where, fmt.Sprintf("(action ILIKE '%%' || $%d || '%%' OR path ILIKE '%%' || $%d || '%%')", n, n))
+	}
+	if strings.TrimSpace(f.SensorID) != "" {
+		add("sensor_id ILIKE '%%' || $%d || '%%'", strings.TrimSpace(f.SensorID))
+	}
+	if f.Success != nil {
+		add("success=$%d", *f.Success)
+	}
+	args = append(args, f.Limit, f.Offset)
+	q := fmt.Sprintf(`SELECT id,actor,action,method,path,status,success,source_ip,sensor_id,created_at FROM audit_log WHERE %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, strings.Join(where, " AND "), len(args)-1, len(args))
+	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

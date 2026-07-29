@@ -141,7 +141,7 @@ func main() {
 		hostname, _ := os.Hostname()
 		client := syncagent.New(syncagent.Config{
 			BaseURL: cfg.Central.URL, Token: cfg.Central.Token, SensorID: cfg.Central.SensorID,
-			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname,
+			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname, CredentialFile: cfg.Central.CredentialFile,
 			Interval: cfg.Central.Interval, Timeout: cfg.Central.Timeout, InsecureSkipVerify: cfg.Central.InsecureSkipVerify,
 		})
 		marshal := func(v interface{}) (json.RawMessage, error) {

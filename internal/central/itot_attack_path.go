@@ -367,7 +367,7 @@ func (s *Server) setAssetContext(c *gin.Context) {
 	}
 	v := AssetContext{SensorID: c.Param("id"), AssetIP: c.Param("ip"), AssetRole: strings.TrimSpace(req.AssetRole), Criticality: strings.TrimSpace(req.Criticality), Zone: strings.TrimSpace(req.Zone), PurdueOverride: req.PurdueOverride, IsEntryPoint: req.IsEntryPoint, IsTarget: req.IsTarget, UpdatedBy: identityFromContext(c).Username}
 	if err := s.Repo.SetAssetContext(c, v); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err)
 		return
 	}
 	s.invalidateTopologyCache()
@@ -376,7 +376,7 @@ func (s *Server) setAssetContext(c *gin.Context) {
 func (s *Server) assetContexts(c *gin.Context) {
 	v, e := s.Repo.ListAssetContexts(c, c.Query("sensor_id"))
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	out := make([]AssetContext, 0, len(v))
@@ -399,7 +399,7 @@ func (s *Server) observedITOTPaths(c *gin.Context) {
 func (s *Server) purdueTopology(c *gin.Context) {
 	nodes, e := s.Repo.buildITOTNodes(c, c.Param("id"))
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		respondInternalError(c, e)
 		return
 	}
 	out := make([]ITOTNode, 0, len(nodes))

@@ -41,3 +41,13 @@ func TestBasicPDFHasValidObjectTable(t *testing.T) {
 		}
 	}
 }
+
+func TestReportPlainTextRemovesStyleAndScriptContents(t *testing.T) {
+	got := reportPlainText(`<html><head><style>body{color:red}</style><script>alert("x")</script></head><body><h1>OTLens report</h1><p>Healthy</p></body></html>`)
+	if bytes.Contains([]byte(got), []byte("body{")) || bytes.Contains([]byte(got), []byte("alert(")) {
+		t.Fatalf("style or script content leaked into report text: %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("OTLens report")) || !bytes.Contains([]byte(got), []byte("Healthy")) {
+		t.Fatalf("report content missing: %q", got)
+	}
+}

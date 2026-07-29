@@ -4,7 +4,7 @@ BINDIR := bin
 SENSOR_BIN := $(BINDIR)/otlens
 CENTRAL_BIN := $(BINDIR)/otlens-central
 
-.PHONY: all build build-sensor build-central build-linux-sensor build-windows-central build-windows build-linux test test-race fmt vet clean
+.PHONY: all build build-sensor build-central build-linux-sensor build-windows-central build-windows build-linux test test-race fmt fmt-check vet frontend-check pdf-smoke verify clean
 
 all: build
 
@@ -41,6 +41,17 @@ test-race:
 
 fmt:
 	gofmt -w $$(find . -type f -name '*.go' -not -path './vendor/*')
+
+fmt-check:
+	@test -z "$$(gofmt -l $$(find . -type f -name '*.go' -not -path './vendor/*'))" || (echo "Go files require gofmt"; gofmt -l $$(find . -type f -name '*.go' -not -path './vendor/*'); exit 1)
+
+frontend-check:
+	node --check web/central/app.js
+
+pdf-smoke:
+	go test -buildvcs=false ./internal/central -run 'Test.*PDF'
+
+verify: fmt-check frontend-check vet test build
 
 vet:
 	go vet ./...

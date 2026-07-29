@@ -1,4 +1,0 @@
-# test log
-open testdata\fuzz\FuzzModbusParserNeverPanics
-open testdata\fuzz\FuzzDNP3ParserNeverPanics
-open testdata\fuzz\FuzzIEC104ParserNeverPanics

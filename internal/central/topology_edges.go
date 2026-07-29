@@ -286,3 +286,56 @@ func splitProtocols(s string) []string {
 	sort.Strings(parts)
 	return parts
 }
+
+// AssetIdentityMeta summarizes the durable identity history for one current asset.
+// MAC-backed identities are stable across DHCP changes; IP-only identities are
+// intentionally lower-confidence because an address may later be reused.
+type AssetIdentityMeta struct {
+	CanonicalID        string
+	FirstSeen          time.Time
+	LastSeen           time.Time
+	IPCount            int
+	SourceCount        int
+	IdentityConfidence string
+	Aliases            []string
+}
+
+// AssetIdentityMetadata returns identity/lifecycle metadata keyed by sensorID\x00IP.
+func (r *Repository) AssetIdentityMetadata(ctx context.Context) (map[string]AssetIdentityMeta, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		WITH grouped AS (
+			SELECT sensor_id,
+			       CASE WHEN mac <> '' THEN 'mac:' || lower(mac) ELSE 'ip:' || ip END AS canonical_id,
+			       NULLIF(mac,'') AS mac_key,
+			       MIN(first_seen) AS first_seen,
+			       MAX(last_seen) AS last_seen,
+			       COUNT(DISTINCT ip)::int AS ip_count,
+			       COUNT(*)::int AS source_count,
+			       ARRAY_AGG(DISTINCT ip ORDER BY ip) AS aliases
+			FROM topology_nodes
+			GROUP BY sensor_id, CASE WHEN mac <> '' THEN 'mac:' || lower(mac) ELSE 'ip:' || ip END, NULLIF(mac,'')
+		)
+		SELECT n.sensor_id,n.ip,g.canonical_id,g.first_seen,g.last_seen,g.ip_count,g.source_count,g.aliases,
+		       CASE
+		         WHEN n.mac <> '' THEN 'high'
+		         WHEN n.hostname <> '' OR n.vendor <> '' THEN 'medium'
+		         ELSE 'low'
+		       END AS confidence
+		FROM topology_nodes n
+		JOIN grouped g ON g.sensor_id=n.sensor_id
+		 AND g.canonical_id=CASE WHEN n.mac <> '' THEN 'mac:' || lower(n.mac) ELSE 'ip:' || n.ip END`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]AssetIdentityMeta{}
+	for rows.Next() {
+		var sensorID, ip string
+		var m AssetIdentityMeta
+		if err := rows.Scan(&sensorID, &ip, &m.CanonicalID, &m.FirstSeen, &m.LastSeen, &m.IPCount, &m.SourceCount, &m.Aliases, &m.IdentityConfidence); err != nil {
+			return nil, err
+		}
+		out[sensorID+"\x00"+ip] = m
+	}
+	return out, rows.Err()
+}

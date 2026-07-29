@@ -54,6 +54,7 @@ type Config struct {
 		Name               string        `mapstructure:"name"`
 		SiteID             string        `mapstructure:"site_id"`
 		Token              string        `mapstructure:"token"`
+		CredentialFile     string        `mapstructure:"credential_file"`
 		Interval           time.Duration `mapstructure:"interval"`
 		Timeout            time.Duration `mapstructure:"timeout"`
 		InsecureSkipVerify bool          `mapstructure:"insecure_skip_verify"`
@@ -667,6 +668,7 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("central.name", "")
 	viper.SetDefault("central.site_id", "")
 	viper.SetDefault("central.token", "")
+	viper.SetDefault("central.credential_file", "")
 	viper.SetDefault("central.interval", 30*time.Second)
 	viper.SetDefault("central.timeout", 15*time.Second)
 	viper.SetDefault("central.insecure_skip_verify", false)
@@ -772,6 +774,11 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Read the nested reassembly switch directly as well. Older deployments and
+	// some mapstructure versions could leave this nested bool at its zero value
+	// even though Viper had the configured/default value.
+	cfg.Capture.TCPReassembly.Enabled = viper.GetBool("capture.tcp_reassembly.enabled")
 
 	if cfg.Central.Enabled {
 		if strings.TrimSpace(cfg.Central.URL) == "" {

@@ -18,8 +18,10 @@ central:
   # Human-readable labels shown in the Central UI.
   name: "Production Line 1"
   site_id: "site-001"
-  # Must match auth.sensor_token in central.config.yaml. Prefer the
+  # Enrollment credential matching auth.sensor_token in central.config.yaml. Central exchanges it for a unique per-sensor token at registration. Prefer the
   # OTLENS_CENTRAL_TOKEN environment variable in production.
+  # Persisted per-sensor credential returned by Central. Protect this file.
+  credential_file: "./data/sensor-credential.token"
   token: "CHANGE_SENSOR_TOKEN"
   # Registration, heartbeat, command polling, rule sync, telemetry,
   # and PCAP job polling run on this synchronization interval.
