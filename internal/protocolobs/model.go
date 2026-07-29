@@ -22,6 +22,8 @@ type Observation struct {
 	FromAnalysis   bool              `json:"from_analysis,omitempty"`
 	Attributes     map[string]string `json:"attributes,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
+	FlowID         string            `json:"flow_id,omitempty"`
+	SensorID       string            `json:"sensor_id,omitempty"`
 	Direction      string            `json:"direction,omitempty"`
 	RTTMillis      float64           `json:"rtt_millis,omitempty"`
 }

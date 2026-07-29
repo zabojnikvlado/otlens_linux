@@ -492,7 +492,11 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				udpExchangesJSON, err := marshal(application.ProtocolEngine.GetExchanges())
+				udpExchanges := application.ProtocolEngine.GetExchanges()
+				for _, exchange := range application.DNSEngine.GetExchanges() {
+					udpExchanges = append(udpExchanges, exchange)
+				}
+				udpExchangesJSON, err := marshal(udpExchanges)
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}

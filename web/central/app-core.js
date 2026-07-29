@@ -1,4 +1,4 @@
-const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilities=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[],incidents=[],assetSecurity=[],dnsObservations=[],smbObservations=[],threatIntelSources=[],threatIntelIndicators=[],reports=[],sensorMetrics=[],healthcheckData=null,assetRiskData=[],correlationRules=[],trends={AlertsByDay:[],NewAssetsByDay:[]};let network,nodesDS,edgesDS;let topologyColourMode='class',purdueTopologyData=null;const topologyPositionCache=new Map();const selected=new Set();
+const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilities=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[],incidents=[],assetSecurity=[],dnsObservations=[],smbObservations=[],threatIntelSources=[],threatIntelIndicators=[],reports=[],sensorMetrics=[],healthcheckData=null,assetRiskData=[],correlationRules=[],udpConversations=[],udpTelemetry={totals:{},protocols:{},top_protocol:''},udpPacketRateState=null,trends={AlertsByDay:[],NewAssetsByDay:[]};let network,nodesDS,edgesDS;let topologyColourMode='class',purdueTopologyData=null;const topologyPositionCache=new Map();const selected=new Set();
 // Auth state — populated from GET /v1/me on boot and again right after
 // login. permissions.view drives which nav tabs are shown (server-side
 // requireView enforces the same thing, this just reflects it in the UI);
@@ -13,13 +13,13 @@ const connectionState={api:'unknown',apiText:'',live:'idle',liveSince:0,lastEven
 const DOMAIN_TTL_MS=15000;
 const domainLoadedAt=new Map(),pendingLoads=new Map();
 const DOMAIN_PATHS={
-  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/incidents','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs'],
+  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/incidents','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry'],
   assets:['/assets','/asset-security-status','/asset-risk'],devices:['/devices'],
   vulnerabilities:['/vulnerabilities'],tags:['/tags','/tags/changes','/tags/events','/sensors'],
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/dns-observations?limit=1000','/smb-observations?limit=1000'],
   incidents:['/incidents','/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],settings:['/settings'],audit:['/audit'],
-  topology:[],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
+  topology:['/udp-conversations?active=true'],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
 };
 function activeTab(){return document.querySelector('.tab.active')?.dataset.tab||'dashboard'}
 function loadPath(path){if(pendingLoads.has(path))return pendingLoads.get(path);const q=api(path).finally(()=>pendingLoads.delete(path));pendingLoads.set(path,q);return q}

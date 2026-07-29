@@ -339,6 +339,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/protocol-observations", requireView(ViewAlerts), s.protocolObservations)
 	api.GET("/udp-conversations", requireView(ViewAlerts), s.udpConversations)
 	api.GET("/udp-conversations/:id", requireView(ViewAlerts), s.udpConversation)
+	api.GET("/udp-telemetry", requireView(ViewDashboard), s.udpTelemetry)
 	api.GET("/threat-intel/sources", requireView(ViewAlerts), s.listThreatIntelSources)
 	api.POST("/threat-intel/sources", requireAction(ActionDataManagement), s.createThreatIntelSource)
 	api.POST("/threat-intel/sources/:id/refresh", requireAction(ActionDataManagement), s.refreshThreatIntelSourceHTTP)

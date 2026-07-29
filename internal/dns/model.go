@@ -31,6 +31,7 @@ type DNSExchange struct {
 	RTT            time.Duration `json:"rtt"`
 	ResponseCode   uint8         `json:"response_code"`
 	Answers        int           `json:"answers"`
+	TTL            uint32        `json:"ttl,omitempty"`
 	TimedOut       bool          `json:"timed_out"`
 }
 

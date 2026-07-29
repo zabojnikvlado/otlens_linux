@@ -104,6 +104,7 @@ func (t *Tracker) observeResponseLocked(observation Observation, context udpconv
 		}
 		exchange.ResponseCode = observation.ResponseCode
 		exchange.Answers = observation.AnswerCount
+		exchange.TTL = observation.TTL
 		t.appendLocked(*exchange)
 		result := *exchange
 		return &result
@@ -120,6 +121,7 @@ func (t *Tracker) observeResponseLocked(observation Observation, context udpconv
 		RespondedAt:    observation.Timestamp,
 		ResponseCode:   observation.ResponseCode,
 		Answers:        observation.AnswerCount,
+		TTL:            observation.TTL,
 	}
 	t.appendLocked(orphan)
 	return &orphan

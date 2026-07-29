@@ -193,6 +193,15 @@ function renderDashboard(){
   operationalWarningSensors.delete('');
   const healthWarnings=operationalWarningSensors.size;
   document.getElementById('dashboard-pps').textContent=Math.round(totalPPS).toLocaleString();document.getElementById('dashboard-streams').textContent=Math.round(totalStreams).toLocaleString();document.getElementById('dashboard-health-warnings').textContent=healthWarnings;
+  const udp=udpTelemetry?.totals||{},udpRTT=Number(udp.udp_average_rtt||0),topUDP=String(udpTelemetry?.top_protocol||'');
+  document.getElementById('dashboard-udp-active').textContent=Number(udp.udp_conversations_active||0).toLocaleString();
+  document.getElementById('dashboard-udp-rtt').textContent=udpRTT?`${udpRTT.toFixed(2)} ms`:'—';
+  document.getElementById('dashboard-udp-timeouts').textContent=Number(udp.udp_request_timeouts_total||0).toLocaleString();
+  document.getElementById('dashboard-udp-protocol').textContent=topUDP?topUDP.toUpperCase():'—';
+  const udpPackets=Number(udp.udp_packets_total||0),udpRateNow=Date.now();let udpPPS=0;
+  if(udpPacketRateState&&udpPackets>=udpPacketRateState.packets)udpPPS=(udpPackets-udpPacketRateState.packets)/Math.max(1,(udpRateNow-udpPacketRateState.at)/1000);
+  udpPacketRateState={packets:udpPackets,at:udpRateNow};
+  const udpPacketEl=document.getElementById('dashboard-udp-packets');udpPacketEl.textContent=Math.round(udpPPS).toLocaleString();udpPacketEl.previousElementSibling.textContent='UDP packets/s';udpPacketEl.nextElementSibling.textContent='Since previous refresh';
   const profiled=(assets||[]).filter(a=>a.LastProfiledAt||a.ReconHostname||a.ReconVendor||a.ReconOS).length, unknownIdentity=(assets||[]).filter(a=>!(a.Hostname||a.ReconHostname)||!(a.Vendor||a.ReconVendor)||!a.ReconOS).length, reconActive=(reconnaissanceJobs||[]).filter(j=>['queued','running'].includes(j.status)).length;
   const dp=document.getElementById('dashboard-profiled');if(dp)dp.textContent=profiled;const du=document.getElementById('dashboard-unknown-identity');if(du)du.textContent=unknownIdentity;const dj=document.getElementById('dashboard-recon-jobs');if(dj)dj.textContent=reconActive;
 

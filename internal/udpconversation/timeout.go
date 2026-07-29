@@ -2,24 +2,30 @@ package udpconversation
 
 import "time"
 
-// Expire removes conversations idle strictly longer than idle.
 func (m *Manager) Expire(now time.Time, idle time.Duration) int {
 	if idle <= 0 {
 		return 0
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	expired := 0
-	for key, conversation := range m.conversations {
-		if now.Sub(conversation.LastSeenAt) > idle {
-			delete(m.conversations, key)
-			if node := m.lruNodes[key]; node != nil {
-				m.lru.Remove(node)
-				delete(m.lruNodes, key)
+	for index := 0; index < m.shardCount; index++ {
+		shard := &m.shards[index]
+		shard.mu.Lock()
+		for key, conversation := range shard.conversations {
+			if now.Sub(conversation.LastSeenAt) <= idle {
+				continue
+			}
+			delete(shard.conversations, key)
+			if node := shard.lruNodes[key]; node != nil {
+				shard.lru.Remove(node)
+				delete(shard.lruNodes, key)
 			}
 			expired++
-			m.stats.Expired++
 		}
+		shard.mu.Unlock()
+	}
+	if expired > 0 {
+		m.stats.active.Add(^uint64(expired - 1))
+		m.stats.expired.Add(uint64(expired))
 	}
 	return expired
 }

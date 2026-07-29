@@ -7,6 +7,8 @@ import "time"
 // of packet size.
 type Conversation struct {
 	ID       string
+	FlowID   string
+	SensorID string
 	Key      Key
 	Protocol string
 

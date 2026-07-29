@@ -121,6 +121,7 @@ func New(cfg *config.Config) (*Application, error) {
 	tcpReassembler := tcpreassembly.New(eventBus, tcpreassembly.Config{Enabled: cfg.Capture.TCPReassembly.Enabled, MaxConnections: cfg.Capture.TCPReassembly.MaxConnections, MaxBufferPerDirection: cfg.Capture.TCPReassembly.MaxBufferPerDirection, MaxTotalBuffer: cfg.Capture.TCPReassembly.MaxTotalBuffer, IdleTimeout: cfg.Capture.TCPReassembly.IdleTimeout, ClosedTimeout: cfg.Capture.TCPReassembly.ClosedTimeout, MaxOutOfOrderSegments: cfg.Capture.TCPReassembly.MaxOutOfOrderSegments, MaxSequenceGap: cfg.Capture.TCPReassembly.MaxSequenceGap, GapRecoveryTimeout: cfg.Capture.TCPReassembly.GapRecoveryTimeout, ShardCount: cfg.Capture.TCPReassembly.ShardCount, OverlapPolicy: cfg.Capture.TCPReassembly.OverlapPolicy})
 	udpConversations := udpconversation.New(eventBus, udpconversation.ManagerConfig{
 		Disabled:                  !cfg.Capture.UDPConversations.Enabled,
+		SensorID:                  cfg.Central.SensorID,
 		MaxActive:                 cfg.Capture.UDPConversations.MaxActive,
 		MaxPacketsPerConversation: cfg.Capture.UDPConversations.MaxPacketsPerConversation,
 		IdleTimeout:               cfg.Capture.UDPConversations.IdleTimeout,

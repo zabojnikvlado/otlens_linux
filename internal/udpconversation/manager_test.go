@@ -1,7 +1,9 @@
 package udpconversation
 
 import (
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,15 +21,19 @@ func udpPacket(src string, srcPort uint16, dst string, dstPort uint16, size int,
 
 func TestObserveTracksBothDirectionsAndStats(t *testing.T) {
 	manager := NewManagerWithConfig(ManagerConfig{
+		SensorID:                  "sensor-one",
 		MaxActive:                 10,
 		MaxPacketsPerConversation: 10,
 		IdleTimeout:               time.Minute,
 	})
 	now := time.Unix(1_000, 0)
 
-	first, ok := manager.Observe(udpPacket("10.0.0.1", 1000, "10.0.0.2", 2000, 100, now))
+	first, context, ok := manager.ObserveWithContext(udpPacket("10.0.0.1", 1000, "10.0.0.2", 2000, 100, now))
 	if !ok || first.DirectionA != 1 || first.DirectionB != 0 {
 		t.Fatalf("unexpected first observation: %#v, accepted=%v", first, ok)
+	}
+	if context.SensorID != "sensor-one" || context.FlowID != "UDP|10.0.0.1:1000|10.0.0.2:2000" {
+		t.Fatalf("unexpected parser context: %#v", context)
 	}
 	second, ok := manager.Observe(udpPacket("10.0.0.2", 2000, "10.0.0.1", 1000, 60, now.Add(time.Second)))
 	if !ok {
@@ -203,4 +209,30 @@ func TestConcurrentObserveStatsAndExpire(t *testing.T) {
 	if manager.Stats().Active != 0 {
 		t.Fatalf("concurrent conversations did not expire: %#v", manager.Stats())
 	}
+}
+
+func TestProductionManagerUses256Shards(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 100_000})
+	if manager.shardCount != 256 {
+		t.Fatalf("shard count = %d, want 256", manager.shardCount)
+	}
+	if manager.config.MaxActive != 100_000 {
+		t.Fatalf("global capacity = %d", manager.config.MaxActive)
+	}
+}
+
+func BenchmarkObserveParallel256Shards(b *testing.B) {
+	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 100_000, MaxPacketsPerConversation: 100_000})
+	now := time.Now()
+	var sequence atomic.Uint64
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			index := sequence.Add(1)
+			manager.Observe(udpPacket(
+				fmt.Sprintf("10.%d.%d.%d", byte(index>>16), byte(index>>8), byte(index)),
+				uint16(index), "192.0.2.53", 53, 64, now,
+			))
+		}
+	})
 }

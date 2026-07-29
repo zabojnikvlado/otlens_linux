@@ -31,3 +31,36 @@ func TestMatchUDPConversationFilters(t *testing.T) {
 		t.Fatal("mismatched protocol was accepted")
 	}
 }
+
+func TestPresentUDPConversationStatusAndRTT(t *testing.T) {
+	started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	conversation := udpconversation.Conversation{
+		ID: "dns-conversation", Protocol: "dns", StartedAt: started, LastSeenAt: started.Add(25 * time.Millisecond),
+	}
+	exchanges := []map[string]any{{
+		"conversation_id": "dns-conversation",
+		"responded_at":    started.Add(20 * time.Millisecond).Format(time.RFC3339Nano),
+		"rtt":             float64(20 * time.Millisecond),
+	}}
+	result := presentUDPConversation("sensor-a", started.Add(time.Second), conversation, exchanges)
+	if result.Status != "closed" {
+		t.Fatalf("status = %q, want closed", result.Status)
+	}
+	if result.RTTMillis != 20 {
+		t.Fatalf("RTT = %v ms, want 20", result.RTTMillis)
+	}
+	if result.DurationMillis != 25 {
+		t.Fatalf("duration = %v ms, want 25", result.DurationMillis)
+	}
+}
+
+func TestPresentUDPConversationTimedOutWins(t *testing.T) {
+	now := time.Now()
+	conversation := udpconversation.Conversation{ID: "snmp", StartedAt: now, LastSeenAt: now}
+	result := presentUDPConversation("sensor-a", now, conversation, []map[string]any{{
+		"ConversationID": "snmp", "RespondedAt": now.Format(time.RFC3339Nano), "TimedOut": true,
+	}})
+	if result.Status != "timed_out" {
+		t.Fatalf("status = %q, want timed_out", result.Status)
+	}
+}

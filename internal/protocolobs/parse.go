@@ -28,6 +28,8 @@ func parseUDPWithContext(p core.Packet, context *udpconversation.ParseContext) [
 	if context != nil {
 		for index := range observations {
 			observations[index].ConversationID = context.ConversationID
+			observations[index].FlowID = context.FlowID
+			observations[index].SensorID = context.SensorID
 			observations[index].Direction = string(context.Direction)
 			observations[index].RTTMillis = context.RTTMillis
 		}
