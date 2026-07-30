@@ -365,6 +365,7 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startLateralMovementWatch(bus)
 	e.startSMBLateralWatch(bus)
 	e.startC2CorrelationWatch(bus)
+	e.startBehaviorFindingWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }

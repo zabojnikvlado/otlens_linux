@@ -467,7 +467,19 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				baselineJSON, err := marshal(application.DetectEngine.BaselineStatus())
+				baselineJSON, err := marshal(struct {
+					detect.BaselineStatus
+					Behavior    any `json:"behavior"`
+					Anomaly     any `json:"anomaly"`
+					Risk        any `json:"risk"`
+					Correlation any `json:"correlation"`
+				}{
+					BaselineStatus: application.DetectEngine.BaselineStatus(),
+					Behavior:       application.BehaviorBaseline.Status(time.Now().UTC()),
+					Anomaly:        application.AnomalyEngine.Telemetry(),
+					Risk:           application.RiskEngine.Telemetry(),
+					Correlation:    application.CorrelationEngine.Telemetry(),
+				})
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}

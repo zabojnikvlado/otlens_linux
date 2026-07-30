@@ -12,15 +12,16 @@ import (
 // it and doesn't otherwise depend on the sensor's detection engine
 // package.
 type telemetryAlert struct {
-	ID        string    `json:"ID"`
-	Type      string    `json:"Type"`
-	Severity  string    `json:"Severity"`
-	Message   string    `json:"Message"`
-	IP        string    `json:"IP"`
-	FirstSeen time.Time `json:"FirstSeen"`
-	LastSeen  time.Time `json:"LastSeen"`
-	Count     uint64    `json:"Count"`
-	Status    string    `json:"Status"`
+	ID        string                 `json:"ID"`
+	Type      string                 `json:"Type"`
+	Severity  string                 `json:"Severity"`
+	Message   string                 `json:"Message"`
+	IP        string                 `json:"IP"`
+	FirstSeen time.Time              `json:"FirstSeen"`
+	LastSeen  time.Time              `json:"LastSeen"`
+	Count     uint64                 `json:"Count"`
+	Status    string                 `json:"Status"`
+	Evidence  map[string]interface{} `json:"Evidence,omitempty"`
 }
 
 // upsertAlertHistory folds this sync's reported alerts into the durable,
@@ -73,8 +74,8 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 			count = 1
 		}
 		rows, err := x.QueryContext(ctx, `
-			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen,evidence)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
 				type = EXCLUDED.type,
 				severity = EXCLUDED.severity,
@@ -83,9 +84,10 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				status = CASE WHEN alert_history.status IN ('confirmed','approved') THEN alert_history.status ELSE EXCLUDED.status END,
 				count = GREATEST(alert_history.count, EXCLUDED.count),
 				first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
-				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen)
+				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
+				evidence = EXCLUDED.evidence
 			RETURNING (xmax = 0) AS inserted
-		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen)
+		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen, jsonObject(a.Evidence))
 		if err != nil {
 			return newlyCreated, err
 		}
@@ -99,6 +101,7 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				SensorID: sensorID, AlertKey: a.ID, Type: a.Type, Severity: a.Severity,
 				Message: a.Message, IP: a.IP, Status: status, Count: count,
 				FirstSeen: firstSeen, LastSeen: lastSeen,
+				Evidence: a.Evidence,
 			})
 		}
 	}
@@ -139,6 +142,7 @@ type AlertHistoryEntry struct {
 	Count      uint64
 	FirstSeen  time.Time
 	LastSeen   time.Time
+	Evidence   map[string]interface{}
 }
 
 // ListAlertHistory returns the most recently active alerts, newest
@@ -152,7 +156,7 @@ func (r *Repository) ListAlertHistory(ctx context.Context, limit int) ([]AlertHi
 		limit = 2000
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen
+		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
 		FROM alert_history ORDER BY last_seen DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -161,10 +165,20 @@ func (r *Repository) ListAlertHistory(ctx context.Context, limit int) ([]AlertHi
 	out := make([]AlertHistoryEntry, 0)
 	for rows.Next() {
 		var e AlertHistoryEntry
-		if err := rows.Scan(&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen); err != nil {
+		var evidence []byte
+		if err := rows.Scan(&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen, &evidence); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(evidence, &e.Evidence)
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func jsonObject(value interface{}) string {
+	data, _ := json.Marshal(value)
+	if len(data) == 0 || string(data) == "null" {
+		return "{}"
+	}
+	return string(data)
 }

@@ -126,6 +126,30 @@ baseline:
   # new_communication findings.
   learningduration: 10m
 
+  # Modular statistical baseline used by the future Network Behavior
+  # Analytics engine. It learns directional network/application profiles
+  # without retaining packet payloads.
+  behaviorenabled: true
+  bucketduration: 1h
+  maxprofiles: 100000
+  maxassetprofiles: 100000
+
+nba:
+  enabled: true
+  minscore: 40
+  maxanomalies: 10000
+  cooldown: 5m
+  riskenabled: true
+  maxassessments: 10000
+  correlationenabled: true
+  correlationwindow: 15m
+  findingexpireafter: 30m
+  maxfindings: 10000
+  maxassessmentsperfinding: 256
+  minfindingscore: 40
+  alertthreshold: 70
+  incidentthreshold: 85
+
 # Deliberately-planted decoy/honeypot stations, for lateral-movement
 # detection. Nothing legitimate should ever have a real reason to
 # talk to or from a genuine honeypot — any traffic touching one is

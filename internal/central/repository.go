@@ -501,6 +501,7 @@ CREATE TABLE IF NOT EXISTS alert_history (
  type TEXT NOT NULL,
  severity TEXT NOT NULL,
  message TEXT NOT NULL,
+ evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
  ip TEXT NOT NULL DEFAULT '',
  status TEXT NOT NULL DEFAULT 'new',
  approved_by TEXT NOT NULL DEFAULT '',
@@ -512,6 +513,7 @@ CREATE TABLE IF NOT EXISTS alert_history (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_history_last_seen ON alert_history(last_seen);
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS count BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 -- Written unconditionally by auditMiddleware for every mutating
 -- Management API request, independent of whether SIEM export is

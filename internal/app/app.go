@@ -11,9 +11,12 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
+	"github.com/zabojnikvlado/otlens_linux/internal/behaviorbaseline"
 	"github.com/zabojnikvlado/otlens_linux/internal/capture"
 	"github.com/zabojnikvlado/otlens_linux/internal/config"
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
@@ -26,6 +29,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 	"github.com/zabojnikvlado/otlens_linux/internal/ipfix"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/nba"
 	"github.com/zabojnikvlado/otlens_linux/internal/parser"
 	"github.com/zabojnikvlado/otlens_linux/internal/persist"
 	"github.com/zabojnikvlado/otlens_linux/internal/protocolobs"
@@ -70,6 +74,10 @@ type Application struct {
 	ProtocolEngine    *protocolobs.Engine
 	TCPReassembler    *tcpreassembly.Engine
 	UDPConversations  *udpconversation.Engine
+	BehaviorBaseline  *behaviorbaseline.Engine
+	AnomalyEngine     *nba.Engine
+	RiskEngine        *nba.RiskEngine
+	CorrelationEngine *nba.CorrelationEngine
 	ThreatIntel       *threatintel.Store
 	VulnerabilityDB   *vuln.Database
 	threatIntelCancel context.CancelFunc
@@ -81,6 +89,33 @@ type Application struct {
 	DebugEngine *debug.Engine
 
 	Snapshotter *persist.Snapshotter
+}
+
+func findBehaviorAsset(engine *asset.Engine, identity string) *asset.Asset {
+	if engine == nil || identity == "" {
+		return nil
+	}
+	if strings.HasPrefix(identity, "mac:") {
+		mac := strings.TrimPrefix(identity, "mac:")
+		if found := engine.Get(mac); found != nil {
+			return found
+		}
+		for _, candidate := range engine.GetAll() {
+			if strings.EqualFold(candidate.MAC, mac) {
+				return candidate
+			}
+		}
+		return nil
+	}
+	if strings.HasPrefix(identity, "ip:") {
+		ip := strings.TrimPrefix(identity, "ip:")
+		for _, candidate := range engine.GetAll() {
+			if candidate.IP == ip {
+				return candidate
+			}
+		}
+	}
+	return nil
 }
 
 // New wires up the application. It can now fail — opening the bbolt
@@ -134,6 +169,50 @@ func New(cfg *config.Config) (*Application, error) {
 		SNMPTimeout: cfg.Capture.UDPConversations.Protocols.SNMP.Timeout,
 		SIPTimeout:  cfg.Capture.UDPConversations.Protocols.SIP.Timeout,
 		MaxPending:  cfg.Capture.UDPConversations.MaxPendingRequests,
+	})
+	behaviorBaseline := behaviorbaseline.New(eventBus, behaviorbaseline.Config{
+		Enabled:          cfg.Baseline.BehaviorEnabled,
+		SensorID:         cfg.Central.SensorID,
+		LearningDuration: cfg.Baseline.LearningDuration,
+		BucketDuration:   cfg.Baseline.BucketDuration,
+		MaxProfiles:      cfg.Baseline.MaxProfiles,
+		MaxAssetProfiles: cfg.Baseline.MaxAssetProfiles,
+	})
+	anomalyEngine := nba.New(eventBus, behaviorBaseline, nba.Config{
+		Enabled:      cfg.NBA.Enabled,
+		MinScore:     cfg.NBA.MinScore,
+		MaxAnomalies: cfg.NBA.MaxAnomalies,
+		Cooldown:     cfg.NBA.Cooldown,
+	})
+	riskEngine := nba.NewRiskEngine(eventBus, func(anomaly nba.Anomaly) nba.RiskContext {
+		source := findBehaviorAsset(assetEngine, anomaly.AssetID)
+		destination := findBehaviorAsset(assetEngine, anomaly.PeerID)
+		context := nba.RiskContext{}
+		if source != nil {
+			if source.Score > 1 {
+				context.AssetCriticality = float64(min(source.Score, 100))
+			}
+			context.Honeypot = source.Score >= cfg.Deception.HoneypotThreshold
+		}
+		if destination != nil {
+			context.Honeypot = context.Honeypot || destination.Score >= cfg.Deception.HoneypotThreshold
+			context.InterVLAN = source != nil && source.VLANID != 0 && destination.VLANID != 0 && source.VLANID != destination.VLANID
+			if ip := net.ParseIP(destination.IP); ip != nil {
+				context.ExternalDestination = !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+			}
+		} else if strings.HasPrefix(anomaly.PeerID, "ip:") {
+			if ip := net.ParseIP(strings.TrimPrefix(anomaly.PeerID, "ip:")); ip != nil {
+				context.ExternalDestination = !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+			}
+		}
+		return context
+	}, nba.RiskConfig{Enabled: cfg.NBA.RiskEnabled, MaxAssessments: cfg.NBA.MaxAssessments})
+	correlationEngine := nba.NewCorrelationEngine(eventBus, nba.CorrelationConfig{
+		Enabled: cfg.NBA.CorrelationEnabled, Window: cfg.NBA.CorrelationWindow,
+		ExpireAfter: cfg.NBA.FindingExpireAfter, MaxFindings: cfg.NBA.MaxFindings,
+		MaxAssessmentsPerFinding: cfg.NBA.MaxAssessmentsPerFinding,
+		MinFindingScore:          cfg.NBA.MinFindingScore, AlertThreshold: cfg.NBA.AlertThreshold,
+		IncidentThreshold: cfg.NBA.IncidentThreshold,
 	})
 	var tiStore *threatintel.Store
 	if cfg.Detect.ThreatIntel.Enabled {
@@ -209,6 +288,10 @@ func New(cfg *config.Config) (*Application, error) {
 		flowEngine,
 		storeEngine,
 		detectEngine,
+		behaviorBaseline,
+		anomalyEngine,
+		riskEngine,
+		correlationEngine,
 		cfg.Persist.FlushInterval,
 		cfg.Persist.Retention,
 	)
@@ -230,14 +313,18 @@ func New(cfg *config.Config) (*Application, error) {
 
 		HostnameEngine: hostnameEngine,
 
-		DNSEngine:        dnsEngine,
-		SMBEngine:        smbEngine,
-		DCERPCEngine:     dcerpcEngine,
-		ProtocolEngine:   protocolEngine,
-		TCPReassembler:   tcpReassembler,
-		UDPConversations: udpConversations,
-		ThreatIntel:      tiStore,
-		VulnerabilityDB:  vuln.New(),
+		DNSEngine:         dnsEngine,
+		SMBEngine:         smbEngine,
+		DCERPCEngine:      dcerpcEngine,
+		ProtocolEngine:    protocolEngine,
+		TCPReassembler:    tcpReassembler,
+		UDPConversations:  udpConversations,
+		BehaviorBaseline:  behaviorBaseline,
+		AnomalyEngine:     anomalyEngine,
+		RiskEngine:        riskEngine,
+		CorrelationEngine: correlationEngine,
+		ThreatIntel:       tiStore,
+		VulnerabilityDB:   vuln.New(),
 
 		StoreEngine: storeEngine,
 
@@ -282,6 +369,10 @@ func (a *Application) Start() {
 	a.DCERPCEngine.Start()
 	a.UDPConversations.Start()
 	a.ProtocolEngine.Start()
+	a.BehaviorBaseline.Start()
+	a.AnomalyEngine.Start()
+	a.RiskEngine.Start()
+	a.CorrelationEngine.Start()
 	a.TCPReassembler.Start()
 	if a.ThreatIntel != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -365,6 +456,10 @@ func (a *Application) Shutdown() {
 	}
 	a.DNSEngine.Stop()
 	a.ProtocolEngine.Stop()
+	a.AnomalyEngine.Stop()
+	a.RiskEngine.Stop()
+	a.CorrelationEngine.Stop()
+	a.BehaviorBaseline.Stop()
 	a.TCPReassembler.Stop()
 	a.UDPConversations.Stop()
 

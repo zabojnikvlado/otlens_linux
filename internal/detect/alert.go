@@ -77,11 +77,13 @@ const (
 	// regular interval — see c2beacon.go's doc comment.
 	AlertC2Beacon AlertType = "c2_beacon"
 
-	AlertMaliciousIP     AlertType = "malicious_ip"
-	AlertMaliciousDomain AlertType = "malicious_domain"
-	AlertOTValueAnomaly  AlertType = "ot_value_anomaly"
-	AlertLateralMovement AlertType = "lateral_movement"
-	AlertC2Correlated    AlertType = "c2_correlated"
+	AlertMaliciousIP      AlertType = "malicious_ip"
+	AlertMaliciousDomain  AlertType = "malicious_domain"
+	AlertOTValueAnomaly   AlertType = "ot_value_anomaly"
+	AlertLateralMovement  AlertType = "lateral_movement"
+	AlertC2Correlated     AlertType = "c2_correlated"
+	AlertBehaviorFinding  AlertType = "behavior_finding"
+	AlertBehaviorIncident AlertType = "behavior_incident_candidate"
 )
 
 // AlertStatus is an operator's review verdict on an Alert.

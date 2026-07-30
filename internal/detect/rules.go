@@ -107,6 +107,8 @@ func builtinRules() map[string]*Rule {
 		{ID: string(AlertOTValueAnomaly), Name: "OT Value Anomaly", Category: "ot_tag", AlertType: AlertOTValueAnomaly},
 		{ID: string(AlertLateralMovement), Name: "Lateral Movement Heuristics", Category: "security", AlertType: AlertLateralMovement},
 		{ID: string(AlertC2Correlated), Name: "Correlated C2 Detection", Category: "security", AlertType: AlertC2Correlated},
+		{ID: string(AlertBehaviorFinding), Name: "Network Behavior Finding", Category: "behavior", AlertType: AlertBehaviorFinding},
+		{ID: string(AlertBehaviorIncident), Name: "Network Behavior Incident Candidate", Category: "behavior", AlertType: AlertBehaviorIncident},
 	}
 	out := map[string]*Rule{}
 	for _, r := range seed {

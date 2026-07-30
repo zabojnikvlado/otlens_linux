@@ -77,6 +77,18 @@ const (
 	// EventProtocolObservation carries normalized metadata for first-wave IT protocols.
 	EventProtocolObservation EventType = "protocol.observation"
 
+	// EventBehaviorAnomaly carries an explainable NBA anomaly. It is emitted
+	// only after baseline learning and does not itself create an incident.
+	EventBehaviorAnomaly EventType = "behavior.anomaly"
+
+	// EventBehaviorRisk carries an anomaly enriched with asset/network risk
+	// context. Correlation consumes this event rather than raw anomaly scores.
+	EventBehaviorRisk EventType = "behavior.risk"
+
+	// EventBehaviorFinding carries a deduplicated, lifecycle-managed group of
+	// related behavior risk assessments.
+	EventBehaviorFinding EventType = "behavior.finding"
+
 	// EventIPFIXFlow carries an ipfix.FlowRecord — a decoded flow
 	// summary exported by a router/switch/probe, produced by
 	// internal/ipfix when capture.mode is "ipfix" instead of

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -75,7 +76,8 @@ CREATE TABLE IF NOT EXISTS correlation_rules (
 INSERT INTO correlation_rules(name,description,window_minutes,min_events,required_types,sequence_types,severity,score_weight,confidence_weight,mitre_tactics,mitre_techniques,builtin) VALUES
 ('Multi-stage activity','Multiple distinct detections against one asset',1440,2,'[]','[]','high',20,15,'["TA0001","TA0008"]','[]',TRUE),
 ('IOC followed by lateral movement','Threat-intelligence hit followed by SMB or lateral-movement activity',120,2,'["threat_intel"]','["threat_intel","lateral_movement"]','critical',35,25,'["TA0011","TA0008"]','["T1021"]',TRUE),
-('Reconnaissance to exploitation','Reconnaissance followed by exploitation or anomalous OT activity',60,2,'["reconnaissance"]','["reconnaissance","ot_value_anomaly"]','high',30,20,'["TA0043","TA0002"]','[]',TRUE)
+('Reconnaissance to exploitation','Reconnaissance followed by exploitation or anomalous OT activity',60,2,'["reconnaissance"]','["reconnaissance","ot_value_anomaly"]','high',30,20,'["TA0043","TA0002"]','[]',TRUE),
+('Network Behavior Analytics','High-confidence behavior findings promoted by the sensor NBA pipeline',30,1,'["behavior_incident_candidate"]','[]','high',0,0,'["TA0001"]','[]',TRUE)
 ON CONFLICT(name) DO NOTHING;
 CREATE TABLE IF NOT EXISTS asset_risk (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -338,6 +340,9 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := syncBehaviorIncidents(ctx, tx); err != nil {
+		return err
+	}
 	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
@@ -408,6 +413,62 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx) error {
+	type candidate struct {
+		sensorID, ip, alertKey, severity, message string
+		count                                     uint64
+		firstSeen, lastSeen                       time.Time
+		score, confidence                         float64
+		evidence                                  []byte
+	}
+	var ruleID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM correlation_rules WHERE name='Network Behavior Analytics'`).Scan(&ruleID); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT sensor_id,ip,alert_key,severity,message,count,first_seen,last_seen,
+		COALESCE((evidence->>'risk_score')::double precision,85),
+		COALESCE((evidence->>'confidence')::double precision,0.5),evidence
+		FROM alert_history WHERE type='behavior_incident_candidate' AND status<>'approved'`)
+	if err != nil {
+		return err
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.sensorID, &item.ip, &item.alertKey, &item.severity, &item.message, &item.count, &item.firstSeen, &item.lastSeen, &item.score, &item.confidence, &item.evidence); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range candidates {
+		scoreValue := int(math.Round(math.Max(0, math.Min(100, item.score))))
+		confidenceValue := int(math.Round(math.Max(0, math.Min(1, item.confidence)) * 100))
+		var incidentID int64
+		err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques)
+			VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,'Network Behavior Analytics','["TA0001"]','[]')
+			ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status<>'closed' DO UPDATE SET
+				severity=EXCLUDED.severity,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),
+				summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),updated_at=NOW()
+			RETURNING id`, item.sensorID, item.ip, "Network behavior incident on "+item.ip, item.severity, scoreValue, confidenceValue, item.message, item.firstSeen, item.lastSeen, ruleID).Scan(&incidentID)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO incident_events(incident_id,event_type,source_key,severity,message,event_at,metadata)
+			VALUES($1,'behavior',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, incidentID, item.alertKey, item.severity, item.message, item.lastSeen, string(item.evidence)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cappedAdd(count, weight, capValue int) int {

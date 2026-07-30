@@ -153,6 +153,31 @@ type Config struct {
 		// window. Go duration syntax, e.g. "10m", "1h", "24h". Only
 		// used when Enabled is true.
 		LearningDuration time.Duration
+
+		// BehaviorEnabled enables the modular statistical baseline consumed by
+		// Network Behavior Analytics. The legacy seen/not-seen detection
+		// baseline remains controlled by Enabled above.
+		BehaviorEnabled  bool
+		BucketDuration   time.Duration
+		MaxProfiles      int
+		MaxAssetProfiles int
+	}
+
+	NBA struct {
+		Enabled                  bool
+		MinScore                 float64
+		MaxAnomalies             int
+		Cooldown                 time.Duration
+		RiskEnabled              bool
+		MaxAssessments           int
+		CorrelationEnabled       bool
+		CorrelationWindow        time.Duration
+		FindingExpireAfter       time.Duration
+		MaxFindings              int
+		MaxAssessmentsPerFinding int
+		MinFindingScore          float64
+		AlertThreshold           float64
+		IncidentThreshold        float64
 	}
 
 	// Deception configures deliberately-planted decoy/honeypot
@@ -733,6 +758,24 @@ func Load(path string) (*Config, error) {
 
 	viper.SetDefault("baseline.enabled", true)
 	viper.SetDefault("baseline.learningduration", time.Hour)
+	viper.SetDefault("baseline.behaviorenabled", true)
+	viper.SetDefault("baseline.bucketduration", time.Hour)
+	viper.SetDefault("baseline.maxprofiles", 100000)
+	viper.SetDefault("baseline.maxassetprofiles", 100000)
+	viper.SetDefault("nba.enabled", true)
+	viper.SetDefault("nba.minscore", 40.0)
+	viper.SetDefault("nba.maxanomalies", 10000)
+	viper.SetDefault("nba.cooldown", 5*time.Minute)
+	viper.SetDefault("nba.riskenabled", true)
+	viper.SetDefault("nba.maxassessments", 10000)
+	viper.SetDefault("nba.correlationenabled", true)
+	viper.SetDefault("nba.correlationwindow", 15*time.Minute)
+	viper.SetDefault("nba.findingexpireafter", 30*time.Minute)
+	viper.SetDefault("nba.maxfindings", 10000)
+	viper.SetDefault("nba.maxassessmentsperfinding", 256)
+	viper.SetDefault("nba.minfindingscore", 40.0)
+	viper.SetDefault("nba.alertthreshold", 70.0)
+	viper.SetDefault("nba.incidentthreshold", 85.0)
 
 	viper.SetDefault("deception.honeypotthreshold", 100)
 

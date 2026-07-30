@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
+	"github.com/zabojnikvlado/otlens_linux/internal/behaviorbaseline"
 	"github.com/zabojnikvlado/otlens_linux/internal/detect"
 	"github.com/zabojnikvlado/otlens_linux/internal/flow"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
+	"github.com/zabojnikvlado/otlens_linux/internal/nba"
 	"github.com/zabojnikvlado/otlens_linux/internal/store"
 	"go.uber.org/zap"
 )
@@ -31,10 +33,14 @@ const (
 	// collection — see the blobKey* constants below.
 	bucketMeta = "meta"
 
-	blobKeyTagChanges = "tag_changes"
-	blobKeyTagEvents  = "tag_events"
-	blobKeyBaseline   = "baseline"
-	blobKeyKnownMAC   = "arp_known_mac"
+	blobKeyTagChanges       = "tag_changes"
+	blobKeyTagEvents        = "tag_events"
+	blobKeyBaseline         = "baseline"
+	blobKeyBehaviorBaseline = "behavior_baseline"
+	blobKeyNBA              = "nba_anomalies"
+	blobKeyNBARisk          = "nba_risk"
+	blobKeyNBACorrelation   = "nba_correlation"
+	blobKeyKnownMAC         = "arp_known_mac"
 )
 
 var allBuckets = []string{bucketAssets, bucketFlows, bucketTags, bucketAlerts, bucketRules, bucketMeta}
@@ -59,10 +65,14 @@ var allBuckets = []string{bucketAssets, bucketFlows, bucketTags, bucketAlerts, b
 type Snapshotter struct {
 	db *DB
 
-	assetEngine  *asset.Engine
-	flowEngine   *flow.Engine
-	storeEngine  *store.Engine
-	detectEngine *detect.Engine
+	assetEngine       *asset.Engine
+	flowEngine        *flow.Engine
+	storeEngine       *store.Engine
+	detectEngine      *detect.Engine
+	behaviorBaseline  *behaviorbaseline.Engine
+	anomalyEngine     *nba.Engine
+	riskEngine        *nba.RiskEngine
+	correlationEngine *nba.CorrelationEngine
 
 	interval time.Duration
 
@@ -83,6 +93,10 @@ func NewSnapshotter(
 	flowEngine *flow.Engine,
 	storeEngine *store.Engine,
 	detectEngine *detect.Engine,
+	behaviorBaseline *behaviorbaseline.Engine,
+	anomalyEngine *nba.Engine,
+	riskEngine *nba.RiskEngine,
+	correlationEngine *nba.CorrelationEngine,
 	interval time.Duration,
 	retention time.Duration,
 ) (*Snapshotter, error) {
@@ -104,10 +118,14 @@ func NewSnapshotter(
 	return &Snapshotter{
 		db: db,
 
-		assetEngine:  assetEngine,
-		flowEngine:   flowEngine,
-		storeEngine:  storeEngine,
-		detectEngine: detectEngine,
+		assetEngine:       assetEngine,
+		flowEngine:        flowEngine,
+		storeEngine:       storeEngine,
+		detectEngine:      detectEngine,
+		behaviorBaseline:  behaviorBaseline,
+		anomalyEngine:     anomalyEngine,
+		riskEngine:        riskEngine,
+		correlationEngine: correlationEngine,
 
 		interval:  interval,
 		retention: retention,
@@ -181,6 +199,38 @@ func (s *Snapshotter) Restore() error {
 	}
 
 	s.detectEngine.RestoreBaseline(baseline)
+
+	var behavior behaviorbaseline.Snapshot
+	if err := loadBlob(s.db, bucketMeta, blobKeyBehaviorBaseline, &behavior); err != nil {
+		return err
+	}
+	if err := s.behaviorBaseline.Restore(behavior); err != nil {
+		return err
+	}
+
+	var anomalySnapshot nba.Snapshot
+	if err := loadBlob(s.db, bucketMeta, blobKeyNBA, &anomalySnapshot); err != nil {
+		return err
+	}
+	if err := s.anomalyEngine.Restore(anomalySnapshot); err != nil {
+		return err
+	}
+
+	var riskSnapshot nba.RiskSnapshot
+	if err := loadBlob(s.db, bucketMeta, blobKeyNBARisk, &riskSnapshot); err != nil {
+		return err
+	}
+	if err := s.riskEngine.Restore(riskSnapshot); err != nil {
+		return err
+	}
+
+	var correlationSnapshot nba.CorrelationSnapshot
+	if err := loadBlob(s.db, bucketMeta, blobKeyNBACorrelation, &correlationSnapshot); err != nil {
+		return err
+	}
+	if err := s.correlationEngine.Restore(correlationSnapshot); err != nil {
+		return err
+	}
 
 	var knownMAC map[string]string
 
@@ -277,6 +327,18 @@ func (s *Snapshotter) flush() error {
 	}
 
 	if err := saveBlob(s.db, bucketMeta, blobKeyBaseline, s.detectEngine.BaselineSnapshot()); err != nil {
+		return err
+	}
+	if err := saveBlob(s.db, bucketMeta, blobKeyBehaviorBaseline, s.behaviorBaseline.Snapshot(time.Now().UTC())); err != nil {
+		return err
+	}
+	if err := saveBlob(s.db, bucketMeta, blobKeyNBA, s.anomalyEngine.Snapshot()); err != nil {
+		return err
+	}
+	if err := saveBlob(s.db, bucketMeta, blobKeyNBARisk, s.riskEngine.Snapshot()); err != nil {
+		return err
+	}
+	if err := saveBlob(s.db, bucketMeta, blobKeyNBACorrelation, s.correlationEngine.Snapshot()); err != nil {
 		return err
 	}
 

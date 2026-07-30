@@ -56,7 +56,7 @@ async function refreshDomains(domains,force=false){
   if(!due.length)return;
   const topologyActive=due.includes('topology')&&canView('topology');
   const paths=[...new Set(due.flatMap(d=>DOMAIN_PATHS[d]||[]))].filter(path=>{
-    const permission={dashboard:'dashboard',assets:'assets',devices:'devices',vulnerabilities:'vulnerabilities',tags:'tags',sensors:'sensors',alerts:'alerts',incidents:'incidents',rules:'rules',reports:'reports',analysis:'analysis',data:'data',settings:'settings',audit:'audit'};
+    const permission={dashboard:'dashboard',assets:'assets',devices:'devices',vulnerabilities:'vulnerabilities',tags:'tags',sensors:'sensors',alerts:'alerts',nba:'alerts',incidents:'incidents',rules:'rules',reports:'reports',analysis:'analysis',data:'data',settings:'settings',audit:'audit'};
     const owners=due.filter(d=>(DOMAIN_PATHS[d]||[]).includes(path));
     return owners.some(d=>d==='data'&&path==='/sensors'?canView('data'):canView(permission[d]||d));
   });
@@ -71,14 +71,17 @@ async function refreshDomains(domains,force=false){
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
   if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');
   if(ok('/incidents'))incidents=list('/incidents');if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
+  if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');
+  if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object')behaviorOverview=results['/behavior-overview'].value;
   if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-observations?limit=1000'))smbObservations=list('/smb-observations?limit=1000');if(ok('/reports'))reports=list('/reports');
   if(ok('/rules'))rules=list('/rules').map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Field:x.Field||x.field,Value:x.Value||x.value}));
   if(ok('/baseline'))baselines=list('/baseline');if(ok('/analysis/jobs'))analysisJobs=list('/analysis/jobs');if(ok('/data/backups'))backups=list('/data/backups');if(ok('/reconnaissance/jobs'))reconnaissanceJobs=list('/reconnaissance/jobs');
   if(ok('/settings')&&typeof results['/settings'].value==='object')settings=results['/settings'].value;if(ok('/dashboard/trends')&&typeof results['/dashboard/trends'].value==='object')trends=results['/dashboard/trends'].value;if(ok('/audit'))audit=list('/audit');
-  try{if(topologyActive&&topo.status==='fulfilled')renderTopology()}catch(e){console.error('render topology',e)}
+  try{if(topologyActive&&topo.status==='fulfilled'){if(topologyColourMode==='behavior')topologyNodeSigCache.clear();renderTopology()}}catch(e){console.error('render topology',e)}
   if(due.includes('assets')){try{renderAssets()}catch(e){console.error(e)}}if(due.includes('devices'))try{renderDevices()}catch(e){console.error(e)}if(due.includes('vulnerabilities'))try{renderVulnerabilities()}catch(e){console.error(e)}
   if(due.includes('tags'))try{renderTags()}catch(e){console.error(e)}if(due.includes('sensors'))try{renderSensors()}catch(e){console.error(e)}if(due.includes('alerts')){try{renderAlerts();renderDNS();renderSMB()}catch(e){console.error(e)}}
   if(due.includes('incidents')){try{renderCorrelationRules();renderIncidents()}catch(e){console.error(e)}}if(due.includes('reports'))try{renderReports()}catch(e){console.error(e)}if(due.includes('rules'))try{renderRules()}catch(e){console.error(e)}
+  if(due.includes('nba'))try{renderBehaviorFindings()}catch(e){console.error(e)}
   if(due.includes('analysis'))try{renderAnalysis()}catch(e){console.error(e)}if(due.includes('data'))try{renderBackups()}catch(e){console.error(e)}if(due.includes('settings'))try{renderSettings()}catch(e){console.error(e)}if(due.includes('audit'))try{renderAudit()}catch(e){console.error(e)}
   if(due.includes('dashboard')){try{renderBaseline();renderDashboard()}catch(e){console.error(e)}}
   if(due.includes('settings')&&can('users_roles_manage'))try{await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
@@ -136,7 +139,7 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
+const TAB_LABELS={dashboard:'Dashboard',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',nba:'Behavior Findings',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server
@@ -146,7 +149,7 @@ const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete
 // service password change, Users, Roles) — it's gated by the same
 // permission as Settings rather than a separate one, since splitting the
 // page into two tabs didn't change who's supposed to see it.
-const TAB_PERMISSION_ALIAS={health:'sensors',users:'settings',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts'};
+const TAB_PERMISSION_ALIAS={health:'sensors',users:'settings',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts'};
 function applyNavFiltering(){
   document.querySelectorAll('.tab').forEach(btn=>{
     const tab=btn.dataset.tab;
