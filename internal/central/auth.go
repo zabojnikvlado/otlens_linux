@@ -482,6 +482,10 @@ func (s *Server) updateUser(c *gin.Context) {
 		return
 	}
 	if err := s.Repo.UpdateUser(c, id, req.RoleID, req.DisplayName, req.Enabled, req.PasswordValidityDays); err != nil {
+		if errors.Is(err, ErrProtectedUserMutation) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}
@@ -497,7 +501,16 @@ func (s *Server) updateUser(c *gin.Context) {
 
 func (s *Server) deleteUser(c *gin.Context) {
 	id := c.Param("id")
-	if id == bootstrapAdminUserID {
+	target, err := s.Repo.GetUser(c, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		respondInternalError(c, err)
+		return
+	}
+	if target.Protected {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "built-in administrator account cannot be deleted"})
 		return
 	}
@@ -505,7 +518,6 @@ func (s *Server) deleteUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete your own account while logged in as it"})
 		return
 	}
-	target, _ := s.Repo.GetUser(c, id)
 	_ = s.Repo.DeleteSessionsForUser(c, id)
 	if err := s.Repo.DeleteUser(c, id); err != nil {
 		if errors.Is(err, ErrProtectedUser) {
@@ -515,10 +527,7 @@ func (s *Server) deleteUser(c *gin.Context) {
 		respondInternalError(c, err)
 		return
 	}
-	label := id
-	if target != nil {
-		label = target.Username
-	}
+	label := target.Username
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("user deleted: %s", label), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

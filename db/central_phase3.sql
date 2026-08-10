@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS users (
  role_id TEXT NOT NULL REFERENCES roles(id),
  display_name TEXT NOT NULL DEFAULT '',
  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ protected BOOLEAN NOT NULL DEFAULT FALSE,
  must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
  password_expires_at TIMESTAMPTZ,
  password_validity_days INTEGER,
@@ -178,6 +179,47 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE OR REPLACE FUNCTION otlens_guard_auth_defaults_delete()
+RETURNS trigger AS $$
+BEGIN
+ IF TG_TABLE_NAME = 'roles' AND OLD.id IN ('admin','analyst','view') THEN
+  RAISE EXCEPTION 'OTLens built-in role % cannot be deleted', OLD.id USING ERRCODE = '55000';
+ END IF;
+ IF TG_TABLE_NAME = 'users' AND OLD.protected THEN
+  RAISE EXCEPTION 'OTLens protected administrator account cannot be deleted' USING ERRCODE = '55000';
+ END IF;
+ RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS otlens_guard_builtin_roles_delete ON roles;
+CREATE TRIGGER otlens_guard_builtin_roles_delete
+BEFORE DELETE ON roles
+FOR EACH ROW EXECUTE FUNCTION otlens_guard_auth_defaults_delete();
+
+DROP TRIGGER IF EXISTS otlens_guard_protected_users_delete ON users;
+CREATE TRIGGER otlens_guard_protected_users_delete
+BEFORE DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION otlens_guard_auth_defaults_delete();
+
+CREATE OR REPLACE FUNCTION otlens_guard_auth_defaults_truncate()
+RETURNS trigger AS $$
+BEGIN
+ RAISE EXCEPTION 'OTLens roles/users tables are protected from TRUNCATE' USING ERRCODE = '55000';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS otlens_guard_roles_truncate ON roles;
+CREATE TRIGGER otlens_guard_roles_truncate
+BEFORE TRUNCATE ON roles
+FOR EACH STATEMENT EXECUTE FUNCTION otlens_guard_auth_defaults_truncate();
+
+DROP TRIGGER IF EXISTS otlens_guard_users_truncate ON users;
+CREATE TRIGGER otlens_guard_users_truncate
+BEFORE TRUNCATE ON users
+FOR EACH STATEMENT EXECUTE FUNCTION otlens_guard_auth_defaults_truncate();
 
 -- Sensors prune flows that have gone quiet for a while (see
 -- internal/flow/engine.go's Prune) to bound their own SQLite growth —

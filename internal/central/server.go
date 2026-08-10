@@ -2764,20 +2764,12 @@ func (s *Server) resetData(c *gin.Context) {
 				queued++
 			}
 		}
-		if err := s.Repo.ResetCentral(c, op); err != nil {
-			respondInternalError(c, err)
-			return
-		}
-		// Authentication defaults are invariants, not disposable data. Repair
-		// them immediately after every Central reset so the built-in roles and
-		// protected administrator remain available even if a future reset gains
-		// broader TRUNCATE/CASCADE coverage. Existing admin passwords are kept.
-		if err := s.Repo.EnsureAuthBootstrap(c, s.BootstrapUsername, s.BootstrapPasswordHash); err != nil {
+		if err := s.Repo.ResetCentral(c, op, s.BootstrapUsername, s.BootstrapPasswordHash); err != nil {
 			respondInternalError(c, err)
 			return
 		}
 		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: central/%s", op), "")
-		c.JSON(202, gin.H{"status": "reset_queued", "scope": "central", "operation": op, "sensors": queued})
+		c.JSON(202, gin.H{"status": "reset_queued", "scope": "central", "operation": op, "sensors": queued, "auth_defaults_preserved": true})
 	case "sensors":
 		if len(req.SensorIDs) == 0 {
 			c.JSON(400, gin.H{"error": "sensor_ids are required"})

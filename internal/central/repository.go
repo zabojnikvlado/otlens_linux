@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS users (
  role_id TEXT NOT NULL REFERENCES roles(id),
  display_name TEXT NOT NULL DEFAULT '',
  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ protected BOOLEAN NOT NULL DEFAULT FALSE,
  must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
  password_expires_at TIMESTAMPTZ,
  password_validity_days INTEGER,
@@ -319,6 +320,51 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_validity_days INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Built-in authorization rows are control-plane invariants, not resettable
+-- application data.  Guard them at the database layer as well as in the API:
+-- this prevents an accidental DELETE or a future TRUNCATE ... CASCADE from
+-- silently removing the last administrator or the canonical built-in roles.
+CREATE OR REPLACE FUNCTION otlens_guard_auth_defaults_delete()
+RETURNS trigger AS $$
+BEGIN
+ IF TG_TABLE_NAME = 'roles' AND OLD.id IN ('admin','analyst','view') THEN
+  RAISE EXCEPTION 'OTLens built-in role % cannot be deleted', OLD.id USING ERRCODE = '55000';
+ END IF;
+ IF TG_TABLE_NAME = 'users' AND OLD.protected THEN
+  RAISE EXCEPTION 'OTLens protected administrator account cannot be deleted' USING ERRCODE = '55000';
+ END IF;
+ RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS otlens_guard_builtin_roles_delete ON roles;
+CREATE TRIGGER otlens_guard_builtin_roles_delete
+BEFORE DELETE ON roles
+FOR EACH ROW EXECUTE FUNCTION otlens_guard_auth_defaults_delete();
+
+DROP TRIGGER IF EXISTS otlens_guard_protected_users_delete ON users;
+CREATE TRIGGER otlens_guard_protected_users_delete
+BEFORE DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION otlens_guard_auth_defaults_delete();
+
+CREATE OR REPLACE FUNCTION otlens_guard_auth_defaults_truncate()
+RETURNS trigger AS $$
+BEGIN
+ RAISE EXCEPTION 'OTLens roles/users tables are protected from TRUNCATE' USING ERRCODE = '55000';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS otlens_guard_roles_truncate ON roles;
+CREATE TRIGGER otlens_guard_roles_truncate
+BEFORE TRUNCATE ON roles
+FOR EACH STATEMENT EXECUTE FUNCTION otlens_guard_auth_defaults_truncate();
+
+DROP TRIGGER IF EXISTS otlens_guard_users_truncate ON users;
+CREATE TRIGGER otlens_guard_users_truncate
+BEFORE TRUNCATE ON users
+FOR EACH STATEMENT EXECUTE FUNCTION otlens_guard_auth_defaults_truncate();
 
 -- Sensors prune flows that have gone quiet for a while (see
 -- internal/flow/engine.go's Prune) to bound their own SQLite growth —
@@ -658,6 +704,10 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
 	if _, err := db.Exec(`ALTER TABLE sensors ADD COLUMN IF NOT EXISTS auth_token_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE sensors ADD COLUMN IF NOT EXISTS auth_token_rotated_at TIMESTAMPTZ; INSERT INTO schema_migrations(version,name) VALUES(7,'per-sensor authentication tokens and live RBAC') ON CONFLICT(version) DO NOTHING`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply sensor authentication migration: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version,name) VALUES(8,'protected authentication defaults across Central resets') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("record protected authentication defaults migration: %w", err)
 	}
 	return &Repository{db: db}, nil
 }
@@ -1397,7 +1447,7 @@ type BackupRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
+func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsername, bootstrapPasswordHash string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1430,7 +1480,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 	case "rules":
 		// Central rule assignments are configuration. This explicit reset is
 		// intentionally separate from telemetry/database reset.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets CASCADE`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets`)
 	case "factory":
 		// Preserve the sensor registry and sensor_commands long enough for
 		// connected sensors to receive sensor.factory.reset. Deleting those
@@ -1438,12 +1488,25 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// the sensor immediately uploaded all old telemetry again. Authentication
 		// state (roles, users and sessions) is configuration/control-plane data
 		// and is deliberately never part of a Central data reset.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
+		//
+		// Do not use CASCADE here. Every FK-dependent table that belongs to the
+		// reset is named explicitly. CASCADE makes the blast radius depend on the
+		// live database schema and can unexpectedly truncate newly-added
+		// control-plane tables in a future migration.
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}
 	if err != nil {
 		return err
+	}
+
+	// Authentication defaults are part of the reset transaction itself. If a
+	// future schema change or an unexpected FK relationship ever removes one of
+	// these rows, recreation/verification must succeed before the reset can
+	// commit. Otherwise the whole destructive operation is rolled back.
+	if err := ensureAuthBootstrap(ctx, tx, bootstrapUsername, bootstrapPasswordHash); err != nil {
+		return fmt.Errorf("preserve authentication defaults: %w", err)
 	}
 	return tx.Commit()
 }

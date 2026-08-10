@@ -22,15 +22,19 @@ function openUserModal(user){
   populateRoleSelect();
   const passwordLabel=document.getElementById('user-form-password-label');
   const forceRow=document.getElementById('user-form-force-change-row');
+  const roleSelect=document.getElementById('user-form-role');
+  const enabledToggle=document.getElementById('user-form-enabled');
+  roleSelect.disabled=false;enabledToggle.disabled=false;
   if(user){
     document.getElementById('user-modal-title').textContent='Edit user';
     document.getElementById('user-form-id').value=user.ID;
     document.getElementById('user-form-username').value=user.Username;
     document.getElementById('user-form-username').disabled=true;
     document.getElementById('user-form-display-name').value=user.DisplayName||'';
-    document.getElementById('user-form-role').value=user.RoleID;
+    roleSelect.value=user.RoleID;
     document.getElementById('user-form-validity').value=user.PasswordValidityDays||'';
-    document.getElementById('user-form-enabled').checked=user.Enabled;
+    enabledToggle.checked=user.Enabled;
+    if(user.Protected===true){roleSelect.value='admin';roleSelect.disabled=true;enabledToggle.checked=true;enabledToggle.disabled=true;}
     passwordLabel.hidden=true;forceRow.hidden=true;
     document.getElementById('user-form-password').required=false;
   }else{
