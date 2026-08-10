@@ -102,7 +102,7 @@
   }
 
   function initializeTable(table){
-    if(!table.id||states.has(table.id))return;
+    if(!table.id||states.has(table.id)||table.dataset.serverPaged==='true')return;
     const state=loadState(table.id);
     const headers=[...table.querySelectorAll('thead th')];
     headers.forEach((header,index)=>{

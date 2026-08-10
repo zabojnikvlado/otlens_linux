@@ -8,12 +8,35 @@ document.getElementById('correlation-rule-close').onclick=()=>document.getElemen
 document.getElementById('correlation-rule-form').onsubmit=async e=>{e.preventDefault();const body={Name:document.getElementById('cr-name').value.trim(),Description:document.getElementById('cr-description').value.trim(),Enabled:document.getElementById('cr-enabled').checked,WindowMinutes:Number(document.getElementById('cr-window').value),MinEvents:Number(document.getElementById('cr-min-events').value),RequiredTypes:splitCSV(document.getElementById('cr-required').value),SequenceTypes:splitCSV(document.getElementById('cr-sequence').value),Severity:document.getElementById('cr-severity').value,ScoreWeight:Number(document.getElementById('cr-score').value),ConfidenceWeight:Number(document.getElementById('cr-confidence').value),MITRETactics:splitCSV(document.getElementById('cr-tactics').value),MITRETechniques:splitCSV(document.getElementById('cr-techniques').value)};try{await api('/correlation-rules',{method:'POST',body:JSON.stringify(body)});document.getElementById('correlation-rule-modal').hidden=true;correlationRules=await api('/correlation-rules');renderCorrelationRules();await refreshAll()}catch(err){alert('Correlation rule save failed: '+err.message)}};
 document.querySelector('#table-correlation-rules tbody').onclick=async e=>{const b=e.target.closest('.cr-delete');if(!b)return;const r=correlationRules[Number(b.dataset.index)];if(!r||!confirm(`Delete ${r.Name}?`))return;try{await api(`/correlation-rules/${r.ID}`,{method:'DELETE'});correlationRules=await api('/correlation-rules');renderCorrelationRules()}catch(err){alert('Delete failed: '+err.message)}};
 
+const incidentSearchState={offset:0,limit:100,total:0,loading:false};
+let incidentQueryTimer=null;
+async function refreshIncidentSearch(reset=false){
+  if(reset)incidentSearchState.offset=0;
+  if(incidentSearchState.loading)return;
+  incidentSearchState.loading=true;
+  let retry=false;
+  const count=document.getElementById('incidents-count');if(count)count.textContent='Loading incidents…';
+  try{
+    const params=new URLSearchParams();
+    const status=document.getElementById('incidents-status-filter')?.value||'all';
+    const min=document.getElementById('incidents-risk-filter')?.value||'0';
+    const q=document.getElementById('incidents-query')?.value.trim()||'';
+    params.set('status',status);params.set('min_score',min);params.set('limit',String(incidentSearchState.limit));params.set('offset',String(incidentSearchState.offset));if(q)params.set('q',q);
+    const out=await api('/incidents/search?'+params.toString());
+    incidents=Array.isArray(out?.items)?out.items:[];
+    incidentSearchState.total=Number(out?.total||0);
+    if(incidentSearchState.offset>=incidentSearchState.total&&incidentSearchState.total>0){incidentSearchState.offset=Math.max(0,Math.floor((incidentSearchState.total-1)/incidentSearchState.limit)*incidentSearchState.limit);retry=true}else renderIncidents();
+  }catch(e){console.error('incident search',e);incidents=[];incidentSearchState.total=0;renderIncidents();if(count)count.textContent='Incident load failed'}
+  finally{incidentSearchState.loading=false}
+  if(retry)return refreshIncidentSearch(false);
+}
 function renderIncidents(){
   const tbody=document.querySelector('#table-incidents tbody');if(!tbody)return;
-  const status=document.getElementById('incidents-status-filter')?.value||'all',min=Number(document.getElementById('incidents-risk-filter')?.value||0);
-  const rows=(incidents||[]).filter(x=>(status==='all'||x.Status===status)&&Number(x.Score||0)>=min);
-  document.getElementById('incidents-count').textContent=`${rows.length} incidents`;
-  tbody.innerHTML=rows.map(inc=>{const i=incidents.indexOf(inc);return `<tr class="incident-row" data-index="${i}"><td><span class="risk-score risk-${esc(String(inc.Severity||'low'))}">${esc(inc.Score||0)}</span></td><td><span class="incident-state state-${esc(inc.Status||'new')}">${esc(inc.Status||'new')}</span></td><td>${esc(inc.SensorID)}</td><td>${esc(inc.IP)}</td><td><span class="severity ${esc(inc.Severity)}">${esc(inc.Severity)}</span></td><td>${esc(inc.Title||'Correlated activity')}<small>${esc(inc.RuleName||'')}</small></td><td>${esc(inc.AlertCount||0)}</td><td>${esc(inc.Confidence||0)}%</td><td>${esc(inc.Owner||'Unassigned')}</td><td>${time(inc.UpdatedAt||inc.LastSeen)}</td></tr>`}).join('');
+  const rows=incidents||[],total=incidentSearchState.total,start=total?incidentSearchState.offset+1:0,end=Math.min(incidentSearchState.offset+rows.length,total);
+  document.getElementById('incidents-count').textContent=total?`${start}–${end} of ${total} incidents`:'0 incidents';
+  const prev=document.getElementById('incidents-prev'),next=document.getElementById('incidents-next');if(prev)prev.disabled=incidentSearchState.offset<=0||incidentSearchState.loading;if(next)next.disabled=incidentSearchState.offset+incidentSearchState.limit>=total||incidentSearchState.loading;
+  const pageSize=document.getElementById('incidents-page-size');if(pageSize)pageSize.value=String(incidentSearchState.limit);
+  tbody.innerHTML=rows.map((inc,i)=>`<tr class="incident-row" data-index="${i}"><td><span class="risk-score risk-${esc(String(inc.Severity||'low'))}">${esc(inc.Score||0)}</span></td><td><span class="incident-state state-${esc(inc.Status||'new')}">${esc(inc.Status||'new')}</span></td><td>${esc(inc.SensorID)}</td><td>${esc(inc.IP)}</td><td><span class="severity ${esc(inc.Severity)}">${esc(inc.Severity)}</span></td><td>${esc(inc.Title||'Correlated activity')}<small>${esc(inc.RuleName||'')}</small></td><td>${esc(inc.AlertCount||0)}</td><td>${esc(inc.Confidence||0)}%</td><td>${esc(inc.Owner||'Unassigned')}</td><td>${time(inc.UpdatedAt||inc.LastSeen)}</td></tr>`).join('')||'<tr><td colspan="10">No incidents match the current filters.</td></tr>';
 }
 async function openIncident(index){
   const inc=incidents[index];if(!inc)return;activeIncidentID=inc.ID;
@@ -28,7 +51,11 @@ async function openIncident(index){
   document.getElementById('incident-modal').hidden=false;startIncidentPresence(inc.ID);
 }
 document.querySelector('#table-incidents tbody').onclick=e=>{const r=e.target.closest('.incident-row');if(r)openIncident(Number(r.dataset.index))};
-document.getElementById('incidents-status-filter').onchange=renderIncidents;document.getElementById('incidents-risk-filter').onchange=renderIncidents;
+document.getElementById('incidents-status-filter').onchange=()=>refreshIncidentSearch(true);document.getElementById('incidents-risk-filter').onchange=()=>refreshIncidentSearch(true);
+document.getElementById('incidents-page-size').onchange=e=>{incidentSearchState.limit=Number(e.target.value)||100;refreshIncidentSearch(true)};
+document.getElementById('incidents-prev').onclick=()=>{incidentSearchState.offset=Math.max(0,incidentSearchState.offset-incidentSearchState.limit);refreshIncidentSearch(false)};
+document.getElementById('incidents-next').onclick=()=>{if(incidentSearchState.offset+incidentSearchState.limit<incidentSearchState.total){incidentSearchState.offset+=incidentSearchState.limit;refreshIncidentSearch(false)}};
+document.getElementById('incidents-query').oninput=()=>{clearTimeout(incidentQueryTimer);incidentQueryTimer=setTimeout(()=>refreshIncidentSearch(true),250)};
 document.getElementById('incident-modal-close').onclick=()=>{document.getElementById('incident-modal').hidden=true;stopIncidentPresence()};
 function jsonList(v){if(Array.isArray(v))return v;try{return JSON.parse(v||'[]')}catch(_){return[]}}
 function threatForDNS(d){const q=String(d.query_name||'').toLowerCase();return alerts.some(a=>['malicious_domain','c2_correlated'].includes(String(a.Type))&&(String(a.Message||'').toLowerCase().includes(q)||a.IP===d.client_ip))}
@@ -63,7 +90,7 @@ function renderReports(){
   document.getElementById('reports-generate').hidden=!can('data_management');
 }
 document.querySelector('#table-reports tbody').addEventListener('click',async e=>{
-  const pdf=e.target.closest('.report-pdf');if(pdf){e.stopPropagation();window.location=`/v1/reports/${encodeURIComponent(pdf.dataset.id)}/pdf`;return}
+  const pdf=e.target.closest('.report-pdf');if(pdf){e.stopPropagation();pdf.disabled=true;try{const id=encodeURIComponent(pdf.dataset.id),res=await fetch(`/v1/reports/${id}/pdf`,{credentials:'same-origin'});if(!res.ok){let detail=`HTTP ${res.status}`;try{const body=await res.json();detail=body.detail||body.error||detail}catch(_){ }alert(`PDF export failed: ${detail}`);return}const blob=await res.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`${pdf.dataset.id}.pdf`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(err){alert(`PDF export failed: ${err.message}`)}finally{pdf.disabled=false}return}
   const del=e.target.closest('.report-delete');if(del){e.stopPropagation();if(!confirm('Delete this report permanently?'))return;const id=del.dataset.id,row=del.closest('tr');del.disabled=true;if(row)row.classList.add('is-deleting');try{await api(`/reports/${encodeURIComponent(id)}`,{method:'DELETE'});reports=reports.filter(r=>String(r.ID)!==String(id));renderReports();setTimeout(async()=>{try{reports=await api('/reports');renderReports()}catch(err){console.warn('report list refresh',err)}},250)}catch(err){if(row)row.classList.remove('is-deleting');del.disabled=false;alert(`Failed to delete report: ${err.message}`)}return}
   const row=e.target.closest('.report-row');if(!row)return;
   try{
@@ -80,7 +107,7 @@ document.getElementById('reports-generate').onclick=async()=>{
   finally{btn.disabled=false}
 };
 document.querySelector('#table-alerts tbody').onchange=e=>{const c=e.target.closest('.alert-select');if(!c)return;c.checked?selectedAlerts.add(c.dataset.key):selectedAlerts.delete(c.dataset.key);updateAlertBulkBar()};
-document.getElementById('alerts-all').onchange=e=>{for(const a of alerts.filter(a=>(a.Status||'new')==='new')){const key=`${a.SensorID}::${a.ID}`;e.target.checked?selectedAlerts.add(key):selectedAlerts.delete(key)}renderAlerts()};
+document.getElementById('alerts-all').onchange=e=>{for(const a of alertTableRows.filter(a=>(a.Status||'new')==='new')){const key=`${a.SensorID}::${a.ID}`;e.target.checked?selectedAlerts.add(key):selectedAlerts.delete(key)}renderAlerts()};
 async function runAlertBulkAction(action){const grouped=new Map();for(const key of selectedAlerts){const split=key.indexOf('::'),sensor=key.slice(0,split),id=key.slice(split+2);if(!grouped.has(sensor))grouped.set(sensor,[]);grouped.get(sensor).push(id)}if(!grouped.size)return;const label=action==='approve'?'approve and remember':'confirm';if(!confirm(`Really ${label} ${selectedAlerts.size} selected alert(s)?`))return;await Promise.all([...grouped].map(([sensor,targets])=>api(`/sensors/${encodeURIComponent(sensor)}/alerts/actions`,{method:'POST',body:JSON.stringify({action,targets})})));selectedAlerts.clear();updateAlertBulkBar();setTimeout(refreshAll,1000)}
 document.getElementById('alerts-approve').onclick=()=>runAlertBulkAction('approve');
 document.getElementById('alerts-confirm').onclick=()=>runAlertBulkAction('confirm');

@@ -538,9 +538,9 @@ CREATE TABLE IF NOT EXISTS topology_nodes (
 -- (which is a single JSONB array per sensor, wholesale-overwritten on every
 -- sync — no per-alert timestamp to prune by). Upserted from that JSONB on
 -- every PutTelemetry, same pattern as topology_edges/topology_nodes. This is
--- what database_retention.alerts_days actually prunes; it does not replace
--- the live Alerts tab, which still reads the current sensor_telemetry.alerts
--- snapshot.
+-- what database_retention.alerts_days actually prunes and what the Alerts
+-- investigation UI searches/paginates directly. sensor_telemetry.alerts remains
+-- only the latest sensor-side delta/snapshot transport.
 CREATE TABLE IF NOT EXISTS alert_history (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  alert_key TEXT NOT NULL,
@@ -558,6 +558,9 @@ CREATE TABLE IF NOT EXISTS alert_history (
  PRIMARY KEY (sensor_id, alert_key)
 );
 CREATE INDEX IF NOT EXISTS idx_alert_history_last_seen ON alert_history(last_seen);
+CREATE INDEX IF NOT EXISTS idx_alert_history_status_last_seen ON alert_history(status,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_history_severity_last_seen ON alert_history(severity,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_history_sensor_last_seen ON alert_history(sensor_id,last_seen DESC);
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS count BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
 

@@ -70,7 +70,7 @@ renderAssets=function(...args){const result=originalRenderAssets.apply(this,args
 
 document.querySelector('#table-alerts thead tr')?.insertAdjacentHTML('beforeend','<th>Behavior</th>');
 const originalRenderAlerts=renderAlerts;
-renderAlerts=function(...args){const result=originalRenderAlerts.apply(this,args);document.querySelectorAll('#table-alerts tbody tr.alert-row').forEach(row=>{const alert=alerts[Number(row.dataset.index)];row.insertAdjacentHTML('beforeend',`<td>${behaviorBadge(behaviorProfile(alert?.SensorID,alert?.IP))}</td>`)});return result};
+renderAlerts=function(...args){const result=originalRenderAlerts.apply(this,args);document.querySelectorAll('#table-alerts tbody tr.alert-row').forEach(row=>{const alert=alertTableRows[Number(row.dataset.index)];row.insertAdjacentHTML('beforeend',`<td>${behaviorBadge(behaviorProfile(alert?.SensorID,alert?.IP))}</td>`)});return result};
 
 const behaviorTab=document.createElement('button');behaviorTab.dataset.assetPanel='behavior';behaviorTab.textContent='Behavior';document.querySelector('.asset-detail-tabs [data-asset-panel="timeline"]')?.before(behaviorTab);
 const originalRenderAssetPanel=renderAssetPanel;

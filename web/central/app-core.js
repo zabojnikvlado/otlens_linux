@@ -13,12 +13,12 @@ const connectionState={api:'unknown',apiText:'',live:'idle',liveSince:0,lastEven
 const DOMAIN_TTL_MS=15000;
 const domainLoadedAt=new Map(),pendingLoads=new Map();
 const DOMAIN_PATHS={
-  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/incidents','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry','/behavior-overview'],
+  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry','/behavior-overview'],
   assets:['/assets','/asset-security-status','/asset-risk','/behavior-overview'],devices:['/devices'],
   vulnerabilities:['/vulnerabilities'],tags:['/tags','/tags/changes','/tags/events','/sensors'],
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/alerts/stats','/dns-observations?limit=1000','/smb-observations?limit=1000','/behavior-overview'],
   nba:['/behavior-findings'],
-  incidents:['/incidents','/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
+  incidents:['/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],users:[],settings:['/settings'],audit:['/audit'],
   topology:['/udp-conversations?active=true','/behavior-overview'],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
 };

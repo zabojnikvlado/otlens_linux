@@ -3,6 +3,8 @@ package central
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -190,12 +192,122 @@ func (r *Repository) GetAlertHistoryStats(ctx context.Context) (AlertHistoryStat
 	return out, err
 }
 
-// ListAlertHistory returns the most recently active alerts, newest
-// first. limit is generous (default/max 2000) since this backs the main
-// Alerts tab rather than a paged report — but deliberately still capped,
-// since a sensor that's accumulated tens of thousands of distinct
-// findings shouldn't turn a routine page load into a multi-megabyte
-// response every poll.
+// AlertHistoryQuery describes a server-side Alerts-tab query. It deliberately
+// keeps paging/filtering in PostgreSQL so operators can inspect every retained
+// alert without making the browser download the entire alert_history table.
+type AlertHistoryQuery struct {
+	Search   string
+	SensorID string
+	Status   string
+	Severity string
+	From     *time.Time
+	To       *time.Time
+	Limit    int
+	Offset   int
+	Oldest   bool
+}
+
+// AlertHistoryPage is the paged response returned by GET /v1/alerts/search.
+type AlertHistoryPage struct {
+	Items  []AlertHistoryEntry `json:"items"`
+	Total  int64               `json:"total"`
+	Limit  int                 `json:"limit"`
+	Offset int                 `json:"offset"`
+}
+
+// SearchAlertHistory searches the complete retained alert_history table.
+// Unlike ListAlertHistory, this is intended for interactive investigation and
+// therefore supports paging through every matching row.
+func (r *Repository) SearchAlertHistory(ctx context.Context, q AlertHistoryQuery) (AlertHistoryPage, error) {
+	if q.Limit <= 0 {
+		q.Limit = 100
+	}
+	if q.Limit > 500 {
+		q.Limit = 500
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+
+	where := make([]string, 0, 8)
+	args := make([]interface{}, 0, 10)
+	add := func(value interface{}) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	if value := strings.TrimSpace(q.SensorID); value != "" {
+		where = append(where, "sensor_id="+add(value))
+	}
+	if value := strings.ToLower(strings.TrimSpace(q.Status)); value != "" {
+		where = append(where, "status="+add(value))
+	}
+	if value := strings.ToLower(strings.TrimSpace(q.Severity)); value != "" {
+		where = append(where, "severity="+add(value))
+	}
+	if q.From != nil {
+		where = append(where, "last_seen >= "+add(*q.From))
+	}
+	if q.To != nil {
+		where = append(where, "last_seen < "+add(*q.To))
+	}
+	if value := strings.TrimSpace(q.Search); value != "" {
+		pattern := "%" + value + "%"
+		arg := add(pattern)
+		where = append(where, "(sensor_id ILIKE "+arg+" OR alert_key ILIKE "+arg+" OR type ILIKE "+arg+" OR severity ILIKE "+arg+" OR message ILIKE "+arg+" OR ip ILIKE "+arg+")")
+	}
+
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = " WHERE " + strings.Join(where, " AND ")
+	}
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM alert_history"+whereSQL, args...).Scan(&total); err != nil {
+		return AlertHistoryPage{}, err
+	}
+
+	order := "DESC"
+	if q.Oldest {
+		order = "ASC"
+	}
+	queryArgs := append([]interface{}{}, args...)
+	limitArg := fmt.Sprintf("$%d", len(queryArgs)+1)
+	queryArgs = append(queryArgs, q.Limit)
+	offsetArg := fmt.Sprintf("$%d", len(queryArgs)+1)
+	queryArgs = append(queryArgs, q.Offset)
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
+		FROM alert_history`+whereSQL+`
+		ORDER BY last_seen `+order+`, sensor_id ASC, alert_key ASC
+		LIMIT `+limitArg+` OFFSET `+offsetArg, queryArgs...)
+	if err != nil {
+		return AlertHistoryPage{}, err
+	}
+	defer rows.Close()
+
+	items := make([]AlertHistoryEntry, 0, q.Limit)
+	for rows.Next() {
+		var e AlertHistoryEntry
+		var evidence []byte
+		if err := rows.Scan(&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen, &evidence); err != nil {
+			return AlertHistoryPage{}, err
+		}
+		_ = json.Unmarshal(evidence, &e.Evidence)
+		items = append(items, e)
+	}
+	if err := rows.Err(); err != nil {
+		return AlertHistoryPage{}, err
+	}
+
+	return AlertHistoryPage{Items: items, Total: total, Limit: q.Limit, Offset: q.Offset}, nil
+}
+
+// ListAlertHistory returns a lightweight newest-first snapshot used by
+// dashboard/correlation-adjacent views. The operational Alerts tab uses
+// SearchAlertHistory so it can page through every retained row without a
+// 2,000-alert visibility ceiling.
 func (r *Repository) ListAlertHistory(ctx context.Context, limit int) ([]AlertHistoryEntry, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 2000

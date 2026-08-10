@@ -89,6 +89,15 @@ type Server struct {
 		items map[string]LivePresence
 	}
 
+	// incidentRefresh serializes/debounces expensive correlation+risk refreshes.
+	// Telemetry can arrive every few seconds from multiple sensors; without this
+	// guard each upload could start another full correlation scan concurrently.
+	incidentRefresh struct {
+		mu      sync.Mutex
+		running bool
+		last    time.Time
+	}
+
 	// topoCache holds the last built /topology response keyed by a
 	// fingerprint of every sensor's telemetry sequence number. As long as
 	// no sensor has posted new telemetry, repeated polls (the UI polls
@@ -356,12 +365,14 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
 	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
 	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
+	api.GET("/alerts/search", requireView(ViewAlerts), s.alertSearch)
 	api.GET("/alerts/stats", requireView(ViewAlerts), s.alertStats)
 	api.GET("/live/events", s.liveEvents)
 	api.GET("/live/history", s.liveHistory)
 	api.GET("/live/presence", s.livePresenceList)
 	api.POST("/live/presence", s.livePresenceUpdate)
 	api.GET("/incidents", requireView(ViewAlerts), s.incidents)
+	api.GET("/incidents/search", requireView(ViewAlerts), s.incidentsSearch)
 	api.GET("/incidents/:id", requireView(ViewAlerts), s.incidentDetail)
 	api.PATCH("/incidents/:id", requireAction(ActionAlertConfirmApprove), s.updateIncident)
 	api.POST("/incidents/:id/comments", requireAction(ActionAlertConfirmApprove), s.addIncidentComment)
@@ -483,17 +494,44 @@ func (s *Server) telemetry(c *gin.Context) {
 		}
 	}
 	s.publishLive(LiveEvent{Type: "telemetry.updated", SensorID: x.SensorID, EntityID: x.BatchID, Message: "sensor telemetry updated", Data: gin.H{"sequence": x.Sequence, "new_alerts": len(newAlerts)}})
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if s.Repo.SyncCorrelatedIncidents(ctx) == nil {
-			s.publishLive(LiveEvent{Type: "incidents.changed", SensorID: x.SensorID, Message: "incident correlation refreshed"})
-		}
-		if s.Repo.RecalculateAssetRisk(ctx) == nil {
-			s.publishLive(LiveEvent{Type: "asset-risk.changed", SensorID: x.SensorID, Message: "asset risk recalculated"})
-		}
-	}()
+	s.scheduleIncidentRefresh(x.SensorID)
 	c.JSON(http.StatusOK, management.TelemetryAck{Accepted: true, BatchID: x.BatchID, AcceptedSequence: x.Sequence, StoredAt: time.Now().UTC()})
+}
+
+func (s *Server) scheduleIncidentRefresh(sensorID string) {
+	now := time.Now()
+	s.incidentRefresh.mu.Lock()
+	if s.incidentRefresh.running || (!s.incidentRefresh.last.IsZero() && now.Sub(s.incidentRefresh.last) < 15*time.Second) {
+		s.incidentRefresh.mu.Unlock()
+		return
+	}
+	s.incidentRefresh.running = true
+	s.incidentRefresh.mu.Unlock()
+
+	go func() {
+		defer func() {
+			s.incidentRefresh.mu.Lock()
+			s.incidentRefresh.running = false
+			s.incidentRefresh.last = time.Now()
+			s.incidentRefresh.mu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.Repo.SyncCorrelatedIncidents(ctx); err != nil {
+			log.Printf("incident correlation refresh failed: %v", err)
+		} else {
+			s.publishLive(LiveEvent{Type: "incidents.changed", SensorID: sensorID, Message: "incident correlation refreshed"})
+		}
+		cancel()
+
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.Repo.RecalculateAssetRisk(ctx); err != nil {
+			log.Printf("asset risk refresh failed: %v", err)
+		} else {
+			s.publishLive(LiveEvent{Type: "asset-risk.changed", SensorID: sensorID, Message: "asset risk recalculated"})
+		}
+		cancel()
+	}()
 }
 
 func (s *Server) assets(c *gin.Context) {
@@ -1496,6 +1534,107 @@ func (s *Server) alertStats(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
+func parseAlertQueryTime(value string, endOfDay bool) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, time.Local)
+	if err != nil {
+		return nil, err
+	}
+	if endOfDay {
+		parsed = parsed.Add(24 * time.Hour)
+	}
+	return &parsed, nil
+}
+
+func (s *Server) alertSearch(c *gin.Context) {
+	limit := 100
+	if value := strings.TrimSpace(c.Query("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > 500 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 500"})
+			return
+		}
+		limit = parsed
+	}
+	offset := 0
+	if value := strings.TrimSpace(c.Query("offset")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "offset must be zero or greater"})
+			return
+		}
+		offset = parsed
+	}
+
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	if status == "all" {
+		status = ""
+	}
+	if status != "" && status != "new" && status != "confirmed" && status != "approved" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid alert status"})
+		return
+	}
+
+	severity := strings.ToLower(strings.TrimSpace(c.Query("severity")))
+	if severity == "all" {
+		severity = ""
+	}
+	switch severity {
+	case "", "critical", "high", "medium", "low", "info":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid alert severity"})
+		return
+	}
+
+	from, err := parseAlertQueryTime(c.Query("from"), false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date; use YYYY-MM-DD or RFC3339"})
+		return
+	}
+	to, err := parseAlertQueryTime(c.Query("to"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to date; use YYYY-MM-DD or RFC3339"})
+		return
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "from must be before to"})
+		return
+	}
+
+	page, err := s.Repo.SearchAlertHistory(c, AlertHistoryQuery{
+		Search:   c.Query("q"),
+		SensorID: c.Query("sensor_id"),
+		Status:   status,
+		Severity: severity,
+		From:     from,
+		To:       to,
+		Limit:    limit,
+		Offset:   offset,
+		Oldest:   strings.EqualFold(c.Query("sort"), "oldest"),
+	})
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+
+	items := make([]gin.H, 0, len(page.Items))
+	for _, e := range page.Items {
+		items = append(items, gin.H{
+			"SensorID": e.SensorID, "ID": e.AlertKey, "AlertKey": e.AlertKey, "Type": e.Type, "Severity": e.Severity,
+			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count,
+			"ApprovedBy": e.ApprovedBy, "ApprovedAt": e.ApprovedAt, "FirstSeen": e.FirstSeen, "LastSeen": e.LastSeen,
+			"Evidence": e.Evidence,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": page.Total, "limit": page.Limit, "offset": page.Offset})
+}
+
 func (s *Server) alerts(c *gin.Context) {
 	entries, err := s.Repo.ListAlertHistory(c, 2000)
 	if err != nil {
@@ -1514,16 +1653,49 @@ func (s *Server) alerts(c *gin.Context) {
 }
 
 func (s *Server) incidents(c *gin.Context) {
-	if err := s.Repo.SyncCorrelatedIncidents(c); err != nil {
-		respondInternalError(c, err)
-		return
-	}
+	// Read-only by design. Correlation is refreshed asynchronously from telemetry
+	// ingestion; a UI GET must never trigger a full alert-history correlation scan.
 	incidents, err := s.Repo.ListManagedIncidents(c)
 	if err != nil {
 		respondInternalError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, incidents)
+}
+
+func (s *Server) incidentsSearch(c *gin.Context) {
+	status := strings.TrimSpace(strings.ToLower(c.Query("status")))
+	if status == "all" {
+		status = ""
+	}
+	if status != "" && status != "new" && status != "investigating" && status != "contained" && status != "resolved" && status != "closed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid incident status"})
+		return
+	}
+	minScore, _ := strconv.Atoi(c.DefaultQuery("min_score", "0"))
+	if minScore < 0 {
+		minScore = 0
+	}
+	if minScore > 100 {
+		minScore = 100
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if offset < 0 {
+		offset = 0
+	}
+	items, total, err := s.Repo.ListManagedIncidentsPage(c, status, strings.TrimSpace(c.Query("q")), minScore, limit, offset)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
 func (s *Server) incidentDetail(c *gin.Context) {
@@ -2132,7 +2304,15 @@ func (s *Server) downloadReportPDF(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "report not found"})
 		return
 	}
-	pdf := reportPDF(rep.HTML, rep.ID)
+	pdf, err := renderStyledReportPDF(c, rep.HTML, rep.ID)
+	if err != nil {
+		log.Printf("report PDF browser rendering failed for %s: %v", rep.ID, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":  "styled PDF renderer unavailable",
+			"detail": err.Error(),
+		})
+		return
+	}
 	filename := strings.ReplaceAll(rep.ID, "\"", "") + ".pdf"
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	c.Data(http.StatusOK, "application/pdf", pdf)

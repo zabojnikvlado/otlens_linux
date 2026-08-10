@@ -39,6 +39,14 @@ PostgreSQL
 
 The sensor never connects directly to PostgreSQL.
 
+## Report PDF rendering
+
+The Reports tab stores a self-contained HTML report and exports the same styled
+layout to PDF through a Chromium-family browser on the Central host. On Windows,
+Microsoft Edge or Google Chrome is discovered automatically. Set
+`OTLENS_CENTRAL_PDF_BROWSER` to an explicit browser executable when Central runs
+in a hardened/non-standard installation path.
+
 ## Recommended network policy
 
 - Sensor -> Central: outbound TCP to Central's Sensor API port (default

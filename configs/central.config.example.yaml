@@ -198,6 +198,10 @@ notifications:
 # email delivery is configured; viewable from the Reports tab either way.
 # Uses notifications.email above for the actual SMTP connection when
 # recipients are set here — there's no separate SMTP config for reports.
+# PDF download renders this exact HTML/CSS through Edge/Chrome/Chromium on
+# the Central host. Override browser discovery with OTLENS_CENTRAL_PDF_BROWSER.
+# Only if Central must run as root on Linux, OTLENS_CENTRAL_PDF_NO_SANDBOX=true
+# disables the browser sandbox for this local, self-contained report render.
 reports:
   enabled: false
   schedule: weekly

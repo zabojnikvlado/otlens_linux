@@ -31,7 +31,9 @@ type Incident struct {
 // incident, but an ARP spoof followed by a new communication pattern
 // followed by lateral movement, all against the same IP within a short
 // window, very plausibly is a single unfolding event worth looking at
-// together rather than as three unrelated rows in the Alerts tab.
+// together rather than as three unrelated rows in the Alerts tab. New
+// (unreviewed) and confirmed alerts participate; approved alerts are an
+// operator verdict that the pattern is expected/benign and are excluded.
 //
 // Uses string_agg (comma-joined text) rather than array_agg/text[] —
 // scanning a native Postgres array back out through database/sql's
@@ -53,7 +55,7 @@ func (r *Repository) ListIncidents(ctx context.Context, window time.Duration, mi
 		       string_agg(DISTINCT severity, ','),
 		       COUNT(*), MIN(first_seen), MAX(last_seen)
 		FROM alert_history
-		WHERE last_seen > NOW() - ($1 * INTERVAL '1 second') AND ip != ''
+		WHERE last_seen > NOW() - ($1 * INTERVAL '1 second') AND ip != '' AND status IN ('new','confirmed')
 		GROUP BY sensor_id, ip
 		HAVING COUNT(DISTINCT type) >= $2
 		ORDER BY MAX(last_seen) DESC`,

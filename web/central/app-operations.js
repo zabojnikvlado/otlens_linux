@@ -70,7 +70,7 @@ async function refreshDomains(domains,force=false){
   if(ok('/vulnerabilities')&&results['/vulnerabilities'].value&&typeof results['/vulnerabilities'].value==='object')vulnerabilities=results['/vulnerabilities'].value.Advisories||[];
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
   if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object')alertStats=results['/alerts/stats'].value;
-  if(ok('/incidents'))incidents=list('/incidents');if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
+  if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
   if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');
   if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object')behaviorOverview=results['/behavior-overview'].value;
   if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-observations?limit=1000'))smbObservations=list('/smb-observations?limit=1000');if(ok('/reports'))reports=list('/reports');
@@ -79,8 +79,8 @@ async function refreshDomains(domains,force=false){
   if(ok('/settings')&&typeof results['/settings'].value==='object')settings=results['/settings'].value;if(ok('/dashboard/trends')&&typeof results['/dashboard/trends'].value==='object')trends=results['/dashboard/trends'].value;if(ok('/audit'))audit=list('/audit');
   try{if(topologyActive&&topo.status==='fulfilled'){if(topologyColourMode==='behavior')topologyNodeSigCache.clear();renderTopology()}}catch(e){console.error('render topology',e)}
   if(due.includes('assets')){try{renderAssets()}catch(e){console.error(e)}}if(due.includes('devices'))try{renderDevices()}catch(e){console.error(e)}if(due.includes('vulnerabilities'))try{renderVulnerabilities()}catch(e){console.error(e)}
-  if(due.includes('tags'))try{renderTags()}catch(e){console.error(e)}if(due.includes('sensors'))try{renderSensors()}catch(e){console.error(e)}if(due.includes('alerts')){try{renderAlerts();renderDNS();renderSMB()}catch(e){console.error(e)}}
-  if(due.includes('incidents')){try{renderCorrelationRules();renderIncidents()}catch(e){console.error(e)}}if(due.includes('reports'))try{renderReports()}catch(e){console.error(e)}if(due.includes('rules'))try{renderRules()}catch(e){console.error(e)}
+  if(due.includes('tags'))try{renderTags()}catch(e){console.error(e)}if(due.includes('sensors'))try{renderSensors()}catch(e){console.error(e)}if(due.includes('alerts')){try{await refreshAlertSearch();renderDNS();renderSMB()}catch(e){console.error(e)}}
+  if(due.includes('incidents')){try{renderCorrelationRules();await refreshIncidentSearch(false)}catch(e){console.error(e)}}if(due.includes('reports'))try{renderReports()}catch(e){console.error(e)}if(due.includes('rules'))try{renderRules()}catch(e){console.error(e)}
   if(due.includes('nba'))try{renderBehaviorFindings()}catch(e){console.error(e)}
   if(due.includes('analysis'))try{renderAnalysis()}catch(e){console.error(e)}if(due.includes('data'))try{renderBackups()}catch(e){console.error(e)}if(due.includes('settings'))try{renderSettings()}catch(e){console.error(e)}if(due.includes('audit'))try{renderAudit()}catch(e){console.error(e)}
   if(due.includes('dashboard')){try{renderBaseline();renderDashboard()}catch(e){console.error(e)}}
