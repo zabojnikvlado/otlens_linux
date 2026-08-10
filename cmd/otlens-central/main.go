@@ -42,6 +42,9 @@ func main() {
 		log.Fatalf("configuration loading failed: %v", err)
 	}
 
+	_, sensorTokenEnvOverride := os.LookupEnv("OTLENS_CENTRAL_AUTH_SENSOR_TOKEN")
+	log.Printf("sensor enrollment authentication configured: env_override=%t", sensorTokenEnvOverride)
+
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		cfg.Database.User,
 		cfg.Database.Password,
@@ -118,6 +121,7 @@ func main() {
 
 	srv := &central.Server{StartedAt: time.Now().UTC(),
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
+		BootstrapUsername: cfg.Auth.BootstrapUsername, BootstrapPasswordHash: bootstrapHash,
 		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
 		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,
 		AnalysisMaxBytes:    cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,

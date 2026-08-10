@@ -40,6 +40,7 @@ type Worker struct {
 	pending         int64
 	analysisMu      sync.Mutex
 	analysisRunning bool
+	registered      bool
 }
 
 func (w *Worker) syncHealth() management.SyncHealth {
@@ -67,9 +68,18 @@ func (w *Worker) markSuccess(sequence int64) {
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	// Registration is retried on every synchronization cycle. This makes the
-	// sensor recover automatically when Central or PostgreSQL was unavailable
-	// during the first startup attempt.
+	// A persisted per-sensor credential means this process has already been
+	// enrolled. On a normal restart use that credential directly instead of
+	// POSTing /register again: registration is an enrollment/recovery operation,
+	// not a liveness signal. If Central later rejects the credential (for
+	// example after its database was rebuilt), the first authenticated 401 marks
+	// the worker unregistered and the next cycle runs the re-enrollment flow.
+	if w.Client.HasSensorCredential() {
+		w.mu.Lock()
+		w.registered = true
+		w.mu.Unlock()
+	}
+
 	ticker := time.NewTicker(w.Client.cfg.Interval)
 	defer ticker.Stop()
 
@@ -84,8 +94,30 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) sync(ctx context.Context) {
+func (w *Worker) ensureRegistered(ctx context.Context) error {
+	w.mu.Lock()
+	registered := w.registered
+	w.mu.Unlock()
+	if registered {
+		return nil
+	}
 	if err := w.Client.Register(ctx); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	w.registered = true
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *Worker) markUnregistered() {
+	w.mu.Lock()
+	w.registered = false
+	w.mu.Unlock()
+}
+
+func (w *Worker) sync(ctx context.Context) {
+	if err := w.ensureRegistered(ctx); err != nil {
 		log.Printf("OTLens Central registration failed: %v", err)
 		return
 	}
@@ -102,6 +134,11 @@ func (w *Worker) sync(ctx context.Context) {
 		return nil
 	})
 	if err != nil {
+		if IsSensorAuthError(err) {
+			w.markUnregistered()
+			log.Printf("OTLens Central sensor credential is no longer accepted; re-enrollment will be attempted: %v", err)
+			return
+		}
 		log.Printf("OTLens Central rule synchronization failed: %v", err)
 	} else if w.ApplyCommand != nil {
 		for _, command := range commands {
@@ -126,6 +163,11 @@ func (w *Worker) sync(ctx context.Context) {
 		h.Capture = w.CaptureInfo()
 	}
 	if err := w.Client.Heartbeat(ctx, h); err != nil {
+		if IsSensorAuthError(err) {
+			w.markUnregistered()
+			log.Printf("OTLens Central sensor credential is no longer accepted; re-enrollment will be attempted: %v", err)
+			return
+		}
 		log.Printf("OTLens Central heartbeat failed: %v", err)
 	}
 
@@ -191,6 +233,11 @@ func (w *Worker) sync(ctx context.Context) {
 				}
 				break
 			}
+			if IsSensorAuthError(uploadErr) {
+				w.markUnregistered()
+				w.markFailure(uploadErr)
+				break
+			}
 			w.markFailure(uploadErr)
 			if attempt < 3 {
 				select {
@@ -201,6 +248,10 @@ func (w *Worker) sync(ctx context.Context) {
 			}
 		}
 		if uploadErr != nil {
+			if IsSensorAuthError(uploadErr) {
+				log.Printf("OTLens Central sensor credential is no longer accepted; re-enrollment will be attempted: %v", uploadErr)
+				return
+			}
 			log.Printf("OTLens telemetry upload failed after retries: %v", uploadErr)
 		}
 	}

@@ -128,7 +128,7 @@ function renderSensors(){sensors=Array.isArray(sensors)?sensors:[];populateRuleS
 async function sensorAction(action){const ids=sensorSelection();if(!ids.length)return;const verb=action==='stop'?'stop capture on':'start capture on';if(!confirm(`${verb} ${ids.length} selected sensor(s)?`))return;const start=document.getElementById('sensors-start'),stop=document.getElementById('sensors-stop');start.disabled=stop.disabled=true;try{await api('/sensors/actions',{method:'POST',body:JSON.stringify({action,sensor_ids:ids})});document.getElementById('sensors-selection-count').textContent=`${action} queued for ${ids.length} sensor(s)`;setTimeout(refreshAll,1200)}catch(err){alert(`Sensor ${action} failed: ${err.message}`)}finally{start.disabled=stop.disabled=false}}
 async function deleteSensors(){
   const ids=sensorSelection();if(!ids.length)return;
-  const confirmation=prompt(`This deletes ${ids.length} sensor(s) and ALL their history (topology, alerts, analysis jobs) permanently. A sensor that's still running will simply reappear (with fresh, empty history) the next time it connects — this does not block it. Type DELETE to continue.`);
+  const confirmation=prompt(`This deletes ${ids.length} sensor(s) and ALL their history (topology, alerts, analysis jobs) permanently. A sensor that's still running will automatically re-enroll. Its local SQLite state is not deleted by this action, so locally persisted assets/alerts can be uploaded again unless the sensor is reset separately. Type DELETE to continue.`);
   if(confirmation!=='DELETE')return;
   const btn=document.getElementById('sensors-delete');btn.disabled=true;
   try{

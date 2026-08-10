@@ -4,7 +4,7 @@ function renderUsers(){
   tbody.innerHTML=users.map(u=>{
     const expired=u.PasswordExpiresAt&&new Date(u.PasswordExpiresAt)<new Date();
     const pwStatus=u.MustChangePassword?'Must change at next login':expired?'Expired — must change at next login':u.PasswordExpiresAt?`Valid until ${time(u.PasswordExpiresAt)}`:'Never expires';
-    return `<tr><td>${esc(u.Username)}</td><td>${esc(u.DisplayName)}</td><td>${esc(roleName(u.RoleID))}</td><td class="${u.Enabled?'state-ok':'state-new'}">${u.Enabled?'enabled':'disabled'}</td><td>${esc(pwStatus)}</td><td>${time(u.LastLoginAt)}</td><td>${can('users_roles_manage')?`<button class="secondary-btn user-edit" data-id="${esc(u.ID)}">Edit</button> <button class="secondary-btn user-reset" data-id="${esc(u.ID)}" data-username="${esc(u.Username)}">Reset password</button> <button class="danger-btn user-delete" data-id="${esc(u.ID)}">Delete</button>`:'—'}</td></tr>`;
+    return `<tr><td>${esc(u.Username)}</td><td>${esc(u.DisplayName)}</td><td>${esc(roleName(u.RoleID))}</td><td class="${u.Enabled?'state-ok':'state-new'}">${u.Enabled?'enabled':'disabled'}</td><td>${esc(pwStatus)}</td><td>${time(u.LastLoginAt)}</td><td>${can('users_roles_manage')?`<button class="secondary-btn user-edit" data-id="${esc(u.ID)}">Edit</button> <button class="secondary-btn user-reset" data-id="${esc(u.ID)}" data-username="${esc(u.Username)}">Reset password</button> ${u.Protected===true?'<span class="pill">protected</span>':`<button class="danger-btn user-delete" data-id="${esc(u.ID)}">Delete</button>`}`:'—'}</td></tr>`;
   }).join('');
 }
 function renderRoles(){

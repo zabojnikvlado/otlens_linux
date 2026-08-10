@@ -47,7 +47,7 @@ async function fetchTopology(){
   return{unchanged:false,value};
 }
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
-async function api(path,opt={}){const isFormData=typeof FormData!=='undefined'&&opt.body instanceof FormData;const h=isFormData?{...(opt.headers||{})}:{'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}if((opt.method||'GET').toUpperCase()!=='GET')domainLoadedAt.clear();return r.status===204||r.status===202?null:r.json()}
+async function api(path,opt={}){const isFormData=typeof FormData!=='undefined'&&opt.body instanceof FormData;const h=isFormData?{...(opt.headers||{})}:{'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}if((opt.method||'GET').toUpperCase()!=='GET')domainLoadedAt.clear();if(r.status===204||r.status===205)return null;const body=await r.text();if(!body.trim())return null;const contentType=(r.headers.get('Content-Type')||'').toLowerCase();if(contentType.includes('application/json'))return JSON.parse(body);try{return JSON.parse(body)}catch(_){return body}}
 function renderConnectionState(){
   const dot=document.getElementById('conn-dot'),text=document.getElementById('conn-text');if(!dot||!text)return;
   let cls='down',label='connecting',title='';
@@ -78,7 +78,7 @@ function liveToast(event){
   if(quiet.has(event.type))return;
   const item=document.createElement('button');item.type='button';item.className='live-toast';
   const sev=String(event.severity||'info').toLowerCase();item.dataset.severity=sev;
-  const title=event.type==='alert.created'?'New alert':event.type==='incident.updated'?'Incident updated':event.type==='incident.comment'?'Incident comment':event.type==='discovery.completed'?'Discovery finished':event.type==='sensor.registered'?'Sensor connected':'Live update';
+  const title=event.type==='alert.created'?'New alert':event.type==='incident.updated'?'Incident updated':event.type==='incident.comment'?'Incident comment':event.type==='discovery.completed'?'Discovery finished':event.type==='sensor.registered'?'Sensor enrolled':'Live update';
   item.innerHTML=`<strong>${esc(title)}</strong><span>${esc(event.message||event.type)}</span><small>${esc(event.sensor_id||event.entity_id||'Central')}</small>`;
   item.onclick=()=>{if(event.type.startsWith('incident'))document.querySelector('[data-tab="incidents"]')?.click();else if(event.type==='alert.created')document.querySelector('[data-tab="alerts"]')?.click();else if(event.type==='discovery.completed')document.querySelector('[data-tab="assets"]')?.click();item.remove()};
   stack.prepend(item);while(stack.children.length>5)stack.lastElementChild.remove();setTimeout(()=>item.remove(),8000);

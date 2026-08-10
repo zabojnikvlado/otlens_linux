@@ -497,6 +497,10 @@ func (s *Server) updateUser(c *gin.Context) {
 
 func (s *Server) deleteUser(c *gin.Context) {
 	id := c.Param("id")
+	if id == bootstrapAdminUserID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "built-in administrator account cannot be deleted"})
+		return
+	}
 	if id == identityFromContext(c).UserID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete your own account while logged in as it"})
 		return
@@ -504,6 +508,10 @@ func (s *Server) deleteUser(c *gin.Context) {
 	target, _ := s.Repo.GetUser(c, id)
 	_ = s.Repo.DeleteSessionsForUser(c, id)
 	if err := s.Repo.DeleteUser(c, id); err != nil {
+		if errors.Is(err, ErrProtectedUser) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "built-in administrator account cannot be deleted"})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}

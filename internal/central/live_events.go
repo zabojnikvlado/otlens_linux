@@ -189,12 +189,23 @@ func (s *Server) liveEvents(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	var after uint64
-	if raw := c.GetHeader("Last-Event-ID"); raw != "" {
-		_, _ = fmt.Sscanf(raw, "%d", &after)
+	lastEventID := strings.TrimSpace(c.GetHeader("Last-Event-ID"))
+	if lastEventID != "" {
+		_, _ = fmt.Sscanf(lastEventID, "%d", &after)
 	}
 	sub, replay := s.liveHub().subscribe(after)
 	permissions := identityFromContext(c).Permissions
-	replay = filterLiveEvents(permissions, replay)
+	// A brand-new browser connection has no Last-Event-ID. Do not replay the
+	// in-memory event buffer in that case: the UI loads /live/history separately
+	// for its notification center, while replaying here produced stale pop-up
+	// toasts such as "Sensor connected" after a page/sensor restart. Replay is
+	// only for a real SSE reconnect, where Last-Event-ID tells us what the browser
+	// actually missed.
+	if lastEventID == "" {
+		replay = nil
+	} else {
+		replay = filterLiveEvents(permissions, replay)
+	}
 	defer s.liveHub().unsubscribe(sub)
 
 	c.Status(http.StatusOK)

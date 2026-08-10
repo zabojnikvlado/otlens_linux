@@ -681,8 +681,8 @@ func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegi
 		site = s.SiteID
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO sensors(id,name,site_id,status,version,hostname,certificate_fingerprint,last_seen)
-VALUES($1,$2,$3,'online',$4,$5,$6,NOW())
-ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,version=EXCLUDED.version,hostname=EXCLUDED.hostname,certificate_fingerprint=EXCLUDED.certificate_fingerprint,last_seen=NOW(),status='online'`, s.ID, s.Name, site, s.Version, s.Hostname, s.CertificateFingerprint)
+VALUES($1,$2,$3,'offline',$4,$5,$6,NOW())
+ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,site_id=EXCLUDED.site_id,version=EXCLUDED.version,hostname=EXCLUDED.hostname,certificate_fingerprint=EXCLUDED.certificate_fingerprint`, s.ID, s.Name, site, s.Version, s.Hostname, s.CertificateFingerprint)
 	if err != nil {
 		return err
 	}
@@ -1008,9 +1008,11 @@ func (r *Repository) MarkOffline(ctx context.Context, olderThan time.Duration) (
 // every sensor-scoped table's foreign key, everything derived from it:
 // telemetry, topology history, alert history, analysis jobs, rule
 // assignments, and pending commands. This is NOT a permanent ban on the
-// sensor id — if that sensor is still running, its very next
-// register()/heartbeat() upsert just recreates the row from scratch
-// (with fresh, empty history), since those are ON CONFLICT DO UPDATE.
+// sensor id — if that sensor is still running, the sensor notices that
+// authenticated synchronization now returns 401, re-enrolls with the
+// configured enrollment token, and register() recreates the row with a fresh
+// per-sensor credential. Local SQLite is deliberately independent: its
+// persisted telemetry may be uploaded again unless the sensor is reset too.
 func (r *Repository) DeleteSensor(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM sensors WHERE id=$1`, id)
 	return err
@@ -1433,7 +1435,9 @@ func (r *Repository) ResetCentral(ctx context.Context, operation string) error {
 		// Preserve the sensor registry and sensor_commands long enough for
 		// connected sensors to receive sensor.factory.reset. Deleting those
 		// rows here made the reset command disappear before the next sync and
-		// the sensor immediately uploaded all old telemetry again.
+		// the sensor immediately uploaded all old telemetry again. Authentication
+		// state (roles, users and sessions) is configuration/control-plane data
+		// and is deliberately never part of a Central data reset.
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY CASCADE`)
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)

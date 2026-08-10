@@ -449,14 +449,12 @@ type CentralConfig struct {
 		// out mid-session, but an idle one expires this long after their
 		// last request.
 		SessionDuration time.Duration `mapstructure:"session_duration"`
-		// BootstrapUsername/BootstrapPassword are used exactly once, the
-		// first time Central starts against a database with no users at
-		// all, to create the initial administrator account. That account
-		// is created with must_change_password set, so the default
-		// password only ever works to log in and immediately set a real
-		// one. Change these before first startup if the default
-		// "administrator"/"administrator" isn't acceptable even for that
-		// brief window.
+		// BootstrapUsername/BootstrapPassword create the protected built-in
+		// administrator when it is missing (first startup, or recovery after
+		// a database reset). Once that account exists, bootstrap never resets
+		// its password; it only guarantees that the account still has the
+		// built-in admin role and is enabled. The initial account requires an
+		// immediate password change. Change these before first startup.
 		BootstrapUsername string `mapstructure:"bootstrap_username"`
 		BootstrapPassword string `mapstructure:"bootstrap_password"`
 	} `mapstructure:"auth"`

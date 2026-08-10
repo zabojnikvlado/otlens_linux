@@ -4,9 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/zabojnikvlado/otlens_linux/internal/detect"
-	"github.com/zabojnikvlado/otlens_linux/internal/management"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zabojnikvlado/otlens_linux/internal/detect"
+	"github.com/zabojnikvlado/otlens_linux/internal/management"
 )
 
 type Config struct {
@@ -27,6 +29,8 @@ type Config struct {
 type Client struct {
 	cfgMu              sync.RWMutex
 	cfg                Config
+	enrollmentToken    string
+	sensorToken        string
 	http               *http.Client
 	rulesVersion       int64
 	threatIntelVersion int64
@@ -37,8 +41,10 @@ func New(cfg Config) *Client {
 		safeID := regexp.MustCompile(`[^A-Za-z0-9_.-]+`).ReplaceAllString(cfg.SensorID, "_")
 		cfg.CredentialFile = filepath.Join(".", ".otlens-sensor-"+safeID+".token")
 	}
-	if token, err := os.ReadFile(cfg.CredentialFile); err == nil && strings.TrimSpace(string(token)) != "" {
-		cfg.Token = strings.TrimSpace(string(token))
+	enrollmentToken := strings.TrimSpace(cfg.Token)
+	sensorToken := ""
+	if token, err := os.ReadFile(cfg.CredentialFile); err == nil {
+		sensorToken = strings.TrimSpace(string(token))
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
@@ -46,7 +52,7 @@ func New(cfg Config) *Client {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 15 * time.Second
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{
+	return &Client{cfg: cfg, enrollmentToken: enrollmentToken, sensorToken: sensorToken, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -57,66 +63,184 @@ func New(cfg Config) *Client {
 	}}}
 }
 
+// HTTPError preserves Central's structured error response so callers can
+// distinguish authentication/enrollment failures from ordinary transport or
+// server errors without parsing a human-readable string.
+type HTTPError struct {
+	Prefix     string
+	Status     string
+	StatusCode int
+	Body       string
+	Code       string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("%s: %s", e.Prefix, e.Status)
+	}
+	return fmt.Sprintf("%s: %s: %s", e.Prefix, e.Status, e.Body)
+}
+
 // syncErr builds an error from a non-2xx response that includes Central's
-// actual response body (typically a JSON {"error":"..."} with the real
-// failure reason), not just the HTTP status line. resp.Status alone tells
-// you *that* something failed, never *why* — which otherwise means the
-// real cause only ever shows up in Central's own logs, not the sensor's,
-// even though the sensor is what's reporting the failure. Capped at 2KB
-// so a misbehaving proxy returning an HTML error page doesn't flood logs.
+// actual response body (typically a JSON {"error":"..."}) and, when
+// present, its stable machine-readable error code. The body is capped at 2KB
+// so a misbehaving proxy returning an HTML error page cannot flood logs.
 func syncErr(prefix string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	msg := strings.TrimSpace(string(body))
-	if msg == "" {
-		return fmt.Errorf("%s: %s", prefix, resp.Status)
+	var payload struct {
+		Code string `json:"code"`
 	}
-	return fmt.Errorf("%s: %s: %s", prefix, resp.Status, msg)
+	if msg != "" {
+		_ = json.Unmarshal(body, &payload)
+	}
+	return &HTTPError{Prefix: prefix, Status: resp.Status, StatusCode: resp.StatusCode, Body: msg, Code: strings.TrimSpace(payload.Code)}
 }
 
-func (c *Client) headers(r *http.Request) {
+// IsSensorAuthError reports whether an authenticated sensor API call was
+// rejected because the bearer credential is no longer valid. Worker uses this
+// to re-enter enrollment only after Central actually loses/revokes the sensor
+// row instead of POSTing /register on every normal synchronization cycle.
+func IsSensorAuthError(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized
+}
+
+func enrollmentRequired(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	if httpErr.Code == "sensor_enrollment_required" {
+		return true
+	}
+	// Backward compatibility with a Central built before machine-readable
+	// enrollment codes were added.
+	return strings.Contains(httpErr.Body, "valid enrollment credential required") || strings.Contains(httpErr.Body, "sensor is not enrolled")
+}
+
+func (c *Client) sensorCredential() string {
 	c.cfgMu.RLock()
-	token, sensorID := c.cfg.Token, c.cfg.SensorID
+	defer c.cfgMu.RUnlock()
+	return c.sensorToken
+}
+
+// HasSensorCredential reports whether the sensor already has a persisted
+// per-sensor credential. A normal process restart should use that credential
+// directly for sync/heartbeat instead of calling /register again. Registration
+// is enrollment/recovery, not a liveness signal.
+func (c *Client) HasSensorCredential() bool {
+	return strings.TrimSpace(c.sensorCredential()) != ""
+}
+
+func (c *Client) headersWithToken(r *http.Request, token string) {
+	c.cfgMu.RLock()
+	sensorID := c.cfg.SensorID
 	c.cfgMu.RUnlock()
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
+	if strings.TrimSpace(token) != "" {
+		r.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
 	}
 	r.Header.Set("X-OTLens-Sensor-ID", sensorID)
 	r.Header.Set("Content-Type", "application/json")
 }
-func (c *Client) Register(ctx context.Context) error {
-	b, _ := json.Marshal(management.SensorRegistration{ID: c.cfg.SensorID, Name: c.cfg.Name, SiteID: c.cfg.SiteID, Version: c.cfg.Version, Hostname: c.cfg.Hostname})
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.BaseURL, "/")+"/v1/sensors/register", strings.NewReader(string(b)))
-	if e != nil {
-		return e
+
+func (c *Client) headers(r *http.Request) {
+	c.headersWithToken(r, c.sensorCredential())
+}
+
+type registrationResponse struct {
+	SensorID    string `json:"sensor_id"`
+	Status      string `json:"status"`
+	SensorToken string `json:"sensor_token"`
+}
+
+func (c *Client) registerWithToken(ctx context.Context, token string) (registrationResponse, error) {
+	c.cfgMu.RLock()
+	cfg := c.cfg
+	c.cfgMu.RUnlock()
+	b, _ := json.Marshal(management.SensorRegistration{ID: cfg.SensorID, Name: cfg.Name, SiteID: cfg.SiteID, Version: cfg.Version, Hostname: cfg.Hostname})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.BaseURL, "/")+"/v1/sensors/register", strings.NewReader(string(b)))
+	if err != nil {
+		return registrationResponse{}, err
 	}
-	c.headers(req)
-	resp, e := c.http.Do(req)
-	if e != nil {
-		return e
+	c.headersWithToken(req, token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return registrationResponse{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return syncErr("registration failed", resp)
+		return registrationResponse{}, syncErr("registration failed", resp)
 	}
-	var out struct {
-		SensorID    string `json:"sensor_id"`
-		SensorToken string `json:"sensor_token"`
-	}
+	var out registrationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return fmt.Errorf("decode sensor enrollment response: %w", err)
+		return registrationResponse{}, fmt.Errorf("decode sensor enrollment response: %w", err)
 	}
-	if out.SensorID != c.cfg.SensorID || strings.TrimSpace(out.SensorToken) == "" {
-		return fmt.Errorf("central returned an invalid sensor credential")
+	if out.SensorID != cfg.SensorID {
+		return registrationResponse{}, fmt.Errorf("central returned an invalid sensor identity")
+	}
+	return out, nil
+}
+
+func (c *Client) persistSensorCredential(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("central returned an empty sensor credential")
 	}
 	c.cfgMu.Lock()
-	c.cfg.Token = out.SensorToken
+	c.sensorToken = token
 	credentialFile := c.cfg.CredentialFile
 	c.cfgMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(credentialFile), 0700); err != nil {
 		return fmt.Errorf("create sensor credential directory: %w", err)
 	}
-	if err := os.WriteFile(credentialFile, []byte(out.SensorToken+"\n"), 0600); err != nil {
+	if err := os.WriteFile(credentialFile, []byte(token+"\n"), 0600); err != nil {
 		return fmt.Errorf("persist sensor credential: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) Register(ctx context.Context) error {
+	c.cfgMu.RLock()
+	sensorToken := strings.TrimSpace(c.sensorToken)
+	enrollmentToken := strings.TrimSpace(c.enrollmentToken)
+	c.cfgMu.RUnlock()
+
+	presented := sensorToken
+	if presented == "" {
+		presented = enrollmentToken
+	}
+	if presented == "" {
+		return fmt.Errorf("sensor registration credential is empty")
+	}
+
+	out, err := c.registerWithToken(ctx, presented)
+	if err != nil && sensorToken != "" && enrollmentToken != "" && enrollmentToken != sensorToken && enrollmentRequired(err) {
+		// Central no longer has this sensor row (for example after an
+		// explicit sensor deletion or a PostgreSQL rebuild). The persisted
+		// per-sensor credential is intentionally useless once its server-side
+		// hash is gone, so retry exactly once with the enrollment credential.
+		firstErr := err
+		out, err = c.registerWithToken(ctx, enrollmentToken)
+		if err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized {
+				return fmt.Errorf("sensor re-enrollment failed: Central rejected central.token after the persisted per-sensor credential was no longer known; verify sensor central.token against Central auth.sensor_token and any OTLENS_CENTRAL_TOKEN / OTLENS_CENTRAL_AUTH_SENSOR_TOKEN environment overrides: %w", err)
+			}
+			return fmt.Errorf("sensor re-enrollment failed after Central rejected the persisted credential (%v): %w", firstErr, err)
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(out.SensorToken) != "" {
+		return c.persistSensorCredential(out.SensorToken)
+	}
+	// An already-enrolled sensor is authenticated by its existing token and
+	// Central deliberately does not rotate it on every registration refresh.
+	if sensorToken == "" {
+		return fmt.Errorf("central did not issue a sensor credential during enrollment")
 	}
 	return nil
 }

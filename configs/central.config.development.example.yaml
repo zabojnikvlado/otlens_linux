@@ -73,12 +73,11 @@ auth:
   # an idle one is logged out this long after their last request.
   session_duration: 6h
 
-  # Used exactly once — the first time Central starts against a database
-  # with no users at all — to create the initial administrator account.
-  # That account is created with must_change_password set, so this
-  # default only ever works to log in and immediately set a real
-  # password. Change these before first startup if even that brief
-  # window is a concern in your environment.
+  # Used to create the protected built-in administrator account when it
+  # is missing (first startup or recovery after a database reset). Once
+  # the account exists, bootstrap never resets its password; it only
+  # guarantees the account remains enabled and assigned to the admin role.
+  # The initial account must change its password at first login.
   bootstrap_username: "administrator"
   bootstrap_password: "administrator"
 

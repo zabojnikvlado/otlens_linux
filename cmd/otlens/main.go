@@ -144,6 +144,16 @@ func main() {
 			Name: cfg.Central.Name, SiteID: cfg.Central.SiteID, Version: cfg.App.Version, Hostname: hostname, CredentialFile: cfg.Central.CredentialFile,
 			Interval: cfg.Central.Interval, Timeout: cfg.Central.Timeout, InsecureSkipVerify: cfg.Central.InsecureSkipVerify,
 		})
+		_, enrollmentTokenEnvOverride := os.LookupEnv("OTLENS_CENTRAL_TOKEN")
+		logger.Log.Info(
+			"Central synchronization configured",
+			zap.String("central_url", cfg.Central.URL),
+			zap.String("sensor_id", cfg.Central.SensorID),
+			zap.String("credential_file", cfg.Central.CredentialFile),
+			zap.Bool("persisted_sensor_credential", client.HasSensorCredential()),
+			zap.Bool("enrollment_token_env_override", enrollmentTokenEnvOverride),
+			zap.Duration("sync_interval", cfg.Central.Interval),
+		)
 		marshal := func(v interface{}) (json.RawMessage, error) {
 			b, err := json.Marshal(v)
 			return json.RawMessage(b), err

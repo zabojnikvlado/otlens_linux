@@ -33,16 +33,18 @@ import (
 )
 
 type Server struct {
-	StartedAt        time.Time
-	Repo             *Repository
-	ManagementToken  string
-	SensorToken      string
-	SIEMSource       string
-	SIEMEnabled      bool
-	AuditExport      bool
-	AnalysisEnabled  bool
-	AnalysisDir      string
-	AnalysisMaxBytes int64
+	StartedAt             time.Time
+	Repo                  *Repository
+	ManagementToken       string
+	SensorToken           string
+	BootstrapUsername     string
+	BootstrapPasswordHash string
+	SIEMSource            string
+	SIEMEnabled           bool
+	AuditExport           bool
+	AnalysisEnabled       bool
+	AnalysisDir           string
+	AnalysisMaxBytes      int64
 	// SensorOfflineAfter/SensorCheckInterval and the TLS flags below are
 	// purely for the read-only Settings tab (s.settings) — the actual
 	// offline-sweep ticker and TLS listeners in main.go read the same
@@ -2195,53 +2197,72 @@ func (s *Server) alertActions(c *gin.Context) {
 func (s *Server) register(c *gin.Context) {
 	var x management.SensorRegistration
 	if c.ShouldBindJSON(&x) != nil || strings.TrimSpace(x.ID) == "" {
-		c.JSON(400, gin.H{"error": "invalid registration"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid registration", "code": "invalid_registration"})
 		return
 	}
 	auth := c.GetHeader("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "sensor_credential_missing"})
 		return
 	}
 	presented := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	if presented == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "sensor_credential_missing"})
 		return
 	}
+
 	existingHash, lookupErr := s.Repo.SensorAuthTokenHash(c, x.ID)
+	needsEnrollment := false
 	switch {
 	case lookupErr == nil && existingHash != "":
 		digest := sha256.Sum256([]byte(presented))
 		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(digest[:])), []byte(existingHash)) != 1 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "existing sensor credential required"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "existing sensor credential required", "code": "sensor_credential_invalid"})
 			return
 		}
-	case errors.Is(lookupErr, ErrNotFound) || existingHash == "":
+	case errors.Is(lookupErr, ErrNotFound) || (lookupErr == nil && existingHash == ""):
+		needsEnrollment = true
 		if s.SensorToken == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(s.SensorToken)) != 1 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "valid enrollment credential required"})
+			log.Printf("sensor enrollment rejected: sensor_id=%s source_ip=%s reason=enrollment credential mismatch", x.ID, c.ClientIP())
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "valid enrollment credential required", "code": "sensor_enrollment_required"})
 			return
 		}
 	case lookupErr != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor enrollment lookup failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor enrollment lookup failed", "code": "sensor_enrollment_lookup_failed"})
 		return
 	}
+
 	if err := s.Repo.RegisterSensor(c, x); err != nil {
-		c.JSON(500, gin.H{"error": "sensor registration failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor registration failed", "code": "sensor_registration_failed"})
 		return
 	}
+
+	// A valid existing per-sensor credential is already sufficient proof of
+	// identity. Do not rotate it on every synchronization cycle: doing so made
+	// registration stateful, wrote the credential file every few seconds and
+	// widened the failure window around Central/database resets.
+	if !needsEnrollment {
+		// A valid per-sensor token merely refreshed registration metadata. Do
+		// not emit a "connected" style live event: connectivity is established
+		// by authenticated heartbeats, not by POST /register.
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"sensor_id": x.ID, "status": "registered"})
+		return
+	}
+
 	token, err := newRandomToken(32)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential generation failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential generation failed", "code": "sensor_credential_generation_failed"})
 		return
 	}
 	digest := sha256.Sum256([]byte(token))
 	if err := s.Repo.SetSensorAuthToken(c, x.ID, hex.EncodeToString(digest[:])); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential enrollment failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sensor credential enrollment failed", "code": "sensor_credential_enrollment_failed"})
 		return
 	}
-	s.publishLive(LiveEvent{Type: "sensor.registered", SensorID: x.ID, EntityID: x.ID, Message: "sensor registered"})
+	s.publishLive(LiveEvent{Type: "sensor.registered", SensorID: x.ID, EntityID: x.ID, Message: "sensor enrolled"})
 	c.Header("Cache-Control", "no-store")
-	c.JSON(200, gin.H{"sensor_id": x.ID, "status": "registered", "sensor_token": token})
+	c.JSON(http.StatusOK, gin.H{"sensor_id": x.ID, "status": "registered", "sensor_token": token})
 }
 func (s *Server) heartbeat(c *gin.Context) {
 	var x management.Heartbeat
@@ -2307,9 +2328,9 @@ func (s *Server) sensorActions(c *gin.Context) {
 }
 
 // deleteSensor removes a sensor's row and everything derived from it —
-// see Repository.DeleteSensor's comment. Not a permanent ban: if the
-// sensor is still running, its next register()/heartbeat() just
-// recreates it with fresh history.
+// see Repository.DeleteSensor's comment. This is not a permanent ban: a
+// running sensor detects that its per-sensor credential is no longer known,
+// re-enrolls with central.token, and recreates the row with a fresh credential.
 func (s *Server) deleteSensor(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
@@ -2321,7 +2342,7 @@ func (s *Server) deleteSensor(c *gin.Context) {
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("sensor deleted: %s", id), id)
-	c.Status(http.StatusOK)
+	c.Status(http.StatusNoContent)
 }
 
 func metricRange(value string) time.Duration {
@@ -2731,6 +2752,14 @@ func (s *Server) resetData(c *gin.Context) {
 			}
 		}
 		if err := s.Repo.ResetCentral(c, op); err != nil {
+			respondInternalError(c, err)
+			return
+		}
+		// Authentication defaults are invariants, not disposable data. Repair
+		// them immediately after every Central reset so the built-in roles and
+		// protected administrator remain available even if a future reset gains
+		// broader TRUNCATE/CASCADE coverage. Existing admin passwords are kept.
+		if err := s.Repo.EnsureAuthBootstrap(c, s.BootstrapUsername, s.BootstrapPasswordHash); err != nil {
 			respondInternalError(c, err)
 			return
 		}

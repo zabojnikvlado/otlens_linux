@@ -65,6 +65,7 @@ type User struct {
 	PasswordValidityDays *int       `json:"PasswordValidityDays"`
 	CreatedAt            time.Time  `json:"CreatedAt"`
 	LastLoginAt          *time.Time `json:"LastLoginAt"`
+	Protected            bool       `json:"Protected"`
 }
 
 // sessionRow is what the auth middleware loads on every request — a join
@@ -82,9 +83,21 @@ type sessionRow struct {
 	Permissions        Permissions
 }
 
+const bootstrapAdminUserID = "user-bootstrap-admin"
+
 var ErrNotFound = errors.New("not found")
 var ErrBuiltInRole = errors.New("built-in roles cannot be deleted")
 var ErrRoleInUse = errors.New("role is assigned to at least one user")
+var ErrProtectedUser = errors.New("built-in administrator account cannot be deleted")
+
+func isBuiltInRoleID(id string) bool {
+	switch id {
+	case "admin", "analyst", "view":
+		return true
+	default:
+		return false
+	}
+}
 
 // EnsureAuthBootstrap seeds/refreshes the three built-in roles on every
 // startup — ON CONFLICT DO UPDATE, so if a role was seeded by an older
@@ -96,9 +109,11 @@ var ErrRoleInUse = errors.New("role is assigned to at least one user")
 // never affected. (An admin's own edits *to a built-in role* also don't
 // survive a restart under this scheme — built-ins are meant to track
 // the code, custom roles are where real customization should live.)
-// Also creates the initial "administrator" account, but only if the
-// users table is completely empty — see cmd/otlens-central/main.go for
-// the actual username/password/hash used.
+// Also guarantees the built-in administrator account exists. The account is
+// keyed by a fixed protected ID, so deleting another/custom user never affects
+// bootstrap recovery and a database reset cannot leave Central without an
+// administrator merely because some other user rows survived. Existing
+// administrator passwords are never reset by this bootstrap path.
 func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername, bootstrapPasswordHash string) error {
 	defaults := []Role{
 		{ID: "admin", Name: "Administrator", BuiltIn: true, Permissions: Permissions{View: allTabs, Actions: allActions}},
@@ -125,16 +140,16 @@ func (r *Repository) EnsureAuthBootstrap(ctx context.Context, bootstrapUsername,
 		}
 	}
 
-	var count int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
+	// Do not use "users table is empty" as the condition here. A previous
+	// version did that, so if the built-in administrator row disappeared while
+	// any custom account survived, restart/bootstrap never recreated it.
+	// ON CONFLICT(id) intentionally leaves the existing password untouched while
+	// restoring the account's protected administrator role/enabled state.
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users(id,username,password_hash,role_id,display_name,must_change_password) VALUES($1,$2,$3,'admin',$4,TRUE)`,
-		"user-bootstrap-admin", bootstrapUsername, bootstrapPasswordHash, "Administrator",
+		`INSERT INTO users(id,username,password_hash,role_id,display_name,enabled,must_change_password)
+		 VALUES($1,$2,$3,'admin',$4,TRUE,TRUE)
+		 ON CONFLICT(id) DO UPDATE SET role_id='admin', enabled=TRUE`,
+		bootstrapAdminUserID, bootstrapUsername, bootstrapPasswordHash, "Administrator",
 	)
 	return err
 }
@@ -196,6 +211,11 @@ func (r *Repository) UpsertRole(ctx context.Context, id, name string, perms Perm
 }
 
 func (r *Repository) DeleteRole(ctx context.Context, id string) error {
+	// Protect the canonical IDs as well as the database flag. This keeps the
+	// invariant intact even if an older database has a corrupted built_in flag.
+	if isBuiltInRoleID(id) {
+		return ErrBuiltInRole
+	}
 	role, err := r.GetRole(ctx, id)
 	if err != nil {
 		return err
@@ -219,6 +239,7 @@ func scanUser(row interface{ Scan(...interface{}) error }) (User, error) {
 	if err := row.Scan(&u.ID, &u.Username, &u.RoleID, &u.DisplayName, &u.Enabled, &u.MustChangePassword, &u.PasswordExpiresAt, &u.PasswordValidityDays, &u.CreatedAt, &u.LastLoginAt); err != nil {
 		return u, err
 	}
+	u.Protected = u.ID == bootstrapAdminUserID
 	return u, nil
 }
 
@@ -279,6 +300,9 @@ func (r *Repository) UpdateUser(ctx context.Context, id, roleID, displayName str
 }
 
 func (r *Repository) DeleteUser(ctx context.Context, id string) error {
+	if id == bootstrapAdminUserID {
+		return ErrProtectedUser
+	}
 	_, err := r.db.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, id)
 	return err
 }
