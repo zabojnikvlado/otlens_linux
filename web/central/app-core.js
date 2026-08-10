@@ -19,7 +19,7 @@ const DOMAIN_PATHS={
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/dns-observations?limit=1000','/smb-observations?limit=1000','/behavior-overview'],
   nba:['/behavior-findings'],
   incidents:['/incidents','/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
-  analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],settings:['/settings'],audit:['/audit'],
+  analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],users:[],settings:['/settings'],audit:['/audit'],
   topology:['/udp-conversations?active=true','/behavior-overview'],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
 };
 function activeTab(){return document.querySelector('.tab.active')?.dataset.tab||'dashboard'}

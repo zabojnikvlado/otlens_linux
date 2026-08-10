@@ -84,7 +84,7 @@ async function refreshDomains(domains,force=false){
   if(due.includes('nba'))try{renderBehaviorFindings()}catch(e){console.error(e)}
   if(due.includes('analysis'))try{renderAnalysis()}catch(e){console.error(e)}if(due.includes('data'))try{renderBackups()}catch(e){console.error(e)}if(due.includes('settings'))try{renderSettings()}catch(e){console.error(e)}if(due.includes('audit'))try{renderAudit()}catch(e){console.error(e)}
   if(due.includes('dashboard')){try{renderBaseline();renderDashboard()}catch(e){console.error(e)}}
-  if(due.includes('settings')&&can('users_roles_manage'))try{await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
+  if(due.includes('users')&&can('users_roles_manage'))try{await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
   due.forEach(d=>domainLoadedAt.set(d,Date.now()));
   const rejected=paths.map(path=>results[path]?.status==='rejected'?{path,reason:results[path].reason}:null).filter(Boolean);if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
   if(!rejected.length)setAPIConnection(true);else{console.error('Central API refresh failures:',rejected);const unauthorized=rejected.every(x=>x.reason?.status===401);setAPIConnection(false,unauthorized?'authentication required':`partial: ${rejected.map(x=>x.path).join(', ')}`);if(unauthorized)showLogin()}
@@ -145,11 +145,10 @@ const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete
 // applyNavFiltering hides tab buttons the current role can't view (server
 // still enforces this on every request — see requireView — this is only
 // so the UI doesn't dangle buttons that would just 403).
-// The Users tab holds content that used to live under Settings (self-
-// service password change, Users, Roles) — it's gated by the same
-// permission as Settings rather than a separate one, since splitting the
-// page into two tabs didn't change who's supposed to see it.
-const TAB_PERMISSION_ALIAS={health:'sensors',users:'settings',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts'};
+// The Users tab is a first-class view permission. Management controls inside
+// it are separately gated by users_roles_manage, while self-service password
+// change remains available to any role allowed to view the Users tab.
+const TAB_PERMISSION_ALIAS={health:'sensors',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts'};
 function applyNavFiltering(){
   document.querySelectorAll('.tab').forEach(btn=>{
     const tab=btn.dataset.tab;
@@ -237,11 +236,15 @@ document.getElementById('force-password-form').addEventListener('submit',async e
 
 async function refreshUsersAndRoles(){
   const [u,r]=await Promise.allSettled([api('/users'),api('/roles')]);
-  if(u.status==='fulfilled')users=u.value||[];else console.error('GET /users failed:',u.reason?.status,u.reason?.message);
-  if(r.status==='fulfilled')roles=r.value||[];else console.error('GET /roles failed:',r.reason?.status,r.reason?.message);
-  try{renderUsers()}catch(e){console.error('render users',e)}
-  try{renderRoles()}catch(e){console.error('render roles',e)}
+  if(u.status==='fulfilled')users=Array.isArray(u.value)?u.value:[];else console.error('GET /users failed:',u.reason?.status,u.reason?.message);
+  if(r.status==='fulfilled')roles=Array.isArray(r.value)?r.value:[];else console.error('GET /roles failed:',r.reason?.status,r.reason?.message);
+  try{renderUsers();OTDataTables.refresh('table-users')}catch(e){console.error('render users',e)}
+  try{renderRoles();OTDataTables.refresh('table-roles')}catch(e){console.error('render roles',e)}
   try{populateRoleSelect()}catch(e){console.error('populate role select',e)}
+  if(u.status==='rejected'||r.status==='rejected'){
+    const failures=[u.status==='rejected'?`users: ${u.reason?.status||''} ${u.reason?.message||'request failed'}`:'',r.status==='rejected'?`roles: ${r.reason?.status||''} ${r.reason?.message||'request failed'}`:''].filter(Boolean);
+    throw new Error(failures.join('; '));
+  }
 }
 function populateRoleSelect(){
   const sel=document.getElementById('user-form-role');
