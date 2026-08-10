@@ -395,7 +395,7 @@ func (e *Engine) GetAll() []*Flow {
 // to send its entire flow set as topology edges on the very first sync
 // after upgrading. Anything left uncapped just stays dirty and goes
 // out over the next several sync cycles instead.
-const maxDirtyFlowsPerSync = 5000
+const maxDirtyFlowsPerSync = 500
 
 // GetDirtyFlows returns a snapshot of only the flows that have changed
 // (new, or Packets/Bytes/LastSeen bumped) since they were last
@@ -406,7 +406,11 @@ const maxDirtyFlowsPerSync = 5000
 // them as edges every single sync — exactly the failure mode that let
 // telemetry payloads exceed PostgreSQL's 256 MB per-JSONB-value limit
 // even after alerts got the same treatment. Capped at
-// maxDirtyFlowsPerSync per call.
+// maxDirtyFlowsPerSync per call. Keep this deliberately conservative: Central
+// folds each received flow into several durable PostgreSQL ledgers inside one
+// transaction. Sending thousands of restored/dirty flows in one batch can
+// exceed the sensor HTTP timeout even though authentication and heartbeat are
+// perfectly healthy, causing an endless retry loop after a restart/reset.
 func (e *Engine) GetDirtyFlows() []*Flow {
 
 	e.mutex.RLock()

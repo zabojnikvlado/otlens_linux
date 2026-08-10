@@ -32,6 +32,8 @@ type Client struct {
 	enrollmentToken    string
 	sensorToken        string
 	http               *http.Client
+	telemetryHTTP      *http.Client
+	telemetryTimeout   time.Duration
 	rulesVersion       int64
 	threatIntelVersion int64
 }
@@ -52,7 +54,7 @@ func New(cfg Config) *Client {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 15 * time.Second
 	}
-	return &Client{cfg: cfg, enrollmentToken: enrollmentToken, sensorToken: sensorToken, http: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{
+	transport := &http.Transport{
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -60,7 +62,30 @@ func New(cfg Config) *Client {
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          20,
 		MaxIdleConnsPerHost:   4,
-	}}}
+	}
+	// Telemetry is intentionally allowed longer than the interactive sensor API
+	// calls. Central persists topology/contact-tracing ledgers transactionally,
+	// and a sensor restoring a backlog from SQLite can legitimately need more
+	// than the normal 15s request timeout. A short timeout here creates a
+	// pathological loop: heartbeat succeeds, telemetry is cancelled, nothing is
+	// acknowledged/marked synced, and the same backlog is retried forever.
+	telemetryTimeout := cfg.Timeout * 4
+	if telemetryTimeout < 60*time.Second {
+		telemetryTimeout = 60 * time.Second
+	}
+	if telemetryTimeout > 5*time.Minute {
+		telemetryTimeout = 5 * time.Minute
+	}
+	telemetryTransport := transport.Clone()
+	telemetryTransport.ResponseHeaderTimeout = telemetryTimeout
+	return &Client{
+		cfg:              cfg,
+		enrollmentToken:  enrollmentToken,
+		sensorToken:      sensorToken,
+		http:             &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		telemetryHTTP:    &http.Client{Timeout: telemetryTimeout, Transport: telemetryTransport},
+		telemetryTimeout: telemetryTimeout,
+	}
 }
 
 // HTTPError preserves Central's structured error response so callers can
@@ -299,6 +324,14 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	return out.Commands, nil
 }
 
+// TelemetryTimeout returns the effective timeout reserved for a telemetry
+// transaction. It is longer than Config.Timeout because a backlog flush can
+// require many PostgreSQL writes even while heartbeat/authentication remain
+// healthy.
+func (c *Client) TelemetryTimeout() time.Duration {
+	return c.telemetryTimeout
+}
+
 func (c *Client) PushTelemetry(ctx context.Context, snapshot management.TelemetrySnapshot) (management.TelemetryAck, error) {
 	b, err := json.Marshal(snapshot)
 	if err != nil {
@@ -309,7 +342,7 @@ func (c *Client) PushTelemetry(ctx context.Context, snapshot management.Telemetr
 		return management.TelemetryAck{}, err
 	}
 	c.headers(req)
-	resp, err := c.http.Do(req)
+	resp, err := c.telemetryHTTP.Do(req)
 	if err != nil {
 		return management.TelemetryAck{}, err
 	}

@@ -51,8 +51,29 @@ type execer interface {
 // first_seen/last_seen expand to cover the full span this pair has ever
 // been observed across.
 func upsertTopologyEdges(ctx context.Context, x execer, sensorID string, edges []aggregatedEdge) error {
+	type preparedEdge struct {
+		edge      aggregatedEdge
+		pairKey   string
+		firstSeen time.Time
+		lastSeen  time.Time
+	}
+	prepared := make([]preparedEdge, 0, len(edges))
+	type nodeSpan struct{ first, last time.Time }
+	stubNodes := make(map[string]nodeSpan, len(edges)*2)
+	seenPairs := make(map[string]struct{}, len(edges))
+
 	for _, e := range edges {
+		if e.SrcIP == "" || e.DstIP == "" {
+			continue
+		}
 		pairKey := (topologyEdgeRecord{SrcIP: e.SrcIP, DstIP: e.DstIP}).PairKey()
+		if _, duplicate := seenPairs[pairKey]; duplicate {
+			// aggregateEdges normally guarantees one row per pair. Avoid a
+			// PostgreSQL "cannot affect row a second time" error if a future
+			// caller passes duplicates to this lower-level helper directly.
+			continue
+		}
+		seenPairs[pairKey] = struct{}{}
 		firstSeen := e.FirstSeen
 		if firstSeen.IsZero() {
 			firstSeen = time.Now()
@@ -61,52 +82,79 @@ func upsertTopologyEdges(ctx context.Context, x execer, sensorID string, edges [
 		if lastSeen.IsZero() {
 			lastSeen = firstSeen
 		}
-		// An edge is only ever drawable if both its endpoints resolve to
-		// a node in the same /topology response — and topology_nodes is
-		// only ever populated from a sensor's *asset* list (graph.Nodes),
-		// which isn't guaranteed to include every IP that ever shows up
-		// as a flow endpoint (a gateway, a DNS/NTP server, anything the
-		// asset engine didn't classify as a full asset, or a device that
-		// aged out of the sensor's own asset tracking after this pair
-		// was first recorded). Without this, such an edge sits in
-		// topology_edges forever with no node to attach to on either
-		// end — invisible, but still costing a full row in every
-		// /topology rebuild, and reappearing/vanishing as an "unresolved
-		// edge" depending on what else happens to be in the node ledger
-		// that poll. ON CONFLICT DO NOTHING means this never overwrites
-		// real asset data if a proper node already exists for the IP —
-		// it only fills the gap when nothing does.
+		prepared = append(prepared, preparedEdge{edge: e, pairKey: pairKey, firstSeen: firstSeen, lastSeen: lastSeen})
 		for _, ip := range [2]string{e.SrcIP, e.DstIP} {
-			if ip == "" {
+			span, exists := stubNodes[ip]
+			if !exists {
+				stubNodes[ip] = nodeSpan{first: firstSeen, last: lastSeen}
 				continue
 			}
-			if _, err := x.ExecContext(ctx, `
-				INSERT INTO topology_nodes(sensor_id,ip,first_seen,last_seen)
-				VALUES($1,$2,$3,$4)
-				ON CONFLICT(sensor_id,ip) DO NOTHING`,
-				sensorID, ip, firstSeen, lastSeen,
-			); err != nil {
-				return err
+			if firstSeen.Before(span.first) {
+				span.first = firstSeen
 			}
+			if lastSeen.After(span.last) {
+				span.last = lastSeen
+			}
+			stubNodes[ip] = span
 		}
-		_, err := x.ExecContext(ctx, `
-			INSERT INTO topology_edges(sensor_id,pair_key,src_ip,dst_ip,protocols,is_ot,from_honeypot,vlan_id,packets,bytes,flow_count,first_seen,last_seen)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			ON CONFLICT(sensor_id,pair_key) DO UPDATE SET
-				src_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.src_ip ELSE topology_edges.src_ip END,
-				dst_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.dst_ip ELSE topology_edges.dst_ip END,
-				protocols = EXCLUDED.protocols,
-				is_ot = topology_edges.is_ot OR EXCLUDED.is_ot,
-				from_honeypot = topology_edges.from_honeypot OR EXCLUDED.from_honeypot,
-				vlan_id = EXCLUDED.vlan_id,
-				packets = EXCLUDED.packets,
-				bytes = EXCLUDED.bytes,
-				flow_count = EXCLUDED.flow_count,
-				first_seen = LEAST(topology_edges.first_seen, EXCLUDED.first_seen),
-				last_seen = GREATEST(topology_edges.last_seen, EXCLUDED.last_seen)`,
-			sensorID, pairKey, e.SrcIP, e.DstIP, e.Protocol, e.IsOT, e.FromHoneypot, e.VLANID, e.Packets, e.Bytes, e.FlowCount, firstSeen, lastSeen,
-		)
-		if err != nil {
+	}
+	if len(prepared) == 0 {
+		return nil
+	}
+
+	// Insert all missing endpoint stubs in batches. The previous implementation
+	// issued two INSERTs per edge, which multiplied a restored backlog into
+	// thousands of database round trips in one telemetry transaction.
+	const batchSize = 500
+	ips := make([]string, 0, len(stubNodes))
+	for ip := range stubNodes {
+		ips = append(ips, ip)
+	}
+	for start := 0; start < len(ips); start += batchSize {
+		end := start + batchSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+		args := make([]interface{}, 0, (end-start)*4)
+		values := make([]string, 0, end-start)
+		for _, ip := range ips[start:end] {
+			span := stubNodes[ip]
+			values = append(values, appendSQLTuple(&args, sensorID, ip, span.first, span.last))
+		}
+		query := `INSERT INTO topology_nodes(sensor_id,ip,first_seen,last_seen) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,ip) DO NOTHING`
+		if _, err := x.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+
+	for start := 0; start < len(prepared); start += batchSize {
+		end := start + batchSize
+		if end > len(prepared) {
+			end = len(prepared)
+		}
+		args := make([]interface{}, 0, (end-start)*13)
+		values := make([]string, 0, end-start)
+		for _, item := range prepared[start:end] {
+			e := item.edge
+			values = append(values, appendSQLTuple(&args,
+				sensorID, item.pairKey, e.SrcIP, e.DstIP, e.Protocol, e.IsOT, e.FromHoneypot,
+				e.VLANID, e.Packets, e.Bytes, e.FlowCount, item.firstSeen, item.lastSeen,
+			))
+		}
+		query := `INSERT INTO topology_edges(sensor_id,pair_key,src_ip,dst_ip,protocols,is_ot,from_honeypot,vlan_id,packets,bytes,flow_count,first_seen,last_seen) VALUES ` + strings.Join(values, ",") + `
+ON CONFLICT(sensor_id,pair_key) DO UPDATE SET
+	src_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.src_ip ELSE topology_edges.src_ip END,
+	dst_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.dst_ip ELSE topology_edges.dst_ip END,
+	protocols = EXCLUDED.protocols,
+	is_ot = topology_edges.is_ot OR EXCLUDED.is_ot,
+	from_honeypot = topology_edges.from_honeypot OR EXCLUDED.from_honeypot,
+	vlan_id = EXCLUDED.vlan_id,
+	packets = EXCLUDED.packets,
+	bytes = EXCLUDED.bytes,
+	flow_count = EXCLUDED.flow_count,
+	first_seen = LEAST(topology_edges.first_seen, EXCLUDED.first_seen),
+	last_seen = GREATEST(topology_edges.last_seen, EXCLUDED.last_seen)`
+		if _, err := x.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}
 	}

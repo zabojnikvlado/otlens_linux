@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +36,18 @@ func defaultConfigPath() string {
 	return filepath.Join(filepath.Dir(exe), "config.yaml")
 }
 
+// tokenFingerprint is a short one-way identifier used only for diagnostics.
+// It lets an operator confirm that Central and a sensor loaded the same
+// enrollment credential without placing that credential in logs.
+func tokenFingerprint(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 func main() {
 	configPath := flag.String("config", defaultConfigPath(), "path to the Central Management configuration file")
 	flag.Parse()
@@ -43,7 +58,13 @@ func main() {
 	}
 
 	_, sensorTokenEnvOverride := os.LookupEnv("OTLENS_CENTRAL_AUTH_SENSOR_TOKEN")
-	log.Printf("sensor enrollment authentication configured: env_override=%t", sensorTokenEnvOverride)
+	log.Printf(
+		"OTLens Central configuration: config_path=%s sensor_enrollment_configured=%t sensor_enrollment_token_fingerprint=%s sensor_token_env_override=%t",
+		*configPath,
+		strings.TrimSpace(cfg.Auth.SensorToken) != "",
+		tokenFingerprint(cfg.Auth.SensorToken),
+		sensorTokenEnvOverride,
+	)
 
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		cfg.Database.User,
@@ -120,7 +141,7 @@ func main() {
 	}
 
 	srv := &central.Server{StartedAt: time.Now().UTC(),
-		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: cfg.Auth.SensorToken,
+		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: strings.TrimSpace(cfg.Auth.SensorToken),
 		BootstrapUsername: cfg.Auth.BootstrapUsername, BootstrapPasswordHash: bootstrapHash,
 		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
 		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,

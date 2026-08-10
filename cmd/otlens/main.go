@@ -42,6 +42,19 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// tokenFingerprint returns a short, non-secret identifier for a credential.
+// It is deliberately one-way and truncated: operators can compare the value
+// printed by a sensor with the value printed by Central without ever logging
+// the credential itself.
+func tokenFingerprint(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/otlens/config.yaml", "path to the Linux sensor configuration file")
 	flag.Parse()
@@ -78,7 +91,16 @@ func main() {
 		"Configuration loaded",
 		zap.String("logging_level", cfg.Logging.Level),
 		zap.Strings("logging_output", cfg.Logging.Output),
+		zap.String("config_path", *configPath),
+		zap.Bool("central_enabled", cfg.Central.Enabled),
 	)
+
+	if !cfg.Central.Enabled {
+		logger.Log.Warn(
+			"Central synchronization disabled; this sensor will remain offline in Central",
+			zap.String("config_path", *configPath),
+		)
+	}
 
 	logger.Log.Info(
 		"Capture interface",
@@ -152,6 +174,7 @@ func main() {
 			zap.String("credential_file", cfg.Central.CredentialFile),
 			zap.Bool("persisted_sensor_credential", client.HasSensorCredential()),
 			zap.Bool("enrollment_token_env_override", enrollmentTokenEnvOverride),
+			zap.String("enrollment_token_fingerprint", tokenFingerprint(cfg.Central.Token)),
 			zap.Duration("sync_interval", cfg.Central.Interval),
 		)
 		marshal := func(v interface{}) (json.RawMessage, error) {

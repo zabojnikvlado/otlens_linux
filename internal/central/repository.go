@@ -1030,14 +1030,14 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("begin telemetry transaction: %w", err)
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,udp_conversations,udp_telemetry,udp_protocol_exchanges,batch_id,sequence,checksum,updated_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,udp_conversations=EXCLUDED.udp_conversations,udp_telemetry=EXCLUDED.udp_telemetry,udp_protocol_exchanges=EXCLUDED.udp_protocol_exchanges,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
 WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), defaults(x.UDPConversations, "[]"), defaults(x.UDPTelemetry, "{}"), defaults(x.UDPProtocolExchanges, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("store telemetry snapshot: %w", err)
 	}
 	var alerts []map[string]interface{}
 	if r.siemAlertsEnabled && len(x.Alerts) > 0 && json.Unmarshal(x.Alerts, &alerts) == nil {
@@ -1062,12 +1062,12 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 				return nil, marshalErr
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO siem_outbox(event_key,kind,payload) VALUES($1,'alert',$2) ON CONFLICT(event_key) DO NOTHING`, eventKey, payload); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("queue SIEM alert: %w", err)
 			}
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NOW(),last_sync_success_at=NOW(),sync_status='healthy',pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=GREATEST(sync_sequence,$2) WHERE id=$1`, x.SensorID, x.Sequence); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("update sensor sync state: %w", err)
 	}
 	// Fold this sync's nodes/edges into the durable per-sensor ledgers
 	// (see topology_edges.go) before committing, so it's atomic with the
@@ -1082,30 +1082,30 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	var graph topology.Graph
 	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
 		if err := persistFlowObservations(ctx, tx, x.SensorID, x.CapturedAt, graph.Edges); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("persist flow observations: %w", err)
 		}
 		if err := upsertTopologyNodes(ctx, tx, x.SensorID, graph.Nodes); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("persist topology nodes: %w", err)
 		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("persist topology edges: %w", err)
 		}
 	}
 	if err := persistDNSObservations(ctx, tx, x.SensorID, x.DNSObservations); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("persist DNS observations: %w", err)
 	}
 	if err := persistSMBObservations(ctx, tx, x.SensorID, x.SMBObservations); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("persist SMB observations: %w", err)
 	}
 	if err := persistProtocolObservations(ctx, tx, x.SensorID, x.ProtocolObservations); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("persist protocol observations: %w", err)
 	}
 	newAlerts, err := upsertAlertHistory(ctx, tx, x.SensorID, x.Alerts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("persist alert history: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("commit telemetry transaction: %w", err)
 	}
 	return newAlerts, nil
 }

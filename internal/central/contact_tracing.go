@@ -57,56 +57,141 @@ type flowContact struct {
 
 func persistFlowObservations(ctx context.Context, x execer, sensorID string, capturedAt time.Time, edges []topology.Edge) error {
 	bucket := capturedAt.UTC().Truncate(time.Minute)
+	valid := make([]topology.Edge, 0, len(edges))
+	flowIDs := make([]string, 0, len(edges))
+	seenIDs := make(map[string]struct{}, len(edges))
 	for _, e := range edges {
 		if e.ID == "" || e.SrcIP == "" || e.DstIP == "" {
 			continue
 		}
-		var op, ob, oab, oba, oabb, obab uint64
-		rows, err := x.QueryContext(ctx, `SELECT packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a FROM flow_counters WHERE sensor_id=$1 AND flow_id=$2`, sensorID, e.ID)
+		valid = append(valid, e)
+		if _, exists := seenIDs[e.ID]; !exists {
+			seenIDs[e.ID] = struct{}{}
+			flowIDs = append(flowIDs, e.ID)
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+
+	type counter struct {
+		packets, bytes           uint64
+		packetsAToB, packetsBToA uint64
+		bytesAToB, bytesBToA     uint64
+	}
+	previous := make(map[string]counter, len(flowIDs))
+
+	// Load counters in batches instead of issuing one SELECT per flow. The old
+	// implementation did 2-3 SQL round trips for every received edge; a restored
+	// SQLite backlog of a few thousand flows could therefore exceed the sensor's
+	// HTTP timeout even on an otherwise healthy/authenticated connection.
+	const lookupBatch = 1000
+	for start := 0; start < len(flowIDs); start += lookupBatch {
+		end := start + lookupBatch
+		if end > len(flowIDs) {
+			end = len(flowIDs)
+		}
+		args := []interface{}{sensorID}
+		ids := make([]string, 0, end-start)
+		for _, id := range flowIDs[start:end] {
+			args = append(args, id)
+			ids = append(ids, fmt.Sprintf("$%d", len(args)))
+		}
+		rows, err := x.QueryContext(ctx, `SELECT flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a FROM flow_counters WHERE sensor_id=$1 AND flow_id IN (`+strings.Join(ids, ",")+`)`, args...)
 		if err != nil {
 			return err
 		}
-		// QueryRow is not part of execer, so use the returned rows.
-		var found bool
-		if rows.Next() {
-			if err := rows.Scan(&op, &ob, &oab, &oba, &oabb, &obab); err != nil {
+		for rows.Next() {
+			var id string
+			var c counter
+			if err := rows.Scan(&id, &c.packets, &c.bytes, &c.packetsAToB, &c.packetsBToA, &c.bytesAToB, &c.bytesBToA); err != nil {
 				rows.Close()
 				return err
 			}
-			found = true
+			previous[id] = c
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
 		}
 		rows.Close()
+	}
+
+	type observation struct {
+		edge                     topology.Edge
+		packets, bytes           uint64
+		packetsAToB, packetsBToA uint64
+		bytesAToB, bytesBToA     uint64
+	}
+	observations := make([]observation, 0, len(valid))
+	for _, e := range valid {
 		dp, db := e.Packets, e.Bytes
 		dpa, dpb := e.PacketsAToB, e.PacketsBToA
 		dba, dbb := e.BytesAToB, e.BytesBToA
-		if found {
-			if dp >= op {
-				dp -= op
+		if old, found := previous[e.ID]; found {
+			if dp >= old.packets {
+				dp -= old.packets
 			}
-			if db >= ob {
-				db -= ob
+			if db >= old.bytes {
+				db -= old.bytes
 			}
-			if dpa >= oab {
-				dpa -= oab
+			if dpa >= old.packetsAToB {
+				dpa -= old.packetsAToB
 			}
-			if dpb >= oba {
-				dpb -= oba
+			if dpb >= old.packetsBToA {
+				dpb -= old.packetsBToA
 			}
-			if dba >= oabb {
-				dba -= oabb
+			if dba >= old.bytesAToB {
+				dba -= old.bytesAToB
 			}
-			if dbb >= obab {
-				dbb -= obab
+			if dbb >= old.bytesBToA {
+				dbb -= old.bytesBToA
 			}
 		}
 		if dp > 0 || db > 0 {
-			_, err = x.ExecContext(ctx, `INSERT INTO flow_observations(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`, sensorID, e.ID, bucket, capturedAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol, e.InitiatorIP, e.ResponderIP, e.InitiatorPort, e.ResponderPort, dp, db, dpa, dpb, dba, dbb, e.VLANID, e.IsOT)
-			if err != nil {
-				return err
-			}
+			observations = append(observations, observation{
+				edge: e, packets: dp, bytes: db,
+				packetsAToB: dpa, packetsBToA: dpb,
+				bytesAToB: dba, bytesBToA: dbb,
+			})
 		}
-		_, err = x.ExecContext(ctx, `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA)
-		if err != nil {
+	}
+
+	// Keep each statement well below PostgreSQL's bind-parameter ceiling.
+	const writeBatch = 500
+	for start := 0; start < len(observations); start += writeBatch {
+		end := start + writeBatch
+		if end > len(observations) {
+			end = len(observations)
+		}
+		args := make([]interface{}, 0, (end-start)*21)
+		values := make([]string, 0, end-start)
+		for _, o := range observations[start:end] {
+			e := o.edge
+			values = append(values, appendSQLTuple(&args,
+				sensorID, e.ID, bucket, capturedAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol,
+				e.InitiatorIP, e.ResponderIP, e.InitiatorPort, e.ResponderPort,
+				o.packets, o.bytes, o.packetsAToB, o.packetsBToA, o.bytesAToB, o.bytesBToA, e.VLANID, e.IsOT,
+			))
+		}
+		query := `INSERT INTO flow_observations(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`
+		if _, err := x.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+
+	for start := 0; start < len(valid); start += writeBatch {
+		end := start + writeBatch
+		if end > len(valid) {
+			end = len(valid)
+		}
+		args := make([]interface{}, 0, (end-start)*8)
+		values := make([]string, 0, end-start)
+		for _, e := range valid[start:end] {
+			values = append(values, appendSQLTuple(&args, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA))
+		}
+		query := `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,updated_at) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`
+		if _, err := x.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}
 	}

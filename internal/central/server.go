@@ -2222,7 +2222,8 @@ func (s *Server) register(c *gin.Context) {
 		}
 	case errors.Is(lookupErr, ErrNotFound) || (lookupErr == nil && existingHash == ""):
 		needsEnrollment = true
-		if s.SensorToken == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(s.SensorToken)) != 1 {
+		enrollmentToken := strings.TrimSpace(s.SensorToken)
+		if enrollmentToken == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(enrollmentToken)) != 1 {
 			log.Printf("sensor enrollment rejected: sensor_id=%s source_ip=%s reason=enrollment credential mismatch", x.ID, c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "valid enrollment credential required", "code": "sensor_enrollment_required"})
 			return
@@ -2421,13 +2422,25 @@ func sensorPipelineDiagnostics(sample management.SensorMetricSample) []gin.H {
 		}
 		return "healthy"
 	}
+	authRecent := !sample.RecordedAt.IsZero() && time.Since(sample.RecordedAt) <= 90*time.Second
+	authDetail := "Latest heartbeat was accepted with the sensor-specific Central credential"
+	if !authRecent {
+		authDetail = "No recent authenticated heartbeat"
+	}
+	syncDetail := "Telemetry/rule synchronization is healthy"
+	if sample.Sync.LastError != "" {
+		syncDetail = sample.Sync.LastError
+	} else if sample.Sync.ConsecutiveFailures > 0 {
+		syncDetail = "Sensor-to-Central synchronization is failing"
+	}
 	return []gin.H{
 		{"stage": "Capture", "status": status(pps > 0, false), "value": pps, "unit": "packets/s", "detail": "Packets received from the capture backend"},
 		{"stage": "Event bus", "status": status(pps == 0 || queue < 100000, queue > 50000), "value": queue, "unit": "queued", "detail": "Packet delivery queue between capture and consumers"},
 		{"stage": "TCP classification", "status": status(pps == 0 || tcp > 0 || segments > 0, pps > 0 && tcp == 0), "value": tcp, "unit": "packets/s", "detail": "TCP packets accepted by the stream pipeline"},
 		{"stage": "TCP reassembly", "status": status(reassemblyEnabled, reassemblyEnabled && segments == 0 && pps > 0), "value": segments, "unit": "segments", "detail": "Reassembly engine state and accepted segments"},
 		{"stage": "Packet type contract", "status": status(assertFailures == 0, assertFailures > 0), "value": assertFailures, "unit": "failures", "detail": "Publisher/subscriber packet type compatibility"},
-		{"stage": "Central sync", "status": status(sample.Sync.ConsecutiveFailures == 0, sample.Sync.ConsecutiveFailures > 0), "value": sample.Sync.ConsecutiveFailures, "unit": "failures", "detail": "Consecutive sensor-to-Central synchronization failures"},
+		{"stage": "Central authentication", "status": status(authRecent, false), "value": 0, "unit": "", "detail": authDetail},
+		{"stage": "Central sync", "status": status(sample.Sync.ConsecutiveFailures == 0, sample.Sync.ConsecutiveFailures > 0), "value": sample.Sync.ConsecutiveFailures, "unit": "failed cycles", "detail": syncDetail},
 	}
 }
 func (s *Server) sensorMetricsHistory(c *gin.Context) {

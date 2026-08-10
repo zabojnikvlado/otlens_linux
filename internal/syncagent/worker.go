@@ -198,9 +198,10 @@ func (w *Worker) sync(ctx context.Context) {
 		snapshot.Checksum = hex.EncodeToString(sum[:])
 
 		var uploadErr error
+		telemetryTimeout := w.Client.TelemetryTimeout()
+		w.markAttempt()
 		for attempt := 1; attempt <= 3; attempt++ {
-			w.markAttempt()
-			requestCtx, cancel := context.WithTimeout(ctx, w.Client.cfg.Timeout)
+			requestCtx, cancel := context.WithTimeout(ctx, telemetryTimeout)
 			_, uploadErr = w.Client.PushTelemetry(requestCtx, snapshot)
 			cancel()
 			if uploadErr == nil {
@@ -235,10 +236,8 @@ func (w *Worker) sync(ctx context.Context) {
 			}
 			if IsSensorAuthError(uploadErr) {
 				w.markUnregistered()
-				w.markFailure(uploadErr)
 				break
 			}
-			w.markFailure(uploadErr)
 			if attempt < 3 {
 				select {
 				case <-ctx.Done():
@@ -248,11 +247,16 @@ func (w *Worker) sync(ctx context.Context) {
 			}
 		}
 		if uploadErr != nil {
+			// ConsecutiveFailures means failed synchronization *cycles*, not HTTP
+			// retry attempts. Counting each of the three retries separately made
+			// the UI report 27 failures after only nine failed sync cycles and
+			// incorrectly escalated health much faster than intended.
+			w.markFailure(uploadErr)
 			if IsSensorAuthError(uploadErr) {
 				log.Printf("OTLens Central sensor credential is no longer accepted; re-enrollment will be attempted: %v", uploadErr)
 				return
 			}
-			log.Printf("OTLens telemetry upload failed after retries: %v", uploadErr)
+			log.Printf("OTLens telemetry upload failed after retries: %v (timeout=%s payload_bytes=%d topology_bytes=%d alerts_bytes=%d)", uploadErr, telemetryTimeout, len(payload), len(snapshot.Topology), len(snapshot.Alerts))
 		}
 	}
 
