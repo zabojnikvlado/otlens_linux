@@ -190,7 +190,7 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		for _, e := range valid[start:end] {
 			values = append(values, appendSQLTuple(&args, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA))
 		}
-		query := `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,updated_at) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`
+		query := `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`
 		if _, err := x.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}
