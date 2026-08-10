@@ -145,6 +145,51 @@ type AlertHistoryEntry struct {
 	Evidence   map[string]interface{}
 }
 
+// AlertHistoryStats contains authoritative alert counters across the whole
+// retained alert_history table. The Alerts UI intentionally loads only the
+// most recent rows for responsiveness, so headline counters must not be
+// derived from that truncated list.
+type AlertHistoryStats struct {
+	Total        int64 `json:"total"`
+	Open         int64 `json:"open"`
+	Confirmed    int64 `json:"confirmed"`
+	Approved     int64 `json:"approved"`
+	OpenCritical int64 `json:"open_critical"`
+	OpenHigh     int64 `json:"open_high"`
+	OpenMedium   int64 `json:"open_medium"`
+	OpenLow      int64 `json:"open_low"`
+	OpenInfo     int64 `json:"open_info"`
+}
+
+// GetAlertHistoryStats returns counts for every retained alert, independent of
+// the 2,000-row presentation window used by ListAlertHistory.
+func (r *Repository) GetAlertHistoryStats(ctx context.Context) (AlertHistoryStats, error) {
+	var out AlertHistoryStats
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status='new'),
+			COUNT(*) FILTER (WHERE status='confirmed'),
+			COUNT(*) FILTER (WHERE status='approved'),
+			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='critical'),
+			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='high'),
+			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='medium'),
+			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='low'),
+			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='info')
+		FROM alert_history`).Scan(
+		&out.Total,
+		&out.Open,
+		&out.Confirmed,
+		&out.Approved,
+		&out.OpenCritical,
+		&out.OpenHigh,
+		&out.OpenMedium,
+		&out.OpenLow,
+		&out.OpenInfo,
+	)
+	return out, err
+}
+
 // ListAlertHistory returns the most recently active alerts, newest
 // first. limit is generous (default/max 2000) since this backs the main
 // Alerts tab rather than a paged report — but deliberately still capped,

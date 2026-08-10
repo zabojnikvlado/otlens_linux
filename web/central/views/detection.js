@@ -166,7 +166,7 @@ function renderDashboard(){
   document.getElementById('dashboard-sensors-running').textContent=sensorCounts.running;
   document.getElementById('dashboard-sensors-stopped').textContent=sensorCounts.stopped;
   document.getElementById('dashboard-sensors-offline').textContent=sensorCounts.offline;
-  document.getElementById('dashboard-alerts-open').textContent=openAlerts.length;
+  const authoritativeOpen=Number.isFinite(Number(alertStats?.open))?Number(alertStats.open):openAlerts.length;document.getElementById('dashboard-alerts-open').textContent=authoritativeOpen;
   document.getElementById('dashboard-assets').textContent=(assets||[]).length;
   document.getElementById('dashboard-assets-detail').textContent=`${unconfirmedAssets} unconfirmed`;
   document.getElementById('dashboard-rules').textContent=`${activeRules.length} / ${(rules||[]).length}`;
@@ -209,7 +209,7 @@ function renderDashboard(){
   const completeAssets=(assets||[]).filter(a=>(a.Hostname||a.ReconHostname)&&(a.Vendor||a.ReconVendor)&&a.ReconOS).length;
   const coverage=(assets||[]).length?Math.round(completeAssets/(assets||[]).length*100):0;
   const exposure=(vulnerabilities||[]).reduce((n,v)=>n+Number(v.StatusCounts?.confirmed||0)+Number(v.StatusCounts?.accepted_risk||0),0);
-  const criticalCount=openAlerts.filter(a=>String(a.Severity??a.severity).toLowerCase()==='critical').length;
+  const criticalCount=Number.isFinite(Number(alertStats?.open_critical))?Number(alertStats.open_critical):openAlerts.filter(a=>String(a.Severity??a.severity).toLowerCase()==='critical').length;
   const attention=criticalCount+sensorCounts.offline+exposure;
   document.getElementById('dashboard-attention').textContent=attention.toLocaleString();
   document.getElementById('dashboard-coverage').textContent=coverage+'%';
@@ -228,8 +228,9 @@ function renderDashboard(){
   const riskEl=document.getElementById('dashboard-asset-risk');riskEl.innerHTML=`<div class="risk-donut" style="--risk-high:${Math.round(riskBuckets[0][1]/riskTotal*100)};--risk-profile:${Math.round(riskBuckets[1][1]/riskTotal*100)};--risk-stale:${Math.round(riskBuckets[2][1]/riskTotal*100)}"><div><strong>${(assets||[]).length}</strong><span>assets</span></div></div><div class="risk-legend">${riskBuckets.map(([name,count],i)=>`<button data-dashboard-tab="assets"><i class="risk-dot risk-dot-${i}"></i><span>${esc(name)}</span><strong>${count}</strong></button>`).join('')}</div>`;
 
   const severityOrder=['critical','high','medium','low','info'];
-  const severityCounts=new Map(severityOrder.map(x=>[x,0]));
-  openAlerts.forEach(a=>{const key=String(a.Severity??a.severity??'info').toLowerCase();severityCounts.set(key,(severityCounts.get(key)||0)+1)});
+  const hasAuthoritativeSeverity=severityOrder.every(x=>Number.isFinite(Number(alertStats?.['open_'+x])));
+  const severityCounts=new Map(severityOrder.map(x=>[x,hasAuthoritativeSeverity?Number(alertStats['open_'+x]):0]));
+  if(!hasAuthoritativeSeverity)openAlerts.forEach(a=>{const key=String(a.Severity??a.severity??'info').toLowerCase();severityCounts.set(key,(severityCounts.get(key)||0)+1)});
   const severityItems=severityOrder.map(x=>[x[0].toUpperCase()+x.slice(1),severityCounts.get(x)||0]).filter(([,n])=>n>0);
   const severityMax=severityItems.reduce((m,[,n])=>Math.max(m,n),0);
   dashboardBars('dashboard-severity',severityItems,severityMax,true);
@@ -253,7 +254,7 @@ function renderDashboard(){
   const health=document.getElementById('dashboard-health'),title=document.getElementById('dashboard-health-title'),detail=document.getElementById('dashboard-health-detail');
   health.className='health-banner '+(sensorCounts.offline||criticalOpen?'health-critical':sensorCounts.stopped||openAlerts.length?'health-warning':'health-healthy');
   if(sensorCounts.offline||criticalOpen){title.textContent='Critical';detail.textContent=[sensorCounts.offline?`${sensorCounts.offline} sensor(s) offline`:'',criticalOpen?`${criticalOpen} critical alert(s)`:'' ].filter(Boolean).join(' · ')}
-  else if(sensorCounts.stopped||openAlerts.length){title.textContent='Warning';detail.textContent=[sensorCounts.stopped?`${sensorCounts.stopped} sensor(s) stopped`:'',openAlerts.length?`${openAlerts.length} open alert(s)`:'' ].filter(Boolean).join(' · ')}
+  else if(sensorCounts.stopped||authoritativeOpen){title.textContent='Warning';detail.textContent=[sensorCounts.stopped?`${sensorCounts.stopped} sensor(s) stopped`:'',authoritativeOpen?`${authoritativeOpen} open alert(s)`:'' ].filter(Boolean).join(' · ')}
   else{title.textContent='Healthy';detail.textContent='Sensors running and no open alerts'}
   drawDailyBarChart('dashboard-alerts-trend',trends.AlertsByDay,30);
   drawDailyBarChart('dashboard-assets-trend',trends.NewAssetsByDay,30);

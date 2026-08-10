@@ -356,6 +356,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/tags/changes", requireView(ViewTags), s.tagChanges)
 	api.GET("/tags/events", requireView(ViewTags), s.tagEvents)
 	api.GET("/alerts", requireView(ViewAlerts), s.alerts)
+	api.GET("/alerts/stats", requireView(ViewAlerts), s.alertStats)
 	api.GET("/live/events", s.liveEvents)
 	api.GET("/live/history", s.liveHistory)
 	api.GET("/live/presence", s.livePresenceList)
@@ -1486,6 +1487,15 @@ func (s *Server) tagEvents(c *gin.Context) {
 	}
 	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.TagEvents })
 }
+func (s *Server) alertStats(c *gin.Context) {
+	stats, err := s.Repo.GetAlertHistoryStats(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
 func (s *Server) alerts(c *gin.Context) {
 	entries, err := s.Repo.ListAlertHistory(c, 2000)
 	if err != nil {
