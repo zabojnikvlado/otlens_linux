@@ -209,6 +209,24 @@ func (e *Engine) Reset() {
 	e.learningSkipped.Store(0)
 }
 
+// ResetEvaluatorCache drops evaluators built from an in-progress learning
+// snapshot without deleting already persisted anomaly history. The next
+// monitoring observation rebuilds the evaluator from the newly frozen trusted
+// baseline immediately instead of waiting for the normal cache timeout.
+func (e *Engine) ResetEvaluatorCache() {
+	e.mu.Lock()
+	e.evaluator = nil
+	e.evaluatorRevision = 0
+	e.evaluatorBuiltAt = time.Time{}
+	e.previewEvaluator = nil
+	e.previewBuiltAt = time.Time{}
+	e.telemetry.PreviewEvaluatedTotal = 0
+	e.telemetry.PreviewAnomaliesTotal = 0
+	e.telemetry.PreviewTopScore = 0
+	e.telemetry.PreviewTopReason = ""
+	e.mu.Unlock()
+}
+
 func (e *Engine) Telemetry() Telemetry {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

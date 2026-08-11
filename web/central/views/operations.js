@@ -141,7 +141,7 @@ function stopPolling(){
 }
 
 const TAB_LABELS={dashboard:'Dashboard',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
-const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
+const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups, resets & learning',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server
 // still enforces this on every request — see requireView — this is only

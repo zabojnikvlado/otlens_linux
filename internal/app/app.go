@@ -382,6 +382,59 @@ func (a *Application) ResetData(operation string) error {
 	return a.Snapshotter.Reset(operation)
 }
 
+// CompleteLearning freezes every sensor-side learning component against the
+// same point in time. Normal completion is rejected until each enabled
+// baseline has reached its configured minimum duration; force is an explicit
+// break-glass override. Flipping DetectEngine's baseline mode also stops OT
+// value and learned-policy accumulation because those detectors share that
+// learning gate. BehaviorBaseline has its own persisted completion state, and
+// NBA must rebuild its evaluator from the final frozen snapshot immediately.
+func (a *Application) CompleteLearning(force bool) error {
+	if a.DetectEngine == nil || a.BehaviorBaseline == nil {
+		return fmt.Errorf("learning engines are not initialized")
+	}
+
+	now := time.Now().UTC()
+	legacy := a.DetectEngine.BaselineStatus()
+	behavior := a.BehaviorBaseline.Status(now)
+	if !legacy.Enabled && !behavior.Enabled {
+		return fmt.Errorf("baseline learning is disabled")
+	}
+
+	if legacy.Enabled && legacy.Mode != detect.BaselineModeMonitoring {
+		if legacy.LearningStarted.IsZero() {
+			return fmt.Errorf("baseline learning has not started")
+		}
+		if !force && now.Before(legacy.LearningEndsAt) {
+			return fmt.Errorf("minimum learning duration has not elapsed")
+		}
+	}
+	if behavior.Enabled && behavior.Mode != behaviorbaseline.ModeMonitoring {
+		if behavior.LearningStarted.IsZero() {
+			return fmt.Errorf("behavior baseline learning has not started")
+		}
+		if !force && now.Before(behavior.LearningEndsAt) {
+			return fmt.Errorf("minimum behavior learning duration has not elapsed")
+		}
+	}
+
+	if _, err := a.DetectEngine.CompleteBaseline(force); err != nil {
+		return err
+	}
+	if _, err := a.BehaviorBaseline.CompleteLearning(force); err != nil {
+		return err
+	}
+	if a.AnomalyEngine != nil {
+		a.AnomalyEngine.ResetEvaluatorCache()
+	}
+	if a.Snapshotter != nil {
+		if err := a.Snapshotter.Flush(); err != nil {
+			return fmt.Errorf("learning completed but persistence flush failed: %w", err)
+		}
+	}
+	return nil
+}
+
 func (a *Application) Start() {
 
 	// Rehydrate every engine's in-memory state from disk before

@@ -85,8 +85,9 @@ type Engine struct {
 	identityMu   sync.RWMutex
 	identityByIP map[string]string
 
-	startMu         sync.RWMutex
-	learningStarted time.Time
+	startMu          sync.RWMutex
+	learningStarted  time.Time
+	learningComplete bool
 
 	candidateMu sync.RWMutex
 	candidates  map[string]*candidateState
@@ -780,7 +781,11 @@ func (e *Engine) ensureStarted(at time.Time) {
 func (e *Engine) mode(now time.Time) (Mode, time.Time) {
 	e.startMu.RLock()
 	started := e.learningStarted
+	complete := e.learningComplete
 	e.startMu.RUnlock()
+	if complete {
+		return ModeMonitoring, started
+	}
 	if started.IsZero() {
 		return ModeLearning, started
 	}
@@ -797,6 +802,39 @@ func (e *Engine) mode(now time.Time) (Mode, time.Time) {
 		return ModeMonitoring, started
 	}
 	return ModeLearning, started
+}
+
+// CompleteLearning freezes the current trusted behavior baseline and moves the
+// engine into monitoring. The normal path is only allowed after the configured
+// minimum learning duration. force is an explicit break-glass override for an
+// operator who intentionally accepts an immature baseline.
+func (e *Engine) CompleteLearning(force bool) (bool, error) {
+	if !e.config.Enabled {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	mode, _ := e.mode(now)
+
+	e.startMu.Lock()
+	defer e.startMu.Unlock()
+	if e.learningComplete {
+		return false, nil
+	}
+	if e.learningStarted.IsZero() {
+		return false, fmt.Errorf("behavior baseline learning has not started")
+	}
+	if mode == ModeMonitoring {
+		// Persist the derived automatic transition as an explicit frozen state.
+		e.learningComplete = true
+		e.revision.Add(1)
+		return false, nil
+	}
+	if !force && now.Sub(e.learningStarted) < e.config.LearningDuration {
+		return false, fmt.Errorf("minimum behavior learning duration has not elapsed")
+	}
+	e.learningComplete = true
+	e.revision.Add(1)
+	return true, nil
 }
 
 func (e *Engine) readiness(now time.Time) (float64, bool, string) {
@@ -1187,6 +1225,7 @@ func (e *Engine) Reset() {
 	e.patternMu.Unlock()
 	e.startMu.Lock()
 	e.learningStarted = time.Time{}
+	e.learningComplete = false
 	e.startMu.Unlock()
 	e.profiles.Store(0)
 	e.assetProfiles.Store(0)
@@ -1199,7 +1238,7 @@ func (e *Engine) Reset() {
 
 func (e *Engine) Snapshot(now time.Time) Snapshot {
 	mode, started := e.mode(now)
-	result := Snapshot{Version: 4, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), CapturedAt: now, Profiles: make([]Profile, 0, e.profiles.Load()), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Excluded: e.excluded.Load(), Evicted: e.evicted.Load(), Candidates: e.Candidates(0), MinStatSamples: e.config.MinStatSamples, BucketsPerDay: e.bucketsPerDay()}
+	result := Snapshot{Version: 5, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), CapturedAt: now, Profiles: make([]Profile, 0, e.profiles.Load()), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Excluded: e.excluded.Load(), Evicted: e.evicted.Load(), Candidates: e.Candidates(0), MinStatSamples: e.config.MinStatSamples, BucketsPerDay: e.bucketsPerDay()}
 	for i := range e.shards {
 		e.shards[i].mu.RLock()
 		for _, profile := range e.shards[i].profiles {
@@ -1263,7 +1302,7 @@ func (e *Engine) AssetProfile(key AssetKey) (AssetBehaviorProfile, bool) {
 }
 
 func (e *Engine) Restore(snapshot Snapshot) error {
-	if snapshot.Version > 4 {
+	if snapshot.Version > 5 {
 		return fmt.Errorf("unsupported behavior baseline snapshot version %d", snapshot.Version)
 	}
 	e.Reset()
@@ -1332,6 +1371,7 @@ func (e *Engine) Restore(snapshot Snapshot) error {
 	e.evicted.Store(snapshot.Evicted)
 	e.startMu.Lock()
 	e.learningStarted = snapshot.LearningStarted
+	e.learningComplete = snapshot.Mode == ModeMonitoring
 	e.startMu.Unlock()
 	e.revision.Add(1)
 	return nil

@@ -298,6 +298,13 @@ func main() {
 					} else {
 						log.Printf("OTLens sensor %s reset completed", op)
 					}
+				case "sensor.learning.complete":
+					force := strings.EqualFold(strings.TrimSpace(command.Target), "force")
+					if err := application.CompleteLearning(force); err != nil {
+						log.Printf("OTLens sensor learning completion failed: %v", err)
+					} else {
+						log.Printf("OTLens sensor learning completed (forced=%t)", force)
+					}
 				case "sensor.backup.create":
 					name := strings.TrimSpace(command.Target)
 					path, err := application.Snapshotter.Backup(filepath.Join(filepath.Dir(cfg.Persist.Path), "backups"), name)

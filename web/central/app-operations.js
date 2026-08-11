@@ -58,6 +58,7 @@ async function refreshDomains(domains,force=false){
   const paths=[...new Set(due.flatMap(d=>DOMAIN_PATHS[d]||[]))].filter(path=>{
     const permission={dashboard:'dashboard',assets:'assets',devices:'devices',vulnerabilities:'vulnerabilities',tags:'tags',sensors:'sensors',alerts:'alerts',nba:'alerts',incidents:'incidents',rules:'rules',reports:'reports',analysis:'analysis',data:'data',settings:'settings',audit:'audit'};
     const owners=due.filter(d=>(DOMAIN_PATHS[d]||[]).includes(path));
+    if(path==='/incidents/dashboard')return canView('incidents');
     return owners.some(d=>d==='data'&&path==='/sensors'?canView('data'):canView(permission[d]||d));
   });
   const topoPromise=topologyActive?fetchTopology().then(value=>({status:'fulfilled',value})).catch(reason=>({status:'rejected',reason})):Promise.resolve({status:'skipped'});
@@ -71,6 +72,7 @@ async function refreshDomains(domains,force=false){
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
   if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object')alertStats=results['/alerts/stats'].value;
   if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
+  if(ok('/incidents/dashboard')&&results['/incidents/dashboard'].value&&typeof results['/incidents/dashboard'].value==='object')incidentDashboard=results['/incidents/dashboard'].value;
   if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');
   if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object')behaviorOverview=results['/behavior-overview'].value;
   if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-observations?limit=1000'))smbObservations=list('/smb-observations?limit=1000');if(ok('/reports'))reports=list('/reports');
@@ -143,7 +145,7 @@ function stopPolling(){
 }
 
 const TAB_LABELS={dashboard:'Dashboard',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',nba:'Behavior Findings',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
-const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups & resets',users_roles_manage:'Manage users & roles'};
+const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups, resets & learning',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server
 // still enforces this on every request — see requireView — this is only

@@ -377,6 +377,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/live/presence", s.livePresenceUpdate)
 	api.GET("/incidents", requireView(ViewAlerts), s.incidents)
 	api.GET("/incidents/search", requireView(ViewAlerts), s.incidentsSearch)
+	api.GET("/incidents/dashboard", requireView(ViewAlerts), s.incidentsDashboard)
 	api.GET("/incidents/:id", requireView(ViewAlerts), s.incidentDetail)
 	api.PATCH("/incidents/:id", requireAction(ActionAlertConfirmApprove), s.updateIncident)
 	api.POST("/incidents/:id/comments", requireAction(ActionAlertConfirmApprove), s.addIncidentComment)
@@ -394,6 +395,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/malware-incidents/:id/contact-graph", requireView(ViewTopology), s.getMalwareContactGraph)
 	api.GET("/baseline", behaviorReadAccess(), s.baseline)
 	api.POST("/sensors/:id/baseline/candidates/promote", requireAction(ActionAlertConfirmApprove), s.promoteBaselineCandidate)
+	api.POST("/sensors/:id/learning/complete", requireAction(ActionDataManagement), s.completeSensorLearning)
 	api.GET("/dashboard/trends", requireView(ViewDashboard), s.dashboardTrends)
 	api.GET("/reports", requireView(ViewDashboard), s.listReports)
 	api.GET("/reports/:id", requireView(ViewDashboard), s.getReport)
@@ -1698,6 +1700,15 @@ func (s *Server) incidents(c *gin.Context) {
 	c.JSON(http.StatusOK, incidents)
 }
 
+func (s *Server) incidentsDashboard(c *gin.Context) {
+	stats, items, err := s.Repo.IncidentDashboard(c, 5)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"stats": stats, "items": items})
+}
+
 func (s *Server) incidentsSearch(c *gin.Context) {
 	status := strings.TrimSpace(strings.ToLower(c.Query("status")))
 	if status == "all" {
@@ -2148,13 +2159,34 @@ func (s *Server) baseline(c *gin.Context) {
 		respondInternalError(c, e)
 		return
 	}
-	out := make([]map[string]interface{}, 0)
+	registered, e := s.Repo.ListSensors(c.Request.Context())
+	if e != nil {
+		respondInternalError(c, e)
+		return
+	}
+	out := make([]map[string]interface{}, 0, len(registered))
+	seen := make(map[string]struct{}, len(registered))
 	for _, x := range v {
 		var row map[string]interface{}
 		if json.Unmarshal(x.Baseline, &row) == nil {
 			row["SensorID"] = x.SensorID
+			row["telemetry_available"] = true
 			out = append(out, row)
+			seen[x.SensorID] = struct{}{}
 		}
+	}
+	// Keep the learning-control selector useful even before a sensor has sent
+	// its first baseline telemetry. The UI can show the registered sensor as
+	// unavailable instead of rendering an empty select control.
+	for _, sensor := range registered {
+		if _, ok := seen[sensor.ID]; ok {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"SensorID":            sensor.ID,
+			"sensor_name":         sensor.Name,
+			"telemetry_available": false,
+		})
 	}
 	c.JSON(200, out)
 }
@@ -2174,6 +2206,103 @@ func (s *Server) promoteBaselineCandidate(c *gin.Context) {
 	}
 	s.logAudit(c, identityFromContext(c).Username, "behavior baseline candidate promotion queued", c.Param("id")+":"+candidateID)
 	c.Status(http.StatusAccepted)
+}
+
+func (s *Server) completeSensorLearning(c *gin.Context) {
+	var req struct {
+		Force bool `json:"force"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.Force && !identityFromContext(c).Permissions.HasAction(ActionUsersRolesManage) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "force finish requires administrator permission"})
+		return
+	}
+
+	sensorID := strings.TrimSpace(c.Param("id"))
+	telemetry, err := s.Repo.Telemetry(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	type learningStatus struct {
+		Enabled         bool      `json:"enabled"`
+		Mode            string    `json:"mode"`
+		LearningStarted time.Time `json:"learning_started"`
+		LearningEndsAt  time.Time `json:"learning_ends_at"`
+		Behavior        struct {
+			Enabled         bool      `json:"enabled"`
+			Mode            string    `json:"mode"`
+			LearningStarted time.Time `json:"learning_started"`
+			LearningEndsAt  time.Time `json:"learning_ends_at"`
+		} `json:"behavior"`
+	}
+
+	found := false
+	var status learningStatus
+	for _, snapshot := range telemetry {
+		if snapshot.SensorID != sensorID {
+			continue
+		}
+		found = true
+		if err := json.Unmarshal(snapshot.Baseline, &status); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "sensor baseline telemetry is unavailable"})
+			return
+		}
+		break
+	}
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "sensor telemetry not found"})
+		return
+	}
+
+	now := time.Now().UTC()
+	active := false
+	started := true
+	deadline := time.Time{}
+	check := func(enabled bool, mode string, learningStarted, learningEndsAt time.Time) {
+		if !enabled || strings.EqualFold(mode, "monitoring") {
+			return
+		}
+		active = true
+		if learningStarted.IsZero() {
+			started = false
+		}
+		if learningEndsAt.After(deadline) {
+			deadline = learningEndsAt
+		}
+	}
+	check(status.Enabled, status.Mode, status.LearningStarted, status.LearningEndsAt)
+	check(status.Behavior.Enabled, status.Behavior.Mode, status.Behavior.LearningStarted, status.Behavior.LearningEndsAt)
+	if !active {
+		c.JSON(http.StatusConflict, gin.H{"error": "sensor is not in learning mode"})
+		return
+	}
+	if !started {
+		c.JSON(http.StatusConflict, gin.H{"error": "learning has not started yet"})
+		return
+	}
+	if !req.Force && !deadline.IsZero() && now.Before(deadline) {
+		c.JSON(http.StatusConflict, gin.H{"error": "minimum learning duration has not elapsed", "learning_ends_at": deadline})
+		return
+	}
+
+	target := "normal"
+	if req.Force {
+		target = "force"
+	}
+	if err := s.Repo.QueueCommands(c.Request.Context(), sensorID, "sensor.learning.complete", []string{target}); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	action := "sensor learning completion queued"
+	if req.Force {
+		action = "sensor learning force-completion queued"
+	}
+	s.logAudit(c, identityFromContext(c).Username, action, sensorID)
+	c.JSON(http.StatusAccepted, gin.H{"status": "queued", "sensor_id": sensorID, "force": req.Force, "command": "sensor.learning.complete"})
 }
 
 // dashboardTrends backs the Dashboard tab's trend charts — 30 days of

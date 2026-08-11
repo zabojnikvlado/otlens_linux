@@ -156,6 +156,22 @@ type ManagedIncident struct {
 	MITRETechniques []string  `json:"MITRETechniques"`
 }
 
+// IncidentDashboardStats is a lightweight workflow summary used by the
+// dashboard. "Open" intentionally means analyst-actionable workflow states;
+// resolved/closed incidents remain searchable history but do not inflate the
+// dashboard queue.
+type IncidentDashboardStats struct {
+	Total          int `json:"total"`
+	Open           int `json:"open"`
+	New            int `json:"new"`
+	Investigating  int `json:"investigating"`
+	Contained      int `json:"contained"`
+	Resolved       int `json:"resolved"`
+	Closed         int `json:"closed"`
+	HighRiskOpen   int `json:"high_risk_open"`
+	UnassignedOpen int `json:"unassigned_open"`
+}
+
 type IncidentEvent struct {
 	ID         int64     `json:"ID"`
 	IncidentID int64     `json:"IncidentID"`
@@ -697,6 +713,39 @@ func pqStringArrayJSON(v []string) string {
 		out += fmt.Sprintf("%q", s)
 	}
 	return out + "]"
+}
+
+func (r *Repository) IncidentDashboard(ctx context.Context, limit int) (IncidentDashboardStats, []ManagedIncident, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	var stats IncidentDashboardStats
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*)::int,
+			COUNT(*) FILTER (WHERE status IN ('new','investigating','contained'))::int,
+			COUNT(*) FILTER (WHERE status='new')::int,
+			COUNT(*) FILTER (WHERE status='investigating')::int,
+			COUNT(*) FILTER (WHERE status='contained')::int,
+			COUNT(*) FILTER (WHERE status='resolved')::int,
+			COUNT(*) FILTER (WHERE status='closed')::int,
+			COUNT(*) FILTER (WHERE status IN ('new','investigating','contained') AND score >= 75)::int,
+			COUNT(*) FILTER (WHERE status IN ('new','investigating','contained') AND BTRIM(owner)='')::int
+		FROM incidents`).Scan(
+		&stats.Total, &stats.Open, &stats.New, &stats.Investigating, &stats.Contained,
+		&stats.Resolved, &stats.Closed, &stats.HighRiskOpen, &stats.UnassignedOpen,
+	)
+	if err != nil {
+		return IncidentDashboardStats{}, nil, err
+	}
+	items, _, err := r.ListManagedIncidentsPage(ctx, "", "", 0, limit, 0)
+	if err != nil {
+		return IncidentDashboardStats{}, nil, err
+	}
+	return stats, items, nil
 }
 
 func (r *Repository) ListManagedIncidents(ctx context.Context) ([]ManagedIncident, error) {

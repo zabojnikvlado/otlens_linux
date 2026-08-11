@@ -38,18 +38,19 @@ function renderIncidents(){
   const pageSize=document.getElementById('incidents-page-size');if(pageSize)pageSize.value=String(incidentSearchState.limit);
   tbody.innerHTML=rows.map((inc,i)=>`<tr class="incident-row" data-index="${i}"><td><span class="risk-score risk-${esc(String(inc.Severity||'low'))}">${esc(inc.Score||0)}</span></td><td><span class="incident-state state-${esc(inc.Status||'new')}">${esc(inc.Status||'new')}</span></td><td>${esc(inc.SensorID)}</td><td>${esc(inc.IP)}</td><td><span class="severity ${esc(inc.Severity)}">${esc(inc.Severity)}</span></td><td>${esc(inc.Title||'Correlated activity')}<small>${esc(inc.RuleName||'')}</small></td><td>${esc(inc.AlertCount||0)}</td><td>${esc(inc.Confidence||0)}%</td><td>${esc(inc.Owner||'Unassigned')}</td><td>${time(inc.UpdatedAt||inc.LastSeen)}</td></tr>`).join('')||'<tr><td colspan="10">No incidents match the current filters.</td></tr>';
 }
-async function openIncident(index){
-  const inc=incidents[index];if(!inc)return;activeIncidentID=inc.ID;
+async function openIncidentRecord(inc){
+  if(!inc)return;activeIncidentID=inc.ID;
   let detail={Events:[],Comments:[]},dns=[],smb=[];try{[detail,dns,smb]=await Promise.all([api(`/incidents/${inc.ID}`),api(`/dns-observations?sensor_id=${encodeURIComponent(inc.SensorID)}&client_ip=${encodeURIComponent(inc.IP)}&limit=100`),api(`/smb-observations?sensor_id=${encodeURIComponent(inc.SensorID)}&client_ip=${encodeURIComponent(inc.IP)}&limit=100`)]);detail=detail||{Events:[],Comments:[]};detail.Events=Array.isArray(detail.Events)?detail.Events:[];detail.Comments=Array.isArray(detail.Comments)?detail.Comments:[];dns=Array.isArray(dns)?dns:[];smb=Array.isArray(smb)?smb:[]}catch(e){console.warn('incident workbench',e);detail=detail||{Events:[],Comments:[]};dns=[];smb=[]}
   const risks=(assetRiskData||[]).find(x=>x.SensorID===inc.SensorID&&x.IP===inc.IP);
   document.getElementById('incident-modal-title').textContent=`Incident #${inc.ID} · ${inc.IP}`;
   const events=(detail.Events||[]).map(x=>({at:x.EventAt,kind:x.EventType,text:x.Message,severity:x.Severity}));
   document.getElementById('incident-modal-body').innerHTML=`<div class="incident-workbench"><div id="incident-presence" class="incident-presence">Loading analyst presence…</div><section class="incident-hero"><div><span class="risk-score risk-${esc(inc.Severity)}">${esc(inc.Score)}</span><div><h3>${esc(inc.Title)}</h3><p>${esc(inc.Summary||'No analyst summary yet.')}</p></div></div><div><strong>${esc(inc.Confidence)}%</strong><span>confidence</span></div></section><div class="detail-grid"><section><h3>Workflow</h3><label>Status<select id="incident-status">${['new','investigating','contained','resolved','closed'].map(x=>`<option value="${x}" ${x===inc.Status?'selected':''}>${x}</option>`).join('')}</select></label><label>Owner<input id="incident-owner" value="${esc(inc.Owner||'')}" placeholder="analyst"></label><label>Analyst summary<textarea id="incident-summary" rows="4">${esc(inc.Summary||'')}</textarea></label><button id="incident-save" class="ack-btn" data-requires-action="alert_confirm_approve">Save workflow</button></section><section><h3>Asset risk</h3><dl class="status-list"><div><dt>Risk</dt><dd>${risks?`${esc(risks.Score)} / 100 · ${esc(risks.Level)}`:'Not calculated'}</dd></div><div><dt>Reasons</dt><dd>${risks?esc((risks.Reasons||[]).join(' · ')):'—'}</dd></div><div><dt>DNS observations</dt><dd>${dns.length}</dd></div><div><dt>SMB observations</dt><dd>${smb.length}</dd></div></dl><button id="incident-open-asset" class="secondary-btn">Open Asset 360°</button></section></div><h3>Correlation context</h3><dl class="status-list"><div><dt>Rule</dt><dd>${esc(inc.RuleName||'Legacy correlation')}</dd></div><div><dt>MITRE tactics</dt><dd>${esc((inc.MITRETactics||[]).join(' · ')||'—')}</dd></div><div><dt>MITRE techniques</dt><dd>${esc((inc.MITRETechniques||[]).join(' · ')||'—')}</dd></div></dl><h3>Correlation timeline</h3><div class="incident-timeline">${events.length?events.map(x=>`<div class="timeline-item"><time>${time(x.at)}</time><span class="severity ${esc(x.severity)}">${esc(x.kind)}</span><div>${esc(x.text)}</div></div>`).join(''):'<div class="empty-dashboard">No correlated events.</div>'}</div><h3>Analyst notes</h3><div class="incident-comments">${(detail.Comments||[]).map(x=>`<article><strong>${esc(x.Actor||'analyst')}</strong><time>${time(x.CreatedAt)}</time><p>${esc(x.Body)}</p></article>`).join('')||'<p>No comments yet.</p>'}</div><div class="incident-comment-form"><textarea id="incident-comment" rows="2" placeholder="Add investigation note"></textarea><button id="incident-comment-add" class="secondary-btn" data-requires-action="alert_confirm_approve">Add note</button></div></div>`;
   document.getElementById('incident-save').onclick=async()=>{try{await api(`/incidents/${inc.ID}`,{method:'PATCH',body:JSON.stringify({status:document.getElementById('incident-status').value,owner:document.getElementById('incident-owner').value,summary:document.getElementById('incident-summary').value})});document.getElementById('incident-modal').hidden=true;await refreshAll()}catch(e){alert('Incident update failed: '+e.message)}};
-  document.getElementById('incident-comment-add').onclick=async()=>{const body=document.getElementById('incident-comment').value.trim();if(!body)return;try{await api(`/incidents/${inc.ID}/comments`,{method:'POST',body:JSON.stringify({body})});openIncident(index)}catch(e){alert('Comment failed: '+e.message)}};
-  document.getElementById('incident-open-asset').onclick=()=>{document.getElementById('incident-modal').hidden=true;activateTab('assets');const a=(assets||[]).findIndex(x=>x.SensorID===inc.SensorID&&x.IP===inc.IP);if(a>=0)openAsset(a)};
+  document.getElementById('incident-comment-add').onclick=async()=>{const body=document.getElementById('incident-comment').value.trim();if(!body)return;try{await api(`/incidents/${inc.ID}/comments`,{method:'POST',body:JSON.stringify({body})});openIncidentRecord(inc)}catch(e){alert('Comment failed: '+e.message)}};
+  document.getElementById('incident-open-asset').onclick=()=>{document.getElementById('incident-modal').hidden=true;stopIncidentPresence();openDashboardTab('assets');const a=(assets||[]).find(x=>x.SensorID===inc.SensorID&&x.IP===inc.IP);if(a)openAssetDetail(a)};
   document.getElementById('incident-modal').hidden=false;startIncidentPresence(inc.ID);
 }
+function openIncident(index){const inc=incidents[index];if(!inc)return;return openIncidentRecord(inc)}
 document.querySelector('#table-incidents tbody').onclick=e=>{const r=e.target.closest('.incident-row');if(r)openIncident(Number(r.dataset.index))};
 document.getElementById('incidents-status-filter').onchange=()=>refreshIncidentSearch(true);document.getElementById('incidents-risk-filter').onchange=()=>refreshIncidentSearch(true);
 document.getElementById('incidents-page-size').onchange=e=>{incidentSearchState.limit=Number(e.target.value)||100;refreshIncidentSearch(true)};
@@ -107,7 +108,7 @@ document.getElementById('reports-generate').onclick=async()=>{
   finally{btn.disabled=false}
 };
 document.querySelector('#table-alerts tbody').onchange=e=>{const c=e.target.closest('.alert-select');if(!c)return;c.checked?selectedAlerts.add(c.dataset.key):selectedAlerts.delete(c.dataset.key);updateAlertBulkBar()};
-document.getElementById('alerts-all').onchange=e=>{for(const a of alertTableRows.filter(a=>(a.Status||'new')==='new')){const key=`${a.SensorID}::${a.ID}`;e.target.checked?selectedAlerts.add(key):selectedAlerts.delete(key)}renderAlerts()};
+document.getElementById('alerts-all').onchange=e=>{for(const a of alertTableRows.filter(a=>(a.Status||'new')==='new')){const key=`${a.SensorID}::${alertIdentity(a)}`;e.target.checked?selectedAlerts.add(key):selectedAlerts.delete(key)}renderAlerts()};
 async function runAlertBulkAction(action){const grouped=new Map();for(const key of selectedAlerts){const split=key.indexOf('::'),sensor=key.slice(0,split),id=key.slice(split+2);if(!grouped.has(sensor))grouped.set(sensor,[]);grouped.get(sensor).push(id)}if(!grouped.size)return;const label=action==='approve'?'approve and remember':'confirm';if(!confirm(`Really ${label} ${selectedAlerts.size} selected alert(s)?`))return;await Promise.all([...grouped].map(([sensor,targets])=>api(`/sensors/${encodeURIComponent(sensor)}/alerts/actions`,{method:'POST',body:JSON.stringify({action,targets})})));selectedAlerts.clear();updateAlertBulkBar();setTimeout(refreshAll,1000)}
 document.getElementById('alerts-approve').onclick=()=>runAlertBulkAction('approve');
 document.getElementById('alerts-confirm').onclick=()=>runAlertBulkAction('confirm');
@@ -232,10 +233,43 @@ async function deleteSensors(){
 }
 document.querySelector('#table-sensors tbody').addEventListener('change',e=>{if(e.target.matches('.sensor-select'))updateSensorBulk()});document.getElementById('sensors-all').addEventListener('change',e=>{document.querySelectorAll('.sensor-select').forEach(x=>x.checked=e.target.checked);updateSensorBulk()});document.getElementById('sensors-start').onclick=()=>sensorAction('start');document.getElementById('sensors-stop').onclick=()=>sensorAction('stop');document.getElementById('sensors-delete').onclick=()=>deleteSensors();
 
+function dashboardCanView(tab){
+  const alias={health:'sensors',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts'};
+  return canView(tab)||canView(alias[tab]||tab);
+}
 function openDashboardTab(tab){
-  if(!canView(tab))return;
+  if(!dashboardCanView(tab))return false;
   const button=document.querySelector(`.tab[data-tab="${tab}"]`);
-  if(button)button.click();
+  if(button){button.click();return true}
+  return false;
+}
+function revealDashboardTab(tab){
+  if(!dashboardCanView(tab))return false;
+  const button=document.querySelector(`.tab[data-tab="${tab}"]`),view=document.getElementById('view-'+tab);if(!button||!view)return false;
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));button.classList.add('active');
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));view.classList.add('active');
+  return true;
+}
+async function openDashboardAlert(sensor,id){
+  if(!revealDashboardTab('alerts'))return;
+  try{const found=await openAlertByKey(sensor,id);domainLoadedAt.set('alerts',Date.now());if(!found)console.warn('Dashboard alert no longer found',sensor,id)}
+  catch(err){console.warn('Dashboard alert drill-down failed',err)}
+}
+async function openDashboardAlertSeverity(severity){
+  if(!revealDashboardTab('alerts'))return;
+  try{await openAlertsWithFilters({severity,activity:'active'});domainLoadedAt.set('alerts',Date.now())}catch(err){console.warn('Dashboard alert filter failed',err)}
+}
+function openDashboardAssets({query='',lifecycle='all'}={}){
+  if(!openDashboardTab('assets'))return;
+  const q=document.getElementById('assets-filter'),life=document.getElementById('assets-lifecycle-filter');
+  if(q)q.value=query||'';if(life)life.value=lifecycle||'all';
+  try{renderAssets()}catch(err){console.warn('Dashboard asset filter failed',err)}
+}
+async function openDashboardIncident(id){
+  if(!revealDashboardTab('incidents'))return;
+  const inc=(incidentDashboard?.items||[]).find(x=>String(x.ID)===String(id));
+  if(!inc)return;
+  try{await openIncidentRecord(inc);refreshIncidentSearch(false).catch(err=>console.warn('Incident table refresh',err));domainLoadedAt.set('incidents',Date.now())}catch(err){console.warn('Dashboard incident drill-down failed',err)}
 }
 function dashboardStatus(sensor){
   const status=String(sensor.status??sensor.Status??'offline').toLowerCase();
@@ -251,7 +285,8 @@ function dashboardBars(target,items,total,severity=false){
     const percent=Math.max(0,Math.min(100,numericCount/total*100));
     const value=severity?`${numericCount.toLocaleString()} / ${Number(total).toLocaleString()}`:numericCount.toLocaleString();
     const title=severity?`${numericCount.toLocaleString()} of ${Number(total).toLocaleString()} open alerts (${percent.toFixed(percent>=10?0:1)}%)`:`${numericCount.toLocaleString()} of ${Number(total).toLocaleString()}`;
-    return `<div class="bar-row" ${severity?`data-severity="${esc(String(name).toLowerCase())}"`:''}><span class="bar-label" title="${esc(name)}">${esc(name)}</span><span class="bar-track" title="${esc(title)}" aria-label="${esc(title)}"><span class="bar-fill" style="width:${numericCount>0?percent:0}%"></span></span><span class="bar-value">${esc(value)}</span></div>`;
+    const drill=severity?`data-dashboard-severity="${esc(String(name).toLowerCase())}" role="button" tabindex="0"`:`data-dashboard-protocol="${esc(String(name))}" role="button" tabindex="0"`;
+    return `<div class="bar-row" ${severity?`data-severity="${esc(String(name).toLowerCase())}"`:''} ${drill}><span class="bar-label" title="${esc(name)}">${esc(name)}</span><span class="bar-track" title="${esc(title)}" aria-label="${esc(title)}"><span class="bar-fill" style="width:${numericCount>0?percent:0}%"></span></span><span class="bar-value">${esc(value)}</span></div>`;
   }).join('');
 }
 function renderDashboard(){
@@ -265,6 +300,11 @@ function renderDashboard(){
   document.getElementById('dashboard-sensors-stopped').textContent=sensorCounts.stopped;
   document.getElementById('dashboard-sensors-offline').textContent=sensorCounts.offline;
   const authoritativeOpen=Number.isFinite(Number(alertStats?.open))?Number(alertStats.open):openAlerts.length;document.getElementById('dashboard-alerts-open').textContent=authoritativeOpen;
+  const incidentStats=incidentDashboard?.stats||{},openIncidentCount=Number(incidentStats.open)||0,highRiskIncidentCount=Number(incidentStats.high_risk_open)||0,investigatingIncidentCount=Number(incidentStats.investigating)||0;
+  const incidentKPI=document.getElementById('dashboard-incidents-open'),incidentKPIcard=incidentKPI?.closest('.kpi-card'),incidentPanel=document.querySelector('.dashboard-incidents');
+  const incidentsVisible=dashboardCanView('incidents');if(incidentKPIcard)incidentKPIcard.hidden=!incidentsVisible;if(incidentPanel)incidentPanel.hidden=!incidentsVisible;
+  if(incidentKPI)incidentKPI.textContent=openIncidentCount.toLocaleString();
+  const incidentDetail=document.getElementById('dashboard-incidents-detail');if(incidentDetail)incidentDetail.textContent=openIncidentCount?`${highRiskIncidentCount} high-risk · ${investigatingIncidentCount} investigating`:'No active investigations';
   document.getElementById('dashboard-assets').textContent=(assets||[]).length;
   document.getElementById('dashboard-assets-detail').textContent=`${unconfirmedAssets} unconfirmed`;
   document.getElementById('dashboard-rules').textContent=`${activeRules.length} / ${(rules||[]).length}`;
@@ -299,22 +339,29 @@ function renderDashboard(){
   const coverage=(assets||[]).length?Math.round(completeAssets/(assets||[]).length*100):0;
   const exposure=(vulnerabilities||[]).reduce((n,v)=>n+Number(v.StatusCounts?.confirmed||0)+Number(v.StatusCounts?.accepted_risk||0),0);
   const criticalCount=Number.isFinite(Number(alertStats?.open_critical))?Number(alertStats.open_critical):openAlerts.filter(a=>String(a.Severity??a.severity).toLowerCase()==='critical').length;
-  const attention=criticalCount+sensorCounts.offline+exposure;
+  const attention=criticalCount+sensorCounts.offline+exposure+highRiskIncidentCount;
   document.getElementById('dashboard-attention').textContent=attention.toLocaleString();
   document.getElementById('dashboard-coverage').textContent=coverage+'%';
   document.getElementById('dashboard-stale-assets').textContent=staleAssets.toLocaleString();
   document.getElementById('dashboard-exposure').textContent=exposure.toLocaleString();
   const priorities=[];
-  openAlerts.filter(a=>String(a.Severity??a.severity).toLowerCase()==='critical').slice(0,4).forEach(a=>priorities.push({kind:'Critical alert',message:a.Message??a.message??a.Type??'Critical detection',meta:`${a.SensorID??a.sensor_id??'—'} · ${time(a.LastSeen??a.last_seen)}`,tab:'alerts',level:'critical'}));
+  openAlerts.filter(a=>String(a.Severity??a.severity).toLowerCase()==='critical').slice(0,4).forEach(a=>priorities.push({kind:'Critical alert',message:a.Message??a.message??a.Type??'Critical detection',meta:`${a.SensorID??a.sensor_id??'—'} · ${time(a.LastSeen??a.last_seen)}`,tab:'alerts',level:'critical',alertID:a.ID??a.AlertKey,sensorID:a.SensorID??a.sensor_id}));
+  (incidentDashboard?.items||[]).filter(x=>['new','investigating','contained'].includes(String(x.Status||'').toLowerCase())&&Number(x.Score)>=75).slice(0,2).forEach(x=>priorities.push({kind:'High-risk incident',message:x.Title||`Incident #${x.ID}`,meta:`${x.SensorID||'—'} · score ${x.Score} · ${x.Status}`,tab:'incidents',level:'critical',incidentID:x.ID}));
   (sensors||[]).filter(s=>dashboardStatus(s)==='offline').slice(0,3).forEach(s=>priorities.push({kind:'Sensor offline',message:s.name??s.Name??s.id??s.ID??'Sensor',meta:'Heartbeat unavailable',tab:'sensors',level:'critical'}));
   if(exposure)priorities.push({kind:'Vulnerability exposure',message:`${exposure} confirmed or accepted finding(s)`,meta:'Review remediation decisions',tab:'vulnerabilities',level:'high'});
   if(staleAssets)priorities.push({kind:'Inventory hygiene',message:`${staleAssets} stale asset(s)`,meta:'Validate or retire old identities',tab:'assets',level:'medium'});
   const priorityEl=document.getElementById('dashboard-priority');
-  priorityEl.innerHTML=priorities.length?priorities.slice(0,7).map(x=>`<button class="priority-item priority-${esc(x.level)}" data-dashboard-tab="${esc(x.tab)}"><span class="priority-icon"></span><span><strong>${esc(x.kind)}</strong><b>${esc(x.message)}</b><small>${esc(x.meta)}</small></span><i>›</i></button>`).join(''):'<div class="empty-dashboard priority-clear"><strong>No immediate actions</strong><span>Current telemetry has no critical operational or security issue.</span></div>';
+  priorityEl.innerHTML=priorities.length?priorities.slice(0,7).map(x=>`<button class="priority-item priority-${esc(x.level)}" data-dashboard-tab="${esc(x.tab)}" ${x.alertID?`data-dashboard-alert-id="${esc(x.alertID)}" data-dashboard-alert-sensor="${esc(x.sensorID||'')}"`:''} ${x.incidentID?`data-dashboard-incident-id="${esc(x.incidentID)}"`:''}><span class="priority-icon"></span><span><strong>${esc(x.kind)}</strong><b>${esc(x.message)}</b><small>${esc(x.meta)}</small></span><i>›</i></button>`).join(''):'<div class="empty-dashboard priority-clear"><strong>No immediate actions</strong><span>Current telemetry has no critical operational or security issue.</span></div>';
   const riskyIPs=new Set();openAlerts.forEach(a=>{const raw=JSON.stringify(a);(assets||[]).forEach(x=>{if(x.IP&&raw.includes(x.IP))riskyIPs.add(x.SensorID+'::'+x.IP)})});
   const riskBuckets=[['High',riskyIPs.size],['Needs profiling',unknownIdentity],['Stale',staleAssets],['Healthy',Math.max(0,(assets||[]).length-new Set([...riskyIPs]).size-unknownIdentity-staleAssets)]];
   const riskTotal=Math.max(1,riskBuckets.reduce((n,x)=>n+x[1],0));
   const riskEl=document.getElementById('dashboard-asset-risk');riskEl.innerHTML=`<div class="risk-donut" style="--risk-high:${Math.round(riskBuckets[0][1]/riskTotal*100)};--risk-profile:${Math.round(riskBuckets[1][1]/riskTotal*100)};--risk-stale:${Math.round(riskBuckets[2][1]/riskTotal*100)}"><div><strong>${(assets||[]).length}</strong><span>assets</span></div></div><div class="risk-legend">${riskBuckets.map(([name,count],i)=>`<button data-dashboard-tab="assets"><i class="risk-dot risk-dot-${i}"></i><span>${esc(name)}</span><strong>${count}</strong></button>`).join('')}</div>`;
+
+  const dashboardIncidentEl=document.getElementById('dashboard-incidents');
+  if(dashboardIncidentEl){
+    const activeIncidents=(incidentDashboard?.items||[]).filter(x=>['new','investigating','contained'].includes(String(x.Status||'').toLowerCase())).slice(0,5);
+    dashboardIncidentEl.innerHTML=activeIncidents.length?activeIncidents.map(x=>`<button class="dashboard-incident-item" data-dashboard-incident-id="${esc(x.ID)}"><span class="risk-score risk-${esc(String(x.Severity||'medium').toLowerCase())}">${esc(x.Score||0)}</span><span><strong>${esc(x.Title||`Incident #${x.ID}`)}</strong><small>${esc(x.SensorID||'—')} · ${esc(x.IP||'—')} · ${esc(x.Status||'new')} · ${time(x.UpdatedAt||x.LastSeen)}</small></span><i>›</i></button>`).join(''):'<div class="empty-dashboard"><span>No active incidents.</span></div>';
+  }
 
   const severityOrder=['critical','high','medium','low','info'];
   const hasAuthoritativeSeverity=severityOrder.every(x=>Number.isFinite(Number(alertStats?.['open_'+x])));
@@ -333,7 +380,7 @@ function renderDashboard(){
 
   const recent=[...openAlerts].sort((a,b)=>new Date(b.LastSeen??b.last_seen??0)-new Date(a.LastSeen??a.last_seen??0)).slice(0,7);
   const recentEl=document.getElementById('dashboard-recent');
-  recentEl.innerHTML=recent.length?recent.map(a=>`<div class="activity-item"><span class="activity-time">${time(a.LastSeen??a.last_seen)}</span><span class="activity-sensor">${esc(a.SensorID??a.sensor_id??'—')}</span><span class="activity-message"><span class="severity ${esc(String(a.Severity??a.severity??'info').toLowerCase())}">${esc(a.Severity??a.severity??'info')}</span>${esc(a.Message??a.message??a.Type??a.type??'Alert')}</span></div>`).join(''):'<div class="empty-dashboard">No open security alerts</div>';
+  recentEl.innerHTML=recent.length?recent.map(a=>`<button class="activity-item" data-dashboard-alert-id="${esc(a.ID??a.AlertKey??'')}" data-dashboard-alert-sensor="${esc(a.SensorID??a.sensor_id??'')}"><span class="activity-time">${time(a.LastSeen??a.last_seen)}</span><span class="activity-sensor">${esc(a.SensorID??a.sensor_id??'—')}</span><span class="activity-message"><span class="severity ${esc(String(a.Severity??a.severity??'info').toLowerCase())}">${esc(a.Severity??a.severity??'info')}</span>${esc(a.Message??a.message??a.Type??a.type??'Alert')}</span></button>`).join(''):'<div class="empty-dashboard">No open security alerts</div>';
 
   const learning=(baselines||[]).filter(b=>String(b.mode??b.Mode??'').toLowerCase()==='learning');
   document.getElementById('dashboard-baseline').textContent=learning.length?`Learning on ${learning.length} sensor(s)`:(baselines||[]).length?'Monitoring':'No data';
@@ -349,7 +396,19 @@ function renderDashboard(){
   drawDailyBarChart('dashboard-alerts-trend',trends.AlertsByDay,30);
   drawDailyBarChart('dashboard-assets-trend',trends.NewAssetsByDay,30);
 }
-document.getElementById('view-dashboard').addEventListener('click',e=>{const target=e.target.closest('[data-dashboard-tab]');if(target)openDashboardTab(target.dataset.dashboardTab)});
+async function handleDashboardDrilldown(target){
+  if(!target)return;
+  if(target.dataset.dashboardAlertId){await openDashboardAlert(target.dataset.dashboardAlertSensor||'',target.dataset.dashboardAlertId);return}
+  if(target.dataset.dashboardIncidentId){await openDashboardIncident(target.dataset.dashboardIncidentId);return}
+  if(target.dataset.dashboardSeverity){await openDashboardAlertSeverity(target.dataset.dashboardSeverity);return}
+  if(target.dataset.dashboardProtocol){openDashboardAssets({query:target.dataset.dashboardProtocol});return}
+  if(target.dataset.dashboardAssetsLifecycle){openDashboardAssets({lifecycle:target.dataset.dashboardAssetsLifecycle});return}
+  if(target.dataset.dashboardAssetsUnconfirmed){openDashboardAssets({query:'unconfirmed'});return}
+  if(target.dataset.dashboardTab)openDashboardTab(target.dataset.dashboardTab);
+}
+document.getElementById('view-dashboard').addEventListener('click',e=>{const target=e.target.closest('[data-dashboard-alert-id],[data-dashboard-incident-id],[data-dashboard-severity],[data-dashboard-protocol],[data-dashboard-assets-lifecycle],[data-dashboard-assets-unconfirmed],[data-dashboard-tab]');handleDashboardDrilldown(target)});
+document.getElementById('view-dashboard').addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const target=e.target.closest('[role="button"][data-dashboard-tab],.bar-row[tabindex="0"]');if(!target)return;e.preventDefault();handleDashboardDrilldown(target)});
+
 
 function renderBaseline(){const learning=baselines.filter(b=>b.mode==='learning'||b.behavior?.mode==='learning'),d=document.getElementById('baseline-dot'),t=document.getElementById('baseline-text');if(learning.length){d.className='dot learning';const readiness=learning.map(x=>Number(x.behavior?.readiness??x.readiness??0)).filter(Number.isFinite);const pct=readiness.length?Math.round(readiness.reduce((a,b)=>a+b,0)/readiness.length*100):0;const ends=learning.map(x=>new Date(x.behavior?.learning_ends_at||x.learning_ends_at)).filter(x=>!isNaN(x)).sort((a,b)=>a-b)[0];t.textContent=`Learning ${learning.length}/${baselines.length} · ${pct}% ready${ends?' · minimum until '+ends.toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'}):''} · behavioral alerts suppressed`}else{d.className='dot monitoring';t.textContent=baselines.length?'Monitoring · trusted baseline mature':'No baseline data'}}
 function renderSettings(){

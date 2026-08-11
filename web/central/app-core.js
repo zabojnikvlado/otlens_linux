@@ -1,4 +1,4 @@
-const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilities=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[],incidents=[],assetSecurity=[],dnsObservations=[],smbObservations=[],threatIntelSources=[],threatIntelIndicators=[],reports=[],sensorMetrics=[],healthcheckData=null,assetRiskData=[],correlationRules=[],udpConversations=[],behaviorFindings=[],behaviorOverview={profiles:[]},udpTelemetry={totals:{},protocols:{},top_protocol:''},udpPacketRateState=null,trends={AlertsByDay:[],NewAssetsByDay:[]},alertStats={total:0,open:0,active:0,resolved:0,unreviewed:0,confirmed:0,approved:0,open_critical:0,open_high:0,open_medium:0,open_low:0,open_info:0};let network,nodesDS,edgesDS;let topologyColourMode='class',purdueTopologyData=null;const topologyPositionCache=new Map();const selected=new Set();
+const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilities=[],tags=[],alerts=[],rules=[],sensors=[],baselines=[],changes=[],events=[],analysisJobs=[],backups=[],settings={},users=[],roles=[],audit=[],incidents=[],assetSecurity=[],dnsObservations=[],smbObservations=[],threatIntelSources=[],threatIntelIndicators=[],reports=[],sensorMetrics=[],healthcheckData=null,assetRiskData=[],correlationRules=[],udpConversations=[],behaviorFindings=[],behaviorOverview={profiles:[]},udpTelemetry={totals:{},protocols:{},top_protocol:''},udpPacketRateState=null,trends={AlertsByDay:[],NewAssetsByDay:[]},alertStats={total:0,open:0,active:0,resolved:0,unreviewed:0,confirmed:0,approved:0,open_critical:0,open_high:0,open_medium:0,open_low:0,open_info:0},incidentDashboard={stats:{total:0,open:0,new:0,investigating:0,contained:0,resolved:0,closed:0,high_risk_open:0,unassigned_open:0},items:[]};let network,nodesDS,edgesDS;let topologyColourMode='class',purdueTopologyData=null;const topologyPositionCache=new Map();const selected=new Set();
 // Auth state — populated from GET /v1/me on boot and again right after
 // login. permissions.view drives which nav tabs are shown (server-side
 // requireView enforces the same thing, this just reflects it in the UI);
@@ -13,11 +13,11 @@ const connectionState={api:'unknown',apiText:'',live:'idle',liveSince:0,lastEven
 const DOMAIN_TTL_MS=15000;
 const domainLoadedAt=new Map(),pendingLoads=new Map();
 const DOMAIN_PATHS={
-  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry','/behavior-overview'],
+  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry','/behavior-overview','/incidents/dashboard'],
   assets:['/assets','/asset-security-status','/asset-risk','/behavior-overview'],devices:['/devices'],
   vulnerabilities:['/vulnerabilities'],tags:['/tags','/tags/changes','/tags/events','/sensors'],
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/alerts/stats','/dns-observations?limit=1000','/smb-observations?limit=1000','/behavior-overview'],
-  nba:['/behavior-findings','/baseline','/behavior-overview'],
+  nba:['/behavior-findings','/baseline','/behavior-overview','/sensors'],
   incidents:['/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],users:[],settings:['/settings'],audit:['/audit'],
   topology:['/udp-conversations?active=true','/behavior-overview'],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]

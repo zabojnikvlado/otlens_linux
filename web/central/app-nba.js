@@ -8,8 +8,9 @@ function behaviorProfile(sensor,ip){return (behaviorOverview.profiles||[]).find(
 function behaviorState(profile){return profile?.state||((behaviorOverview.learning_complete&&Number(behaviorOverview.coverage)>=99.5)?'healthy':'learning')}
 function behaviorBadge(profile){const state=behaviorState(profile),score=profile?Math.round(Number(profile.health_score||0)):'—';return `<span class="behavior-badge behavior-${esc(state)}" title="${esc(profile?.top_reason||state)}">${esc(score)}${score==='—'?'':' health'}</span>`}
 function renderNetworkBehavior(){
-  const overview=behaviorOverview||{},health=Math.max(0,Math.min(100,Number(overview.network_health||0))),state=overview.state||'learning',hero=document.getElementById('network-behavior-hero');if(!hero)return;
-  hero.className=`network-behavior-hero behavior-${state}`;hero.dataset.dashboardTab=canView('alerts')?'nba':'assets';document.getElementById('network-health-score').textContent=state==='learning'?'Learning':`${Math.round(health)}%`;document.getElementById('network-health-bar').style.width=`${health}%`;
+  const overview=behaviorOverview||{},health=Math.max(0,Math.min(100,Number(overview.network_health||0))),readiness=Math.max(0,Math.min(100,Number(overview.learning_readiness||0))),state=overview.state||'learning',hero=document.getElementById('network-behavior-hero');if(!hero)return;
+  const barValue=state==='learning'?readiness:health,bar=document.getElementById('network-health-bar');
+  hero.className=`network-behavior-hero behavior-${state}`;hero.dataset.dashboardTab=canView('alerts')?'nba':'assets';document.getElementById('network-health-score').textContent=state==='learning'?'Learning':`${Math.round(health)}%`;bar.style.width=`${barValue}%`;bar.parentElement?.setAttribute('aria-label',state==='learning'?`Learning readiness ${Math.round(readiness)}%`:`Network health ${Math.round(health)}%`);
   document.getElementById('network-health-state').textContent=state==='healthy'?'Healthy network behavior':state==='degraded'?'Behavior degradation detected':state==='critical'?'Major behavior anomaly':'Building reliable baselines';
   document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':`${Math.round(Number(overview.learning_readiness||0))}% ready`;document.getElementById('network-coverage').textContent=`${Math.round(Number(overview.coverage||0))}% mature-asset coverage`;
   document.getElementById('network-active-baselines').textContent=Number(overview.active_baselines||0).toLocaleString();document.getElementById('network-behavior-alerts').textContent=Number(overview.behavior_alerts||0).toLocaleString();document.getElementById('network-affected-assets').textContent=`${Number(overview.affected_assets||0)} affected assets`;
@@ -29,10 +30,11 @@ function renderBehaviorFindings(){
   body.innerHTML=rows.map(item=>{
     const evidence=nbaEvidence(item);
     const id=nbaID(item);
-    return `<tr class="clickable-row nba-row" data-id="${esc(id)}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${nbaPercent(evidence.confidence)}</td><td>${esc(evidence.assessment_count??nbaValue(item,'Count',0))}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td>${esc(nbaReasons(evidence.reasons))}</td></tr>`;
+    return `<tr class="clickable-row nba-row" data-id="${esc(id)}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td><button class="secondary-btn behavior-details" type="button">Details</button></td></tr>`;
   }).join('');
   document.getElementById('nba-count').textContent=`${rows.length} finding${rows.length===1?'':'s'}`;
-  body.querySelectorAll('.nba-row').forEach(row=>row.onclick=()=>showBehaviorFinding(row.dataset.id));
+  body.querySelectorAll('.nba-row').forEach(row=>row.onclick=e=>{if(e.target.closest('button'))return;showBehaviorFinding(row.dataset.id)});
+  body.querySelectorAll('.behavior-details').forEach(button=>button.onclick=e=>{e.stopPropagation();const row=button.closest('.nba-row');if(row)showBehaviorFinding(row.dataset.id)});
 }
 
 async function showBehaviorFinding(id){
@@ -45,10 +47,13 @@ async function showBehaviorFinding(id){
       <div><strong>Sensor</strong><span>${esc(nbaValue(item,'SensorID','—'))}</span></div>
       <div><strong>Asset</strong><span>${esc(nbaValue(item,'IP','—'))}</span></div>
       <div><strong>Severity</strong><span>${esc(nbaValue(item,'Severity','—'))}</span></div>
+      <div><strong>State</strong><span>${esc(nbaValue(item,'Status','—'))}</span></div>
       <div><strong>Risk score</strong><span>${nbaScore(evidence.risk_score)}</span></div>
       <div><strong>Confidence</strong><span>${nbaPercent(evidence.confidence)}</span></div>
       <div><strong>Peer</strong><span>${esc(evidence.peer_id||'—')}</span></div>
       <div><strong>Assessments</strong><span>${esc(evidence.assessment_count??nbaValue(item,'Count',0))}</span></div>
+      <div><strong>Alert candidate</strong><span>${evidence.alert_candidate===true?'Yes':evidence.alert_candidate===false?'No':'—'}</span></div>
+      <div><strong>Incident candidate</strong><span>${evidence.incident_candidate===true?'Yes':evidence.incident_candidate===false?'No':'—'}</span></div>
       <div><strong>First seen</strong><span>${time(nbaValue(item,'FirstSeen'))}</span></div>
       <div><strong>Last seen</strong><span>${time(nbaValue(item,'LastSeen'))}</span></div>
     </div>
@@ -96,6 +101,71 @@ function learningCandidateRows(){
   });
   return rows.sort((a,b)=>Number(b.c.observations||0)-Number(a.c.observations||0));
 }
+function learningSensorRows(){
+  const validTime=value=>{const ms=Date.parse(value||'');return Number.isFinite(ms)&&ms>Date.parse('2000-01-01T00:00:00Z')?ms:0};
+  const registered=new Map();
+  (sensors||[]).forEach(s=>{
+    const id=String(s.id??s.ID??'').trim();if(!id)return;
+    const name=String(s.name??s.Name??'').trim(),site=String(s.site_id??s.SiteID??'').trim(),hostname=String(s.hostname??s.Hostname??'').trim();
+    registered.set(id,{id,name,site,hostname});
+  });
+  const baselineBySensor=new Map();
+  (baselines||[]).forEach(b=>{const id=String(b.SensorID||b.sensor_id||'').trim();if(id)baselineBySensor.set(id,b)});
+  const ids=new Set([...registered.keys(),...baselineBySensor.keys()]);
+  return [...ids].map(sensor=>{
+    const b=baselineBySensor.get(sensor)||{},identity=registered.get(sensor)||{},behavior=b.behavior||{},legacyMode=String(b.mode||'').toLowerCase(),behaviorMode=String(behavior.mode||'').toLowerCase();
+    const legacyEnabled=b.enabled!==false,behaviorEnabled=behavior.enabled!==false;
+    const legacyLearning=legacyEnabled&&legacyMode==='learning',behaviorLearning=behaviorEnabled&&behaviorMode==='learning';
+    const legacyMonitoring=legacyEnabled&&legacyMode==='monitoring',behaviorMonitoring=behaviorEnabled&&behaviorMode==='monitoring';
+    const legacyStart=legacyLearning?validTime(b.learning_started):0,behaviorStart=behaviorLearning?validTime(behavior.learning_started):0;
+    const legacyEnd=legacyLearning?validTime(b.learning_ends_at):0,behaviorEnd=behaviorLearning?validTime(behavior.learning_ends_at):0;
+    const deadline=Math.max(legacyEnd,behaviorEnd),active=legacyLearning||behaviorLearning;
+    const started=active&&(!legacyLearning||legacyStart>0)&&(!behaviorLearning||behaviorStart>0);
+    const state=active?'learning':(legacyMonitoring||behaviorMonitoring?'monitoring':'unavailable');
+    const fallbackName=String(b.sensor_name||'').trim(),name=identity.name||fallbackName;
+    const displayName=name&&name!==sensor?`${name} (${sensor})`:sensor;
+    return {sensor,name,displayName,site:identity.site||'',hostname:identity.hostname||'',state,active,started,deadline,minElapsed:active&&deadline>0&&Date.now()>=deadline,readiness:Number(behavior.readiness??b.readiness??0),mature:Number(behavior.mature_assets??b.mature_assets??0),learning:Number(behavior.learning_assets??b.learning_assets??0),rate:Number(behavior.new_pattern_rate??b.new_pattern_rate??0)};
+  }).filter(x=>x.sensor).sort((a,b)=>a.displayName.localeCompare(b.displayName));
+}
+function renderLearningControls(){
+  const select=document.getElementById('learning-finish-sensor'),finish=document.getElementById('learning-finish'),force=document.getElementById('learning-force-finish');
+  if(!select||!finish||!force)return;
+  const rows=learningSensorRows(),previous=select.value;
+  select.innerHTML=rows.length?rows.map(x=>`<option value="${esc(x.sensor)}">${esc(x.displayName)} · ${esc(x.state)}</option>`).join(''):'<option value="">No registered sensors</option>';
+  if(rows.some(x=>x.sensor===previous))select.value=previous;
+  else if(rows.some(x=>x.active))select.value=rows.find(x=>x.active).sensor;
+  select.disabled=!rows.length;
+  const current=()=>rows.find(x=>x.sensor===select.value)||null;
+  const sync=()=>{
+    const row=current(),allowed=can('data_management'),forceAllowed=allowed&&can('users_roles_manage');
+    finish.disabled=!allowed||!row||!row.active||!row.started||!row.minElapsed;
+    force.hidden=!forceAllowed||!row||!row.active||row.minElapsed;
+    force.disabled=!forceAllowed||!row||!row.active||!row.started||row.minElapsed;
+    if(!row)finish.title='No registered sensor is available';
+    else if(!row.active)finish.title=row.state==='monitoring'?'This sensor is already monitoring':'Learning state is not available for this sensor';
+    else if(!row.started)finish.title=force.title='Learning starts after the first eligible traffic observation';
+    else if(!row.minElapsed)finish.title='Available after the minimum learning duration';
+    else finish.title='Freeze the current trusted baseline and activate monitoring';
+  };
+  select.onchange=sync;sync();
+
+  const details=row=>{
+    const total=row.mature+row.learning,minimum=row.minElapsed?'elapsed':'NOT elapsed';
+    return `Readiness: ${Math.round(row.readiness*1000)/10}%\nMature assets: ${row.mature}/${total}\nNew-pattern rate: ${Math.round(row.rate*1000)/10}%\nMinimum learning duration: ${minimum}`;
+  };
+  finish.onclick=async()=>{
+    const row=current();if(!row||finish.disabled)return;
+    if(!confirm(`Finish learning for ${row.displayName}?\n\n${details(row)}\n\nThe current trusted baseline will be frozen and behavioral detection will become active.`))return;
+    finish.disabled=true;force.disabled=true;
+    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/learning/complete`,{method:'POST',body:JSON.stringify({force:false})});finish.textContent='Queued';setTimeout(()=>{finish.textContent='Finish learning now';refreshView('nba',true)},1200)}catch(error){alert(error.parsed?.error||error.message);finish.textContent='Finish learning now';sync()}
+  };
+  force.onclick=async()=>{
+    const row=current();if(!row||force.disabled)return;
+    if(!confirm(`FORCE finish learning for ${row.displayName}?\n\n${details(row)}\n\nWarning: the minimum learning duration has not elapsed. This can freeze an incomplete trusted baseline and increase false positives.`))return;
+    finish.disabled=true;force.disabled=true;
+    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/learning/complete`,{method:'POST',body:JSON.stringify({force:true})});force.textContent='Queued';setTimeout(()=>{force.textContent='Force finish';refreshView('nba',true)},1200)}catch(error){alert(error.parsed?.error||error.message);force.textContent='Force finish';sync()}
+  };
+}
 function renderLearningQuality(){
   const o=behaviorOverview||{},set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value};
   const readiness=Number(o.learning_readiness||0),coverage=Number(o.time_coverage||0),rate=Number(o.new_pattern_rate||0);
@@ -113,24 +183,67 @@ function renderLearningQuality(){
   set('learning-preview-score',Number(o.preview_top_score||0)>0?Number(o.preview_top_score).toFixed(1):'—');
   set('learning-preview-reason',o.preview_top_reason||'No preview anomaly');
   set('learning-quality-state',o.learning_complete?'Monitoring with mature trusted baseline':`${learningPercent(readiness)} ready`);
+  renderLearningControls();
 
   const rows=learningCandidateRows(),body=document.querySelector('#table-learning-candidates tbody');
   set('learning-candidate-note',`${rows.length.toLocaleString()} candidate${rows.length===1?'':'s'} shown from current sensor telemetry`);
   if(!body)return;
   body.innerHTML=rows.map(({sensor,c})=>{
     const k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false;
-    const baseStatus=!eligible?(c.reason||'security/policy excluded'):ready?'ready for review':'collecting evidence';
-    const status=eligible&&c.reason?`${baseStatus} · ${c.reason}`:baseStatus;
+    const shortStatus=!eligible?'excluded':ready?'ready for review':'collecting';
     const service=[k.protocol||k.transport||'unknown',k.service_port||''].filter(Boolean).join('/');
     const disabled=!ready||!can('alert_confirm_approve');
-    return `<tr><td>${esc(sensor)}</td><td>${esc(k.src_ip||'—')} → ${esc(k.dst_ip||'—')}</td><td>${esc(service||'—')}</td><td>${esc([k.day_class,k.shift,k.context].filter(Boolean).join(' · ')||'—')}</td><td>${Number(c.observations||0).toLocaleString()}</td><td>${Number(c.distinct_days||0)}</td><td>${esc(status)}</td><td><button class="secondary-btn learning-promote" data-sensor="${esc(sensor)}" data-id="${esc(c.id||'')}" ${disabled?'disabled':''}>Promote</button></td></tr>`;
-  }).join('')||'<tr><td colspan="8">No shadow-baseline candidates.</td></tr>';
-  body.querySelectorAll('.learning-promote').forEach(button=>button.onclick=async()=>{
+    const evidence=`${Number(c.observations||0).toLocaleString()} obs · ${Number(c.distinct_days||0)} day${Number(c.distinct_days||0)===1?'':'s'}`;
+    return `<tr class="clickable-row learning-candidate-row"><td>${esc(sensor)}</td><td>${esc(k.src_ip||'—')} → ${esc(k.dst_ip||'—')}</td><td>${esc(service||'—')}</td><td>${esc(evidence)}</td><td>${esc(shortStatus)}</td><td class="behavior-row-actions"><button class="secondary-btn learning-candidate-details" type="button">Details</button><button class="secondary-btn learning-promote" type="button" ${disabled?'disabled':''}>Promote</button></td></tr>`;
+  }).join('')||'<tr><td colspan="6">No shadow-baseline candidates.</td></tr>';
+  body.querySelectorAll('.learning-candidate-row').forEach((row,index)=>row.onclick=e=>{if(e.target.closest('button'))return;showLearningCandidate(rows[index])});
+  body.querySelectorAll('.learning-candidate-details').forEach((button,index)=>button.onclick=e=>{e.stopPropagation();showLearningCandidate(rows[index])});
+  body.querySelectorAll('.learning-promote').forEach((button,index)=>button.onclick=async e=>{
+    e.stopPropagation();
+    const row=rows[index];if(!row?.c?.id)return;
     if(!confirm('Promote this reviewed relationship into the trusted behavior baseline?'))return;
     button.disabled=true;
-    try{await api(`/sensors/${encodeURIComponent(button.dataset.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:button.dataset.id})});button.textContent='Queued';setTimeout(()=>refreshView('nba',true),1500)}catch(error){alert(error.parsed?.error||error.message);button.disabled=false}
+    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:row.c.id})});button.textContent='Queued';setTimeout(()=>refreshView('nba',true),1500)}catch(error){alert(error.parsed?.error||error.message);button.disabled=false}
   });
+}
+
+
+function showLearningCandidate(row){
+  if(!row?.c)return;
+  const sensor=row.sensor||'—',c=row.c,k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false;
+  const service=[k.protocol||k.transport||'unknown',k.service_port||''].filter(Boolean).join('/');
+  const status=!eligible?'Excluded from promotion':ready?'Ready for review':'Collecting evidence';
+  const reason=c.reason||(!eligible?'Security or policy evidence prevents promotion':ready?'Candidate meets the configured evidence thresholds':'Candidate has not yet met the configured promotion thresholds');
+  const days=Array.isArray(c.observation_days)&&c.observation_days.length?c.observation_days.join(', '):'—';
+  const body=document.getElementById('candidate-detail-body');if(!body)return;
+  body.innerHTML=`
+    <dl class="status-list detail-status-list candidate-detail-list">
+      <div><dt>Sensor</dt><dd>${esc(sensor)}</dd></div>
+      <div><dt>Candidate ID</dt><dd class="wrap-anywhere">${esc(c.id||'—')}</dd></div>
+      <div><dt>Source</dt><dd>${esc(k.src_ip||'—')}</dd></div>
+      <div><dt>Destination</dt><dd>${esc(k.dst_ip||'—')}</dd></div>
+      <div><dt>Service</dt><dd>${esc(service||'—')}</dd></div>
+      <div><dt>Transport</dt><dd>${esc(k.transport||'—')}</dd></div>
+      <div><dt>Protocol</dt><dd>${esc(k.protocol||'—')}</dd></div>
+      <div><dt>Service port</dt><dd>${esc(k.service_port??'—')}</dd></div>
+      <div><dt>Scope</dt><dd>${esc(k.scope||'—')}</dd></div>
+      <div><dt>Time bucket</dt><dd>${esc(k.time_bucket??'—')}</dd></div>
+      <div><dt>Day class</dt><dd>${esc(k.day_class||'—')}</dd></div>
+      <div><dt>Shift</dt><dd>${esc(k.shift||'—')}</dd></div>
+      <div><dt>Context</dt><dd>${esc(k.context||'—')}</dd></div>
+      <div><dt>Observations</dt><dd>${Number(c.observations||0).toLocaleString()}</dd></div>
+      <div><dt>Distinct days</dt><dd>${Number(c.distinct_days||0).toLocaleString()}</dd></div>
+      <div><dt>Observation days</dt><dd class="wrap-anywhere">${esc(days)}</dd></div>
+      <div><dt>First seen</dt><dd>${time(c.first_seen)}</dd></div>
+      <div><dt>Last seen</dt><dd>${time(c.last_seen)}</dd></div>
+      <div><dt>Eligible</dt><dd>${eligible?'Yes':'No'}</dd></div>
+      <div><dt>Ready for promotion</dt><dd>${ready?'Yes':'No'}</dd></div>
+      <div><dt>Status</dt><dd>${esc(status)}</dd></div>
+    </dl>
+    <h3>Review reason</h3><div class="detail-message wrap-anywhere">${esc(reason)}</div>`;
+  document.getElementById('candidate-detail-modal').hidden=false;
 }
 
 const originalRenderBehaviorFindings=renderBehaviorFindings;
 renderBehaviorFindings=function(...args){const result=originalRenderBehaviorFindings.apply(this,args);renderLearningQuality();return result};
+renderLearningControls();

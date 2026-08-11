@@ -199,6 +199,37 @@ func (e *Engine) publishBaselineComplete() {
 	)
 }
 
+// CompleteBaseline freezes the legacy communication/asset baseline and moves
+// every detector that keys its learning state off baselineMode into monitoring.
+// This includes policy learning and OT value learning. The normal path is only
+// allowed after learningDuration; force is an explicit operator override.
+func (e *Engine) CompleteBaseline(force bool) (bool, error) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	if !e.baselineEnabled {
+		e.baselineMode = BaselineModeMonitoring
+		return false, nil
+	}
+	if e.baselineMode == BaselineModeMonitoring {
+		return false, nil
+	}
+	if e.baselineMode == "" || e.learningStarted.IsZero() {
+		return false, fmt.Errorf("baseline learning has not started")
+	}
+	if !force && time.Since(e.learningStarted) < e.learningDuration {
+		return false, fmt.Errorf("minimum learning duration has not elapsed")
+	}
+
+	e.baselineMode = BaselineModeMonitoring
+	e.publishBaselineComplete()
+	logger.Log.Info("Baseline learning manually completed, now monitoring for deviations",
+		zap.Int("learned_patterns", len(e.learnedPatterns)),
+		zap.Int("learned_assets", len(e.learnedAssets)),
+		zap.Bool("forced", force))
+	return true, nil
+}
+
 // PublishBaselineStateIfEstablished re-publishes the learned-asset
 // snapshot if baseline learning had already completed before this
 // process started (e.g. state restored from a previous run's
@@ -356,6 +387,7 @@ func baselineKey(
 // BaselineStatus reports the current learning/monitoring state, so
 // it's visible over the API rather than only in the startup logs.
 type BaselineStatus struct {
+	Enabled         bool          `json:"enabled"`
 	Mode            BaselineMode  `json:"mode"`
 	LearningStarted time.Time     `json:"learning_started"`
 	LearningEndsAt  time.Time     `json:"learning_ends_at"`
@@ -416,5 +448,5 @@ func (e *Engine) BaselineStatus() BaselineStatus {
 	if len(e.learnedPatterns) > 0 {
 		novelty = float64(recent) / float64(len(e.learnedPatterns))
 	}
-	return BaselineStatus{Mode: mode, LearningStarted: e.learningStarted, LearningEndsAt: e.learningStarted.Add(e.learningDuration), MinimumDuration: e.learningDuration, Readiness: readiness, Ready: ready, ReadinessReason: reason, LearnedPatterns: len(e.learnedPatterns), LearnedAssets: len(e.learnedAssets), MatureAssets: mature, LearningAssets: len(e.learnedAssets) - mature, NewPatternRate: novelty}
+	return BaselineStatus{Enabled: e.baselineEnabled, Mode: mode, LearningStarted: e.learningStarted, LearningEndsAt: e.learningStarted.Add(e.learningDuration), MinimumDuration: e.learningDuration, Readiness: readiness, Ready: ready, ReadinessReason: reason, LearnedPatterns: len(e.learnedPatterns), LearnedAssets: len(e.learnedAssets), MatureAssets: mature, LearningAssets: len(e.learnedAssets) - mature, NewPatternRate: novelty}
 }

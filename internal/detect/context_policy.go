@@ -546,6 +546,8 @@ func (e *Engine) resetPolicyLearningState() {
 	e.hostnameByMAC = make(map[string]string)
 	e.gratuitousARP = make(map[string][]time.Time)
 	e.externalPeers = make(map[string]map[string]bool)
+	e.externalFlows = make(map[string]externalFlowState)
+	e.externalFlowLastSweep = time.Time{}
 	e.dnsTunnel = make(map[string]*dnsTunnelState)
 	e.lastPacketObserved = time.Time{}
 	// Keep otAssets derived from current context, but forget protocol-inferred

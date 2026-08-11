@@ -43,6 +43,7 @@ func endpointControls() []EndpointControl {
 		{"POST", "/v1/analysis/jobs", ActionAnalysisManage, "action", true},
 		{"POST", "/v1/data/backups", ActionDataManagement, "action", true},
 		{"POST", "/v1/data/reset", ActionDataManagement, "action", true},
+		{"POST", "/v1/sensors/:id/learning/complete", ActionDataManagement, "action", true},
 		{"POST", "/v1/users", ActionUsersRolesManage, "action", true},
 		{"PATCH", "/v1/users/:id", ActionUsersRolesManage, "action", true},
 		{"POST", "/v1/users/:id/reset-password", ActionUsersRolesManage, "action", true},

@@ -51,11 +51,11 @@ const (
 	AlertHoneypotLateralMovement AlertType = "honeypot_lateral_movement"
 
 	// AlertExternalCommunication fires when a private/internal address
-	// exchanges traffic with a public one — see
-	// handleExternalCommunication's doc comment. Deduplicated per
-	// internal IP (not per external target), so one chatty device
-	// contacting many different external addresses is still a single
-	// alert whose Count records recurrence episodes, not one alert per destination.
+	// exchanges traffic with a public Internet unicast endpoint — see
+	// handleExternalCommunication's doc comment. Direction is the initiator
+	// direction of the stateful conversation (so replies to an outbound DNS/NTP
+	// request do not become a second inbound alert). Findings are deduplicated
+	// per internal asset, initiator direction, and bounded public-network scope.
 	AlertExternalCommunication AlertType = "external_communication"
 
 	// AlertSegmentationViolation fires when two VLANs whose configured

@@ -160,6 +160,8 @@ type Engine struct {
 	hostnameByMAC            map[string]string
 	gratuitousARP            map[string][]time.Time
 	externalPeers            map[string]map[string]bool
+	externalFlows            map[string]externalFlowState
+	externalFlowLastSweep    time.Time
 	dnsTunnel                map[string]*dnsTunnelState
 	lastPacketObserved       time.Time
 }
@@ -281,6 +283,7 @@ func NewEngine(
 		hostnameByMAC:            make(map[string]string),
 		gratuitousARP:            make(map[string][]time.Time),
 		externalPeers:            make(map[string]map[string]bool),
+		externalFlows:            make(map[string]externalFlowState),
 		dnsTunnel:                make(map[string]*dnsTunnelState),
 	}
 
