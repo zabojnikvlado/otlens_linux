@@ -344,6 +344,35 @@ func New(cfg *config.Config) (*Application, error) {
 
 }
 
+// ResetData applies a Data Management reset consistently across persisted
+// engine state and transient protocol/conversation buffers that are not stored in
+// SQLite. Without this, old observations could be uploaded again immediately
+// after an apparently successful reset.
+func (a *Application) ResetData(operation string) error {
+	switch operation {
+	case "telemetry", "database", "factory", "analysis":
+		if a.DNSEngine != nil {
+			a.DNSEngine.Reset()
+		}
+		if a.SMBEngine != nil {
+			a.SMBEngine.Reset()
+		}
+		if a.ProtocolEngine != nil {
+			a.ProtocolEngine.Reset()
+		}
+		if a.UDPConversations != nil {
+			a.UDPConversations.Reset()
+		}
+	case "assets":
+		// UDP conversations are flow-like inventory and belong with asset/flow
+		// data. DNS/SMB/protocol evidence is intentionally retained.
+		if a.UDPConversations != nil {
+			a.UDPConversations.Reset()
+		}
+	}
+	return a.Snapshotter.Reset(operation)
+}
+
 func (a *Application) Start() {
 
 	// Rehydrate every engine's in-memory state from disk before

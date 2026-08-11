@@ -131,6 +131,13 @@ func IsSensorAuthError(err error) bool {
 	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized
 }
 
+// IsSensorResetPendingError reports that Central is intentionally holding
+// telemetry until an already-queued Data Management reset is consumed.
+func IsSensorResetPendingError(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusConflict && httpErr.Code == "sensor_reset_pending"
+}
+
 func enrollmentRequired(err error) bool {
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {

@@ -55,7 +55,7 @@ const (
 	// handleExternalCommunication's doc comment. Deduplicated per
 	// internal IP (not per external target), so one chatty device
 	// contacting many different external addresses is still a single
-	// alert whose Count climbs, not one alert per destination.
+	// alert whose Count records recurrence episodes, not one alert per destination.
 	AlertExternalCommunication AlertType = "external_communication"
 
 	// AlertSegmentationViolation fires when two VLANs whose configured
@@ -152,4 +152,8 @@ type Alert struct {
 	// large enough scale, capable of exceeding PostgreSQL's per-JSONB-
 	// value size limit outright.
 	Synced bool
+
+	// lastSyncTouch is runtime-only throttling state. It is deliberately
+	// unexported so persistence/telemetry do not treat it as alert evidence.
+	lastSyncTouch time.Time
 }

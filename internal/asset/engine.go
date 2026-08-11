@@ -171,6 +171,17 @@ func (e *Engine) Update(
 		asset.FromAnalysis = false
 	}
 
+	// A learning reset intentionally keeps inventory but clears what counts as
+	// trusted baseline. Once the new learning window closes, an older retained
+	// asset that was not seen during that window must become reviewable again
+	// when it reappears.
+	if exists && e.baselineEstablished && !e.knownFromBaseline[mac] && asset.Confirmed {
+		asset.Confirmed = false
+		if e.eventBus != nil {
+			e.eventBus.Publish(core.Event{Type: core.EventAssetUnconfirmed, Data: core.UnconfirmedAsset{MAC: mac, IP: ip}})
+		}
+	}
+
 	if ip != "" {
 
 		if fromARP {
@@ -270,7 +281,6 @@ func (e *Engine) Restore(assets []*Asset) {
 	e.assets = make(map[string]*Asset, len(assets))
 
 	for _, a := range assets {
-
 
 		// Recompute against the *current* config.Deception.Stations,
 		// not whatever Score happened to be persisted — otherwise a
@@ -375,8 +385,21 @@ func (e *Engine) Confirm(mac string) bool {
 	}
 
 	a.Confirmed = true
+	// Explicit analyst confirmation is trusted even if this asset was absent
+	// from the most recent passive learning window.
+	e.knownFromBaseline[mac] = true
 
 	return true
+}
+
+// ResetBaseline clears only learning/trust classification. Inventory remains;
+// Data Management's asset/database resets decide separately whether to remove
+// asset records.
+func (e *Engine) ResetBaseline() {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.baselineEstablished = false
+	e.knownFromBaseline = make(map[string]bool)
 }
 
 // Clear removes every tracked asset — the admin UI's "wipe database"

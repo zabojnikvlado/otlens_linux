@@ -238,6 +238,11 @@ func (w *Worker) sync(ctx context.Context) {
 				w.markUnregistered()
 				break
 			}
+			if IsSensorResetPendingError(uploadErr) {
+				// This is expected coordination with Data Management, not a sync
+				// failure. The next cycle pulls/applies the reset command first.
+				break
+			}
 			if attempt < 3 {
 				select {
 				case <-ctx.Done():
@@ -247,6 +252,10 @@ func (w *Worker) sync(ctx context.Context) {
 			}
 		}
 		if uploadErr != nil {
+			if IsSensorResetPendingError(uploadErr) {
+				log.Printf("OTLens telemetry deferred while Central reset is pending")
+				return
+			}
 			// ConsecutiveFailures means failed synchronization *cycles*, not HTTP
 			// retry attempts. Counting each of the three retries separately made
 			// the UI report 27 failures after only nine failed sync cycles and

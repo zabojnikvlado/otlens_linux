@@ -193,7 +193,7 @@ func (e *Engine) raiseHoneypotAlert(alertType AlertType, severity, key, message,
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -217,7 +217,5 @@ func (e *Engine) raiseHoneypotAlert(alertType AlertType, severity, key, message,
 		e.logNewAlert(alert)
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 }

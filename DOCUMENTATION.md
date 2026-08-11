@@ -426,21 +426,48 @@ full factory reset) on Central or on selected sensors. Destructive resets
 require typing `RESET` to confirm. Central backups are listed with
 download/delete actions.
 
-**Central resets and sensor resets are separate things that reset
-different copies of the data.** A Central-side reset (e.g. "Telemetry
-database") only clears what Central has cached in PostgreSQL — it does
-**not** touch the sensor's own local state, so if that sensor is still
-running, its very next sync re-uploads whatever it still has locally and
-the reset data reappears within one sync interval, looking like the reset
-did nothing. To actually clear the underlying data, reset the sensor
-itself (Sensors section of this tab) — "SQLite database" or "Assets and
-flows" clears the sensor's own live engines, not just Central's copy of
-them. "Telemetry database" on the Central side also clears the durable
-`topology_edges`/`topology_nodes` ledger (see
-[Why topology connections persist](#why-topology-connections-persist)) —
-without that, the Topology tab would keep showing every previously-seen
-connection regardless of any Central reset, since that ledger is
-deliberately designed to survive a sensor's own pruning.
+**Central and sensor data are separate copies, but Central now coordinates
+destructive resets with enrolled sensors.** When a Central operation has a
+sensor-side equivalent, Central queues the corresponding reset command while
+holding telemetry/correlation writes, clears PostgreSQL, and refuses telemetry
+from that sensor until the reset command has been delivered. This prevents the
+old local snapshot from immediately repopulating a freshly reset Central.
+Sensor-only resets clear the selected sensor's live/SQLite state and the
+matching Central mirror.
+
+The reset scopes are intentionally different:
+
+- **Central Telemetry / derived data** clears telemetry snapshots, metrics,
+  protocol/DNS/SMB observations, flows/topology and derived asset risk. Alerts,
+  incidents and configuration remain.
+- **Central Alerts** clears retained alert history (including behavior findings),
+  alert-derived risk and queued alert SIEM deliveries. Incident investigations
+  remain as audit/investigation records.
+- **Central Incidents** clears correlated and malware/contact-tracing incidents
+  while retaining alerts; a correlation cutoff prevents static pre-reset alert
+  history from instantly recreating the same incidents.
+- **Central Analysis** clears analysis-job rows and uploaded PCAP files.
+- **Central Rules** clears managed rule sets/assignments. **SIEM** clears only
+  the delivery queue.
+- **Full Central data reset** clears observed/derived/history data: alerts and
+  behavior findings, incidents/events/comments, telemetry/metrics, protocol and
+  flow/topology history, asset risk/security/vulnerability findings,
+  reconnaissance results/jobs/profiles, analysis jobs/files, SIEM queue,
+  generated report history, imported tags, and managed rule sets/assignments.
+  It preserves the authentication/control plane (users, sessions, built-in
+  roles and protected administrator), sensor/site enrollment, audit/backups and
+  operator/reference policy such as asset context, VLAN/segmentation, risk and
+  correlation settings, reconnaissance campaign/credential definitions,
+  threat-intelligence sources and vulnerability advisory catalog.
+- **Sensor SQLite data plane** clears local assets/flows/tags/history/alerts and
+  every learned model but preserves configured/managed rules. **Factory data
+  reset** additionally removes managed custom rules. **Telemetry** clears
+  observed data mirrored to Central while preserving alerts, rules and learning.
+  **Learning** restarts the entire classic + behavior/NBA learning stack.
+  Assets, Alerts, Tags, Analysis and Rules clear only their named local scope.
+
+Full/reset operations are serialized with the periodic SQLite snapshot flush so
+an older flush cannot race the reset and resurrect deleted state on disk.
 
 ### Audit log
 

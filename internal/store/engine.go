@@ -246,6 +246,22 @@ func (e *Engine) handle(msg ics.Message) {
 	}
 }
 
+// ResetBaseline starts OT value-range learning over without deleting tag
+// inventory/history. Existing MinValue/MaxValue envelopes are cleared so stale
+// ranges from the previous learning window cannot immediately alarm.
+func (e *Engine) ResetBaseline() {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.learningActive = true
+	for _, tag := range e.tags {
+		if tag == nil {
+			continue
+		}
+		tag.MinValue = nil
+		tag.MaxValue = nil
+	}
+}
+
 // expandAddressRange turns a possibly multi-value observation
 // (a []uint16 or []bool decoded from a multi-register/coil
 // read/write — see internal/ics/modbus.go) into one (address, scalar

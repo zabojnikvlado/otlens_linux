@@ -134,6 +134,16 @@ func (e *CorrelationEngine) Start() {
 }
 func (e *CorrelationEngine) Stop() { e.stopOnce.Do(func() { close(e.stop) }); e.wg.Wait() }
 
+// Reset clears behavior findings/correlation state derived from the previous
+// learning model.
+func (e *CorrelationEngine) Reset() {
+	e.mu.Lock()
+	e.findings = make(map[string]*Finding)
+	e.order = nil
+	e.telemetry = CorrelationTelemetry{}
+	e.mu.Unlock()
+}
+
 func (e *CorrelationEngine) Observe(assessment RiskAssessment) *Finding {
 	if assessment.Timestamp.IsZero() {
 		assessment.Timestamp = time.Now().UTC()

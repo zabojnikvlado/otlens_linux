@@ -13,8 +13,9 @@ func TestBuildBehaviorOverview(t *testing.T) {
 	baseline := json.RawMessage(`{"behavior":{"enabled":true,"mode":"monitoring","profiles":842,"asset_profiles":8}}`)
 	now := time.Now()
 	alerts := []AlertHistoryEntry{
-		{SensorID: "s1", IP: "10.0.0.15", Type: "behavior_finding", Status: "new", LastSeen: now, Evidence: map[string]interface{}{"risk_score": 82.0, "confidence": .9, "reasons": []interface{}{"new peer"}}},
-		{SensorID: "s1", IP: "10.0.0.20", Type: "behavior_finding", Status: "approved", Evidence: map[string]interface{}{"risk_score": 99.0}},
+		{SensorID: "s1", IP: "10.0.0.15", Type: "behavior_finding", Status: "new", Active: true, LastSeen: now, Evidence: map[string]interface{}{"risk_score": 82.0, "confidence": .9, "reasons": []interface{}{"new peer"}}},
+		{SensorID: "s1", IP: "10.0.0.20", Type: "behavior_finding", Status: "approved", Active: false, Evidence: map[string]interface{}{"risk_score": 99.0}},
+		{SensorID: "s1", IP: "10.0.0.30", Type: "behavior_finding", Status: "new", Active: false, LastSeen: now.Add(-time.Hour), Evidence: map[string]interface{}{"risk_score": 95.0}},
 	}
 	got := buildBehaviorOverview(alerts, []management.TelemetrySnapshot{{SensorID: "s1", Baseline: baseline}}, 10)
 	if !got.LearningComplete || got.ActiveBaselines != 842 || got.Coverage != 80 {

@@ -123,6 +123,15 @@ func (e *Engine) publishExchange(exchange DNSExchange) {
 	e.bus.Publish(core.Event{Type: core.EventDNSExchange, Timestamp: timestamp, Data: exchange})
 }
 
+func (e *Engine) Reset() {
+	e.mu.Lock()
+	e.observations = nil
+	e.mu.Unlock()
+	if e.tracker != nil {
+		e.tracker.Reset()
+	}
+}
+
 func (e *Engine) GetObservations() []Observation {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

@@ -29,6 +29,16 @@ func NewWithConfig(bus *core.EventBus, config CorrelatorConfig) *Engine {
 	return &Engine{bus: bus, correlator: NewCorrelatorWithConfig(config), stop: make(chan struct{})}
 }
 
+func (e *Engine) Reset() {
+	e.mu.Lock()
+	e.observations = nil
+	e.exchanges = nil
+	e.mu.Unlock()
+	if e.correlator != nil {
+		e.correlator.Reset()
+	}
+}
+
 func (e *Engine) Start() {
 	packets := e.bus.Subscribe(core.EventUDPConversationPacket)
 	streams := e.bus.Subscribe(core.EventTCPStreamData)

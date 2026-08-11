@@ -291,9 +291,9 @@ func main() {
 						application.IPFIXEngine.Stop()
 					}
 					log.Printf("OTLens sensor capture stopped by Central command")
-				case "sensor.database.reset", "sensor.factory.reset", "sensor.learning.reset", "sensor.assets.reset", "sensor.alerts.reset", "sensor.tags.reset", "sensor.analysis.reset":
+				case "sensor.telemetry.reset", "sensor.database.reset", "sensor.factory.reset", "sensor.learning.reset", "sensor.assets.reset", "sensor.alerts.reset", "sensor.tags.reset", "sensor.analysis.reset", "sensor.rules.reset":
 					op := strings.TrimSuffix(strings.TrimPrefix(command.Type, "sensor."), ".reset")
-					if err := application.Snapshotter.Reset(op); err != nil {
+					if err := application.ResetData(op); err != nil {
 						log.Printf("OTLens sensor reset failed: %v", err)
 					} else {
 						log.Printf("OTLens sensor %s reset completed", op)

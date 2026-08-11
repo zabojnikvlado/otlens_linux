@@ -22,6 +22,9 @@ func (e *Engine) startBehaviorFindingWatch(bus *core.EventBus) {
 }
 
 func (e *Engine) handleBehaviorFinding(finding nba.Finding) {
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 	alertType := AlertBehaviorFinding
 	if finding.IncidentCandidate {
 		alertType = AlertBehaviorIncident
@@ -46,7 +49,7 @@ func (e *Engine) handleBehaviorFinding(finding nba.Finding) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	alert := e.alerts[key]
-	if alert != nil && !e.allowAlertOccurrenceLocked(alert) {
+	if alert != nil && alert.Status == AlertStatusApproved {
 		return
 	}
 	created := false
@@ -63,12 +66,10 @@ func (e *Engine) handleBehaviorFinding(finding nba.Finding) {
 	alert.Message = fmt.Sprintf("Network behavior finding on %s: score %.1f, %d correlated assessment(s)", finding.AssetID, finding.Score, finding.AssessmentCount)
 	alert.IP = ip
 	alert.Evidence = evidence
-	alert.LastSeen = now
-	alert.Count = finding.AssessmentCount
-	if alert.Count == 0 {
-		alert.Count = 1
-	}
-	alert.Synced = false
+	// Count represents finding episodes, not the number of packet/risk
+	// assessments folded into this finding. The latter remains available in
+	// Evidence["assessment_count"].
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 	if created {
 		e.logNewAlert(alert)
 	}

@@ -314,3 +314,12 @@ Nové pravidlo sa **automaticky** objaví:
 ## Extended OT protocol operations
 
 The built-in **Critical ICS Operation** rule now also receives security-relevant events from EtherNet/IP, DNP3, OPC UA, BACnet/IP, IEC 60870-5-104 and PROFINET DCP parsers. Examples include DNP3 Operate/Direct Operate, BACnet WriteProperty and ReinitializeDevice, IEC-104 control commands and clock synchronization, PROFINET DCP Set and selected CIP write-like services.
+
+
+### Suppression cardinality
+
+Custom rules default to `aggregate`. `suppression.mode: every` is intentionally
+a high-cardinality mode: every matching event/packet gets a distinct alert key.
+Use it only when per-event alert records are required; otherwise prefer
+`aggregate` or `interval` to avoid packet-rate alert growth. The Central rule
+editor displays a warning whenever `Every occurrence` is selected.

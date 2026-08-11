@@ -10,6 +10,7 @@ package persist
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/asset"
@@ -63,7 +64,8 @@ var allBuckets = []string{bucketAssets, bucketFlows, bucketTags, bucketAlerts, b
 // losing a few seconds of it on an unclean shutdown is an acceptable
 // price for not slowing down capture.
 type Snapshotter struct {
-	db *DB
+	db   *DB
+	ioMu sync.Mutex
 
 	assetEngine       *asset.Engine
 	flowEngine        *flow.Engine
@@ -160,6 +162,14 @@ func (s *Snapshotter) Restore() error {
 
 	s.storeEngine.RestoreTags(tags)
 
+	var baseline detect.BaselineSnapshot
+
+	if err := loadBlob(s.db, bucketMeta, blobKeyBaseline, &baseline); err != nil {
+		return err
+	}
+
+	s.detectEngine.RestoreBaseline(baseline)
+
 	alerts, err := loadKeyed[*detect.Alert](s.db, bucketAlerts)
 
 	if err != nil {
@@ -191,14 +201,6 @@ func (s *Snapshotter) Restore() error {
 	}
 
 	s.storeEngine.RestoreControlEvents(events)
-
-	var baseline detect.BaselineSnapshot
-
-	if err := loadBlob(s.db, bucketMeta, blobKeyBaseline, &baseline); err != nil {
-		return err
-	}
-
-	s.detectEngine.RestoreBaseline(baseline)
 
 	var behavior behaviorbaseline.Snapshot
 	if err := loadBlob(s.db, bucketMeta, blobKeyBehaviorBaseline, &behavior); err != nil {
@@ -285,6 +287,12 @@ func (s *Snapshotter) Flush() error {
 }
 
 func (s *Snapshotter) flush() error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	return s.flushLocked()
+}
+
+func (s *Snapshotter) flushLocked() error {
 
 	s.prune()
 
@@ -414,44 +422,64 @@ func (s *Snapshotter) Close() error {
 	return s.db.Close()
 }
 
+func (s *Snapshotter) resetLearningState() {
+	s.detectEngine.ResetLearningState()
+	s.assetEngine.ResetBaseline()
+	s.storeEngine.ResetBaseline()
+	s.behaviorBaseline.Reset()
+	s.anomalyEngine.Reset()
+	s.riskEngine.Reset()
+	s.correlationEngine.Reset()
+}
+
 func (s *Snapshotter) Reset(operation string) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	switch operation {
+	case "telemetry":
+		// Central telemetry reset: clear data mirrored to Central without
+		// deleting alert/rule history or restarting the learned baseline.
+		s.assetEngine.Restore(nil)
+		s.flowEngine.Restore(nil)
+		s.storeEngine.RestoreTags(nil)
+		s.storeEngine.RestoreValueChanges(nil)
+		s.storeEngine.RestoreControlEvents(nil)
 	case "database":
-		// Clear all observed data, including records learned from imported
-		// PCAP files, but preserve detection-rule configuration.
+		// Full local data-plane reset. Rules/configuration survive.
 		s.assetEngine.Restore(nil)
 		s.flowEngine.Restore(nil)
 		s.storeEngine.RestoreTags(nil)
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
 		s.detectEngine.RestoreAlerts(nil)
-		s.detectEngine.ResetBaseline()
-		s.detectEngine.RestoreKnownMAC(map[string]string{})
+		s.resetLearningState()
 	case "factory":
-		// Factory data reset additionally removes custom/managed rules.
-		// Built-in rules remain because RestoreRules(nil) only removes
-		// managed custom rules and leaves the built-in seed intact.
+		// Factory data reset additionally removes managed custom rules.
 		s.assetEngine.Restore(nil)
 		s.flowEngine.Restore(nil)
 		s.storeEngine.RestoreTags(nil)
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
 		s.detectEngine.RestoreAlerts(nil)
-		s.detectEngine.ResetBaseline()
-		s.detectEngine.RestoreKnownMAC(map[string]string{})
+		s.resetLearningState()
 		s.detectEngine.RestoreRules(nil)
 	case "assets":
 		s.assetEngine.Restore(nil)
 		s.flowEngine.Restore(nil)
 	case "alerts":
 		s.detectEngine.RestoreAlerts(nil)
+	case "rules":
+		s.detectEngine.RestoreRules(nil)
 	case "tags":
 		s.storeEngine.RestoreTags(nil)
 		s.storeEngine.RestoreValueChanges(nil)
 		s.storeEngine.RestoreControlEvents(nil)
+		s.detectEngine.ResetOTAnomalyState()
 	case "learning":
-		s.detectEngine.ResetBaseline()
-		s.detectEngine.RestoreKnownMAC(map[string]string{})
+		// Learning reset must reset every model derived from the previous
+		// learning window, not only classic new-communication baseline.
+		s.resetLearningState()
 	case "analysis":
 		// Remove records that still originate exclusively from imported
 		// PCAP analysis while retaining anything subsequently observed live.
@@ -502,9 +530,12 @@ func (s *Snapshotter) Reset(operation string) error {
 	default:
 		return fmt.Errorf("unsupported reset operation %q", operation)
 	}
-	return s.flush()
+	return s.flushLocked()
 }
+
 func (s *Snapshotter) Backup(directory, name string) (string, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	if name == "" {
 		name = "sensor-" + time.Now().UTC().Format("20060102-150405")
 	}

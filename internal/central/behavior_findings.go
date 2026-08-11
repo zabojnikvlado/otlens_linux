@@ -100,7 +100,7 @@ func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.Te
 
 	byAsset := make(map[string]*AssetBehaviorProfile)
 	for _, alert := range alerts {
-		if !strings.HasPrefix(alert.Type, "behavior_") || alert.Status == "approved" {
+		if !strings.HasPrefix(alert.Type, "behavior_") || !alert.Active {
 			continue
 		}
 		key := alert.SensorID + "\x00" + alert.IP

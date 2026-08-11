@@ -104,6 +104,12 @@ func (e *Engine) Manager() *Manager {
 	return e.manager
 }
 
+func (e *Engine) Reset() {
+	if e.manager != nil {
+		e.manager.Reset()
+	}
+}
+
 func (e *Engine) Stats() ManagerStats {
 	return e.manager.Stats()
 }

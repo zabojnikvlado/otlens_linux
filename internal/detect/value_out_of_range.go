@@ -36,6 +36,9 @@ func (e *Engine) startValueOutOfRangeWatch(bus *core.EventBus) {
 }
 
 func (e *Engine) handleValueOutOfRange(ov core.OutOfRangeValue) {
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 
 	if !e.isRuleEnabled(string(AlertValueOutOfRange)) {
 		return
@@ -58,7 +61,7 @@ func (e *Engine) handleValueOutOfRange(ov core.OutOfRangeValue) {
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -88,7 +91,5 @@ func (e *Engine) handleValueOutOfRange(ov core.OutOfRangeValue) {
 		e.logNewAlert(alert)
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 }

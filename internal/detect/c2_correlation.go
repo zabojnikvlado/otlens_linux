@@ -88,6 +88,9 @@ func (e *Engine) handleC2DNS(o passivedns.Observation) {
 			signals = append(signals, "threat_intel_match")
 		}
 	}
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 	if score < e.c2Correlation.MinScore {
 		return
 	}
@@ -116,7 +119,7 @@ func (e *Engine) raiseC2Correlated(ip, target string, score, confidence int, sig
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	a, exists := e.alerts[id]
-	if exists && !e.allowAlertOccurrenceLocked(a) {
+	if exists && a.Status == AlertStatusApproved {
 		return
 	}
 	if !exists {
@@ -128,7 +131,5 @@ func (e *Engine) raiseC2Correlated(ip, target string, score, confidence int, sig
 		e.alerts[id] = a
 		e.logNewAlert(a)
 	}
-	a.LastSeen = now
-	a.Count++
-	a.Synced = false
+	e.recordEpisodeAlertLocked(a, now, e.c2Correlation.DNSWindow)
 }

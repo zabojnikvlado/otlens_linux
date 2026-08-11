@@ -137,6 +137,17 @@ func (e *Engine) GetAnomalies() []Anomaly {
 	return out
 }
 
+// Reset clears all anomaly/evaluator state derived from the previous baseline.
+func (e *Engine) Reset() {
+	e.mu.Lock()
+	e.evaluator = nil
+	e.anomalies = nil
+	e.last = make(map[string]time.Time)
+	e.telemetry = Telemetry{}
+	e.mu.Unlock()
+	e.learningSkipped.Store(0)
+}
+
 func (e *Engine) Telemetry() Telemetry {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

@@ -50,7 +50,7 @@ func (e *Engine) startExternalCommunicationWatch(bus *core.EventBus) {
 // Deduplicated per internal IP, not per (internal, external) pair: a
 // device that talks to many different external addresses (typical for
 // anything doing normal DNS/NTP/update-check traffic) is one alert
-// whose Count climbs, not a flood of one alert per destination. Traffic
+// whose episode Count increases only after a quiet gap, not a flood of one alert per destination. Traffic
 // entirely inside the network, or — unusually — entirely outside it,
 // isn't this rule's concern; exactly one side must be private.
 func (e *Engine) handleExternalCommunication(packet core.Packet) {
@@ -84,7 +84,7 @@ func (e *Engine) handleExternalCommunication(packet core.Packet) {
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -112,8 +112,6 @@ func (e *Engine) handleExternalCommunication(packet core.Packet) {
 
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 
 }

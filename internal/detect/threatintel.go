@@ -75,7 +75,7 @@ func (e *Engine) raiseThreatAlert(kind AlertType, local, matched string, indicat
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	alert, exists := e.alerts[key]
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 	if !exists {
@@ -83,7 +83,5 @@ func (e *Engine) raiseThreatAlert(kind AlertType, local, matched string, indicat
 		e.alerts[key] = alert
 		e.logNewAlert(alert)
 	}
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 }

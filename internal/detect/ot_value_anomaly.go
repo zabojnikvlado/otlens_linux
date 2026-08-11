@@ -130,6 +130,9 @@ func (e *Engine) checkSilentOTTags(now time.Time) {
 }
 
 func (e *Engine) raiseOTAnomaly(kind, key, ip string, value float64, confidence int, reason string, evidence map[string]interface{}) {
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 	if !e.isRuleEnabled(string(AlertOTValueAnomaly)) {
 		return
 	}
@@ -140,7 +143,7 @@ func (e *Engine) raiseOTAnomaly(kind, key, ip string, value float64, confidence 
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	a, exists := e.alerts[id]
-	if exists && !e.allowAlertOccurrenceLocked(a) {
+	if exists && a.Status == AlertStatusApproved {
 		return
 	}
 	if !exists {
@@ -152,9 +155,7 @@ func (e *Engine) raiseOTAnomaly(kind, key, ip string, value float64, confidence 
 		e.alerts[id] = a
 		e.logNewAlert(a)
 	}
-	a.LastSeen = now
-	a.Count++
-	a.Synced = false
+	e.recordEpisodeAlertLocked(a, now, alertEpisodeGap)
 }
 func numericValue(v any) (float64, bool) {
 	switch x := v.(type) {

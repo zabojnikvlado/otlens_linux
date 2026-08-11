@@ -28,6 +28,16 @@ func New(bus *core.EventBus, useStreams ...bool) *Engine {
 	streamMode := len(useStreams) > 0 && useStreams[0]
 	return &Engine{bus: bus, trees: map[string]string{}, files: map[string]string{}, useStreams: streamMode, streamBuffers: map[string][]byte{}, requests: map[string]Observation{}}
 }
+func (e *Engine) Reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observations = nil
+	e.trees = map[string]string{}
+	e.files = map[string]string{}
+	e.requests = map[string]Observation{}
+	e.streamBuffers = map[string][]byte{}
+}
+
 func (e *Engine) Start() {
 	if e.useStreams {
 		ch := e.bus.Subscribe(core.EventTCPStreamData)

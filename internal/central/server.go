@@ -98,6 +98,10 @@ type Server struct {
 		last    time.Time
 	}
 
+	// dataResetMu prevents telemetry/correlation writes from racing an
+	// administrator Data Management reset.
+	dataResetMu sync.RWMutex
+
 	// topoCache holds the last built /topology response keyed by a
 	// fingerprint of every sensor's telemetry sequence number. As long as
 	// no sensor has posted new telemetry, repeated polls (the UI polls
@@ -476,6 +480,17 @@ func (s *Server) telemetry(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "telemetry checksum mismatch"})
 		return
 	}
+	s.dataResetMu.RLock()
+	defer s.dataResetMu.RUnlock()
+	pendingReset, err := s.Repo.HasPendingDataReset(c, x.SensorID)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	if pendingReset {
+		c.JSON(http.StatusConflict, gin.H{"error": "sensor reset pending", "code": "sensor_reset_pending"})
+		return
+	}
 	newAlerts, err := s.Repo.PutTelemetry(c, x)
 	if err != nil {
 		respondInternalError(c, err)
@@ -509,6 +524,13 @@ func (s *Server) scheduleIncidentRefresh(sensorID string) {
 	s.incidentRefresh.mu.Unlock()
 
 	go func() {
+		// Keep correlation/risk writes out of Data Management reset
+		// transactions. A reset takes the write lock, waits for any in-flight
+		// refresh to finish, and prevents an old pre-reset scan from recreating
+		// incidents or risk rows after the destructive transaction commits.
+		s.dataResetMu.RLock()
+		defer s.dataResetMu.RUnlock()
+
 		defer func() {
 			s.incidentRefresh.mu.Lock()
 			s.incidentRefresh.running = false
@@ -1592,6 +1614,17 @@ func (s *Server) alertSearch(c *gin.Context) {
 		return
 	}
 
+	activity := strings.ToLower(strings.TrimSpace(c.Query("activity")))
+	if activity == "all" {
+		activity = ""
+	}
+	switch activity {
+	case "", "active", "resolved":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid alert activity"})
+		return
+	}
+
 	from, err := parseAlertQueryTime(c.Query("from"), false)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date; use YYYY-MM-DD or RFC3339"})
@@ -1612,6 +1645,7 @@ func (s *Server) alertSearch(c *gin.Context) {
 		SensorID: c.Query("sensor_id"),
 		Status:   status,
 		Severity: severity,
+		Activity: activity,
 		From:     from,
 		To:       to,
 		Limit:    limit,
@@ -1627,7 +1661,7 @@ func (s *Server) alertSearch(c *gin.Context) {
 	for _, e := range page.Items {
 		items = append(items, gin.H{
 			"SensorID": e.SensorID, "ID": e.AlertKey, "AlertKey": e.AlertKey, "Type": e.Type, "Severity": e.Severity,
-			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count,
+			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count, "Active": e.Active,
 			"ApprovedBy": e.ApprovedBy, "ApprovedAt": e.ApprovedAt, "FirstSeen": e.FirstSeen, "LastSeen": e.LastSeen,
 			"Evidence": e.Evidence,
 		})
@@ -1645,7 +1679,7 @@ func (s *Server) alerts(c *gin.Context) {
 	for _, e := range entries {
 		out = append(out, gin.H{
 			"SensorID": e.SensorID, "ID": e.AlertKey, "Type": e.Type, "Severity": e.Severity,
-			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count,
+			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count, "Active": e.Active,
 			"ApprovedBy": e.ApprovedBy, "ApprovedAt": e.ApprovedAt, "FirstSeen": e.FirstSeen, "LastSeen": e.LastSeen,
 		})
 	}
@@ -2912,6 +2946,41 @@ func (s *Server) analysisResult(c *gin.Context) {
 	c.Status(204)
 }
 
+func (s *Server) clearAnalysisStorage() error {
+	if strings.TrimSpace(s.AnalysisDir) == "" {
+		return nil
+	}
+	if err := os.RemoveAll(s.AnalysisDir); err != nil {
+		return err
+	}
+	return os.MkdirAll(s.AnalysisDir, 0700)
+}
+
+func clearAnalysisPaths(paths []string) {
+	for _, path := range paths {
+		if strings.TrimSpace(path) != "" {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func (s *Server) clearResetCaches() {
+	// Let the first clean post-reset telemetry immediately rebuild incidents/risk
+	// rather than inheriting the pre-reset debounce timestamp.
+	s.incidentRefresh.mu.Lock()
+	s.incidentRefresh.last = time.Time{}
+	s.incidentRefresh.mu.Unlock()
+
+	s.topoCache.mu.Lock()
+	s.topoCache.fingerprint = ""
+	s.topoCache.etag = ""
+	s.topoCache.body = nil
+	s.topoCache.mu.Unlock()
+	if s.live != nil {
+		s.live.ClearReplay()
+	}
+}
+
 func (s *Server) resetData(c *gin.Context) {
 	var req struct {
 		Scope        string   `json:"scope"`
@@ -2923,20 +2992,19 @@ func (s *Server) resetData(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "confirmation RESET is required"})
 		return
 	}
+
+	s.dataResetMu.Lock()
+	defer s.dataResetMu.Unlock()
+
 	switch strings.ToLower(req.Scope) {
 	case "central":
 		op := strings.ToLower(strings.TrimSpace(req.Operation))
-
-		// Central stores snapshots uploaded by sensors. Clearing PostgreSQL
-		// alone is temporary: on the next sync every sensor uploads its still
-		// populated SQLite snapshot and all data reappears. Queue the matching
-		// sensor-side reset first, while preserving sensor_commands in the
-		// repository reset, so the deletion is durable across the whole system.
 		commandByOperation := map[string]string{
-			"telemetry": "sensor.database.reset",
-			"database":  "sensor.database.reset",
+			"telemetry": "sensor.telemetry.reset",
+			"database":  "sensor.telemetry.reset",
 			"alerts":    "sensor.alerts.reset",
 			"analysis":  "sensor.analysis.reset",
+			"rules":     "sensor.rules.reset",
 			"factory":   "sensor.factory.reset",
 		}
 		queued := 0
@@ -2954,33 +3022,70 @@ func (s *Server) resetData(c *gin.Context) {
 				queued++
 			}
 		}
+
 		if err := s.Repo.ResetCentral(c, op, s.BootstrapUsername, s.BootstrapPasswordHash); err != nil {
 			respondInternalError(c, err)
 			return
 		}
+		if op == "analysis" || op == "factory" {
+			if err := s.clearAnalysisStorage(); err != nil {
+				respondInternalError(c, fmt.Errorf("clear analysis files: %w", err))
+				return
+			}
+		}
+		s.clearResetCaches()
 		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: central/%s", op), "")
-		c.JSON(202, gin.H{"status": "reset_queued", "scope": "central", "operation": op, "sensors": queued, "auth_defaults_preserved": true})
+		c.JSON(202, gin.H{
+			"status":                  "reset_queued",
+			"scope":                   "central",
+			"operation":               op,
+			"sensors":                 queued,
+			"auth_defaults_preserved": true,
+			"verified":                true,
+		})
+
 	case "sensors":
 		if len(req.SensorIDs) == 0 {
 			c.JSON(400, gin.H{"error": "sensor_ids are required"})
 			return
 		}
-		command := "sensor." + strings.ToLower(req.Operation) + ".reset"
-		if req.Operation == "factory" {
-			command = "sensor.factory.reset"
-		}
+		op := strings.ToLower(strings.TrimSpace(req.Operation))
+		clean := make([]string, 0, len(req.SensorIDs))
 		for _, id := range req.SensorIDs {
-			if err := s.Repo.QueueCommands(c, strings.TrimSpace(id), command, []string{strings.TrimSpace(id)}); err != nil {
+			if id = strings.TrimSpace(id); id != "" {
+				clean = append(clean, id)
+			}
+		}
+		if len(clean) == 0 {
+			c.JSON(400, gin.H{"error": "sensor_ids are required"})
+			return
+		}
+		var analysisPaths []string
+		if op == "analysis" || op == "factory" {
+			analysisPaths, _ = s.Repo.AnalysisPathsForSensors(c, clean)
+		}
+
+		command := "sensor." + op + ".reset"
+		for _, id := range clean {
+			if err := s.Repo.QueueCommands(c, id, command, []string{id}); err != nil {
 				respondInternalError(c, err)
 				return
 			}
 		}
-		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: sensors/%s (%s)", req.Operation, strings.Join(req.SensorIDs, ",")), "")
-		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs), "command": command})
+		if err := s.Repo.ResetSensors(c, op, clean); err != nil {
+			respondInternalError(c, err)
+			return
+		}
+		clearAnalysisPaths(analysisPaths)
+		s.clearResetCaches()
+		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("data reset: sensors/%s (%s)", op, strings.Join(clean, ",")), "")
+		c.JSON(202, gin.H{"status": "queued", "sensors": len(clean), "command": command, "central_mirror_cleared": true, "verified": true})
+
 	default:
 		c.JSON(400, gin.H{"error": "scope must be central or sensors"})
 	}
 }
+
 func (s *Server) createBackup(c *gin.Context) {
 	var req struct {
 		Name      string   `json:"name"`

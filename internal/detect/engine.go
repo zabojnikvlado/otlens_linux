@@ -48,6 +48,7 @@ type Engine struct {
 	arpConfirmThreshold int
 
 	// Baseline learning state — see baseline.go.
+	baselineEnabled  bool
 	baselineMode     BaselineMode
 	learningStarted  time.Time
 	learningDuration time.Duration
@@ -191,6 +192,7 @@ func NewEngine(
 
 		arpConfirmThreshold: arpConfirmThreshold,
 
+		baselineEnabled:  baselineEnabled,
 		learningDuration: learningDuration,
 		learnedPatterns:  make(map[string]bool),
 		learnedAssets:    make(map[string]bool),
@@ -453,7 +455,24 @@ func (e *Engine) logNewAlert(alert *Alert) {
 // alert with that ID exists (e.g. already evicted, or a stale ID
 // from a client's cached view).
 func (e *Engine) ApproveAlert(id string) bool {
-	return e.setAlertStatus(id, AlertStatusApproved)
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	alert, exists := e.alerts[id]
+	if !exists {
+		return false
+	}
+	alert.Status = AlertStatusApproved
+	alert.StatusChangedAt = time.Now()
+	alert.Synced = false
+
+	// A post-learning communication deviation becomes trusted baseline only
+	// after an analyst explicitly approves it. Older builds silently learned it
+	// on first sight, which could normalize malicious traffic.
+	if alert.Type == AlertNewCommunication {
+		e.learnedPatterns[alert.ID] = true
+	}
+	return true
 }
 
 // allowAlertOccurrenceLocked applies the operator verdict before an alert is
@@ -598,9 +617,11 @@ func (e *Engine) MarkAlertsSynced(ids []string) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
+	now := time.Now()
 	for _, id := range ids {
 		if alert, ok := e.alerts[id]; ok {
 			alert.Synced = true
+			alert.lastSyncTouch = now
 		}
 	}
 }
@@ -624,6 +645,16 @@ func (e *Engine) RestoreAlerts(alerts []*Alert) {
 		}
 
 		e.alerts[alert.ID] = alert
+
+		// Repair baseline state produced by older builds: only explicitly
+		// approved new-communication deviations are trusted after restart.
+		if alert.Type == AlertNewCommunication {
+			if alert.Status == AlertStatusApproved {
+				e.learnedPatterns[alert.ID] = true
+			} else {
+				delete(e.learnedPatterns, alert.ID)
+			}
+		}
 	}
 }
 
@@ -764,7 +795,13 @@ func (e *Engine) ResetBaseline() {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	e.baselineMode = ""
+	if e.baselineEnabled {
+		e.baselineMode = ""
+	} else {
+		// A reset must not accidentally enable learning when the operator
+		// explicitly configured baseline.enabled=false.
+		e.baselineMode = BaselineModeMonitoring
+	}
 	e.learningStarted = time.Time{}
 	e.learnedPatterns = make(map[string]bool)
 	e.learnedAssets = make(map[string]bool)

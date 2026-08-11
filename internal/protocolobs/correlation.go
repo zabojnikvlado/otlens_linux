@@ -200,6 +200,18 @@ func NewCorrelatorWithConfig(config CorrelatorConfig) *Correlator {
 	return &Correlator{timeout: config.Timeout, dhcpTimeout: config.DHCPTimeout, snmpTimeout: config.SNMPTimeout, sipTimeout: config.SIPTimeout, maxPending: config.MaxPending, dhcp: map[dhcpKey]*dhcpPending{}, ntp: map[ntpKey]*ntpPending{}, snmp: map[snmpKey]*SNMPExchange{}, sip: map[sipKey]*SIPDialog{}, dtls: map[string]*dtlsPending{}, openvpn: map[string]*OpenVPNSession{}, bt: map[btKey]*BitTorrentExchange{}}
 }
 
+func (c *Correlator) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dhcp = map[dhcpKey]*dhcpPending{}
+	c.ntp = map[ntpKey]*ntpPending{}
+	c.snmp = map[snmpKey]*SNMPExchange{}
+	c.sip = map[sipKey]*SIPDialog{}
+	c.dtls = map[string]*dtlsPending{}
+	c.openvpn = map[string]*OpenVPNSession{}
+	c.bt = map[btKey]*BitTorrentExchange{}
+}
+
 func (c *Correlator) Observe(packet core.Packet, context udpconversation.ParseContext) []any {
 	c.mu.Lock()
 	defer c.mu.Unlock()

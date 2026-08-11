@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+const alertActivityWindow = 5 * time.Minute
+
+func alertIsActive(status string, lastSeen, now time.Time) bool {
+	return strings.ToLower(status) != "approved" && !lastSeen.IsZero() && now.Sub(lastSeen) <= alertActivityWindow
+}
+
 // telemetryAlert mirrors the JSON shape of detect.Alert as reported by a
 // sensor — kept as a local, minimal copy rather than importing
 // internal/detect, since Central only needs a handful of fields out of
@@ -34,11 +40,11 @@ type telemetryAlert struct {
 // is exactly why this has to be an upsert-by-key, not a
 // replace-the-whole-table operation: a partial report must only ever
 // add to/update this table, never make it look like anything not
-// mentioned in this batch has gone away. status is taken from the
-// sensor's report but never downgrades a status Central already
-// recorded via MarkAlertsReviewed — an operator's "confirmed"/
-// "approved" verdict shouldn't flip back to "new" just because the
-// sensor's own copy hasn't caught up yet on this particular sync.
+// mentioned in this batch has gone away. Status is taken from the sensor's
+// report. An approved verdict is permanent. A confirmed verdict is protected from a stale sensor echo, but a genuinely
+// new episode may reopen it: the sensor changes status back to new only while
+// also incrementing the episode Count, which lets Central distinguish a real
+// recurrence from an old pre-command payload.
 //
 // Returns the entries that were genuinely new this call (xmax=0 is
 // Postgres's standard idiom for "this row was just inserted, not
@@ -83,7 +89,11 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				severity = EXCLUDED.severity,
 				message = EXCLUDED.message,
 				ip = EXCLUDED.ip,
-				status = CASE WHEN alert_history.status IN ('confirmed','approved') THEN alert_history.status ELSE EXCLUDED.status END,
+				status = CASE
+					WHEN alert_history.status='approved' THEN alert_history.status
+					WHEN alert_history.status='confirmed' AND EXCLUDED.status='new' AND EXCLUDED.count<=alert_history.count THEN alert_history.status
+					ELSE EXCLUDED.status
+				END,
 				count = GREATEST(alert_history.count, EXCLUDED.count),
 				first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
 				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
@@ -145,6 +155,7 @@ type AlertHistoryEntry struct {
 	FirstSeen  time.Time
 	LastSeen   time.Time
 	Evidence   map[string]interface{}
+	Active     bool `json:"Active"`
 }
 
 // AlertHistoryStats contains authoritative alert counters across the whole
@@ -153,7 +164,10 @@ type AlertHistoryEntry struct {
 // derived from that truncated list.
 type AlertHistoryStats struct {
 	Total        int64 `json:"total"`
-	Open         int64 `json:"open"`
+	Open         int64 `json:"open"` // compatibility: currently active, non-approved alerts
+	Active       int64 `json:"active"`
+	Resolved     int64 `json:"resolved"`
+	Unreviewed   int64 `json:"unreviewed"`
 	Confirmed    int64 `json:"confirmed"`
 	Approved     int64 `json:"approved"`
 	OpenCritical int64 `json:"open_critical"`
@@ -170,24 +184,21 @@ func (r *Repository) GetAlertHistoryStats(ctx context.Context) (AlertHistoryStat
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes'),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes'),
+			COUNT(*) FILTER (WHERE status='approved' OR last_seen < NOW()-INTERVAL '5 minutes'),
 			COUNT(*) FILTER (WHERE status='new'),
 			COUNT(*) FILTER (WHERE status='confirmed'),
 			COUNT(*) FILTER (WHERE status='approved'),
-			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='critical'),
-			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='high'),
-			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='medium'),
-			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='low'),
-			COUNT(*) FILTER (WHERE status='new' AND LOWER(severity)='info')
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes' AND LOWER(severity)='critical'),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes' AND LOWER(severity)='high'),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes' AND LOWER(severity)='medium'),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes' AND LOWER(severity)='low'),
+			COUNT(*) FILTER (WHERE status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes' AND LOWER(severity)='info')
 		FROM alert_history`).Scan(
-		&out.Total,
-		&out.Open,
-		&out.Confirmed,
-		&out.Approved,
-		&out.OpenCritical,
-		&out.OpenHigh,
-		&out.OpenMedium,
-		&out.OpenLow,
-		&out.OpenInfo,
+		&out.Total, &out.Open, &out.Active, &out.Resolved, &out.Unreviewed,
+		&out.Confirmed, &out.Approved,
+		&out.OpenCritical, &out.OpenHigh, &out.OpenMedium, &out.OpenLow, &out.OpenInfo,
 	)
 	return out, err
 }
@@ -200,6 +211,7 @@ type AlertHistoryQuery struct {
 	SensorID string
 	Status   string
 	Severity string
+	Activity string
 	From     *time.Time
 	To       *time.Time
 	Limit    int
@@ -244,6 +256,14 @@ func (r *Repository) SearchAlertHistory(ctx context.Context, q AlertHistoryQuery
 	}
 	if value := strings.ToLower(strings.TrimSpace(q.Severity)); value != "" {
 		where = append(where, "severity="+add(value))
+	}
+	if value := strings.ToLower(strings.TrimSpace(q.Activity)); value != "" {
+		switch value {
+		case "active":
+			where = append(where, "status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes'")
+		case "resolved":
+			where = append(where, "(status='approved' OR last_seen < NOW()-INTERVAL '5 minutes')")
+		}
 	}
 	if q.From != nil {
 		where = append(where, "last_seen >= "+add(*q.From))
@@ -295,6 +315,7 @@ func (r *Repository) SearchAlertHistory(ctx context.Context, q AlertHistoryQuery
 			return AlertHistoryPage{}, err
 		}
 		_ = json.Unmarshal(evidence, &e.Evidence)
+		e.Active = alertIsActive(e.Status, e.LastSeen, time.Now())
 		items = append(items, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -327,6 +348,7 @@ func (r *Repository) ListAlertHistory(ctx context.Context, limit int) ([]AlertHi
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &e.Evidence)
+		e.Active = alertIsActive(e.Status, e.LastSeen, time.Now())
 		out = append(out, e)
 	}
 	return out, rows.Err()

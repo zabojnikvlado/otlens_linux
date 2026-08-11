@@ -45,6 +45,16 @@ func NewTracker(timeout time.Duration, maxExchanges int) *Tracker {
 	}
 }
 
+func (t *Tracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pending = make(map[exchangeKey]*DNSExchange)
+	t.exchanges = nil
+	t.telemetry = Telemetry{}
+	t.totalRTT = 0
+	t.rttCount = 0
+}
+
 // Observe consumes one parsed DNS message. A non-nil result is returned for a
 // completed response exchange, including orphan responses without a request.
 func (t *Tracker) Observe(observation Observation, context udpconversation.ParseContext) *DNSExchange {

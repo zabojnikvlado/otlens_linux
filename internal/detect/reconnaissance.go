@@ -99,6 +99,12 @@ func (e *Engine) handleReconnaissance(packet core.Packet) {
 
 	e.scanMutex.Unlock()
 
+	// Keep building rolling scan state during learning, but do not turn that
+	// incomplete behavior model into production alerts yet.
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
+
 	if hostCount >= e.hostScanThreshold {
 		e.raiseReconnaissanceAlert(
 			"hostscan|"+packet.SrcIP, packet.SrcIP,
@@ -126,7 +132,7 @@ func (e *Engine) raiseReconnaissanceAlert(key, ip, message string) {
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -151,8 +157,6 @@ func (e *Engine) raiseReconnaissanceAlert(key, ip, message string) {
 
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, e.reconWindow)
 
 }

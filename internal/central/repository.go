@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
  name TEXT NOT NULL,
  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS central_runtime_state (
+ key TEXT PRIMARY KEY,
+ value TEXT NOT NULL DEFAULT '',
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS sites (
  id TEXT PRIMARY KEY,
  name TEXT NOT NULL,
@@ -1264,6 +1269,12 @@ func (r *Repository) QueueCommands(ctx context.Context, sensorID, typ string, ta
 	)
 	return err
 }
+func (r *Repository) HasPendingDataReset(ctx context.Context, sensorID string) (bool, error) {
+	var pending bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sensor_commands WHERE sensor_id=$1 AND delivered_at IS NULL AND command_type LIKE 'sensor.%.reset')`, sensorID).Scan(&pending)
+	return pending, err
+}
+
 func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]management.Command, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1456,47 +1467,71 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 		return err
 	}
 	defer tx.Rollback()
+
+	// Data Management resets are deliberately explicit. Authentication,
+	// sensors/sites and operator configuration are control-plane state and are
+	// never part of a Central data reset.
 	switch operation {
 	case "telemetry", "database":
-		// Telemetry reset must never remove configuration, rules, sensors,
-		// sites, pending management commands, SIEM data or backups.
-		// topology_edges/topology_nodes are included even though they're
-		// separate tables from sensor_telemetry — they're durable
-		// derived-from-telemetry history (see topology_edges.go), so a
-		// telemetry reset that left them alone would make the Topology
-		// tab keep showing everything exactly as before, which is
-		// confusing when the whole point was to clear things out. Note
-		// this only clears Central's copy: each sensor still has its own
-		// local state and will re-report it on its next sync unless that
-		// sensor is also reset (Sensors tab / Data Management's sensor
-		// reset operations).
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, asset_risk, asset_risk_history, protocol_observations RESTART IDENTITY`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_metrics, protocol_observations, dns_observations, smb_observations, flow_counters, flow_observations, topology_edges, topology_nodes, asset_risk, asset_risk_history RESTART IDENTITY`)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NULL,last_sync_success_at=NULL,pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=0,sync_status='reset'`)
+		}
 	case "alerts":
-		_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb, updated_at=NOW()`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE alert_history, asset_risk, asset_risk_history RESTART IDENTITY`)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb,updated_at=NOW()`)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `DELETE FROM siem_outbox WHERE kind='alert'`)
+		}
 	case "incidents":
-		// Clear both correlated investigation records and malware/contact-tracing incidents.
-		_, err = tx.ExecContext(ctx, `TRUNCATE incident_comments, incident_events, incidents, alert_history, malware_incidents RESTART IDENTITY CASCADE`)
+		// Keep alert history, but clear every incident/investigation object.
+		_, err = tx.ExecContext(ctx, `TRUNCATE incident_comments, incident_events, incidents, asset_exposures, malware_incidents RESTART IDENTITY`)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO central_runtime_state(key,value,updated_at) VALUES('incident_correlation_cutoff',NOW()::text,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`)
+		}
 	case "siem":
 		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
 	case "analysis":
 		_, err = tx.ExecContext(ctx, `TRUNCATE analysis_jobs RESTART IDENTITY`)
 	case "rules":
-		// Central rule assignments are configuration. This explicit reset is
-		// intentionally separate from telemetry/database reset.
 		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_rule_sets, rule_sets`)
 	case "factory":
-		// Preserve the sensor registry and sensor_commands long enough for
-		// connected sensors to receive sensor.factory.reset. Deleting those
-		// rows here made the reset command disappear before the next sync and
-		// the sensor immediately uploaded all old telemetry again. Authentication
-		// state (roles, users and sessions) is configuration/control-plane data
-		// and is deliberately never part of a Central data reset.
-		//
-		// Do not use CASCADE here. Every FK-dependent table that belongs to the
-		// reset is named explicitly. CASCADE makes the blast radius depend on the
-		// live database schema and can unexpectedly truncate newly-added
-		// control-plane tables in a future migration.
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, topology_edges, topology_nodes, protocol_observations, analysis_jobs, siem_outbox, sensor_rule_sets, rule_sets RESTART IDENTITY`)
+		// Full Central data reset: wipe observed/derived/history data while
+		// preserving users/roles/sessions, sensor/site enrollment and operator
+		// configuration such as VLANs, asset context, risk settings, correlation
+		// rules, TI sources and vulnerability advisory catalog.
+		_, err = tx.ExecContext(ctx, `TRUNCATE
+			incident_comments, incident_events, incidents,
+			asset_exposures, malware_incidents,
+			reconnaissance_results, asset_recon_history, reconnaissance_jobs, asset_recon_profile,
+			sensor_telemetry, sensor_metrics,
+			protocol_observations, dns_observations, smb_observations,
+			flow_counters, flow_observations,
+			topology_edges, topology_nodes,
+			alert_history, asset_risk, asset_risk_history,
+			asset_security_status, vulnerability_findings,
+			analysis_jobs, siem_outbox, report_history,
+			sensor_rule_sets, rule_sets, imported_tags
+			RESTART IDENTITY`)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NULL,last_sync_success_at=NULL,pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=0,sync_status='reset'`)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE reconnaissance_campaigns SET last_run_at=NULL`)
+		}
+		if err == nil {
+			// Preserve the just-queued sensor reset commands, but discard stale
+			// operational commands from the pre-reset data plane.
+			_, err = tx.ExecContext(ctx, `DELETE FROM sensor_commands WHERE command_type NOT LIKE 'sensor.%.reset' OR delivered_at IS NOT NULL`)
+		}
+		if err == nil {
+			// Alert history is empty after a full reset, so no correlation cutoff
+			// is needed. Leaving it absent also avoids sensor/Central clock skew
+			// suppressing genuinely new post-reset alerts.
+			_, err = tx.ExecContext(ctx, `DELETE FROM central_runtime_state`)
+		}
 	default:
 		return fmt.Errorf("unsupported central reset operation %q", operation)
 	}
@@ -1504,14 +1539,186 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 		return err
 	}
 
-	// Authentication defaults are part of the reset transaction itself. If a
-	// future schema change or an unexpected FK relationship ever removes one of
-	// these rows, recreation/verification must succeed before the reset can
-	// commit. Otherwise the whole destructive operation is rolled back.
+	// Authentication defaults are part of the same transaction. If preservation
+	// cannot be verified, rollback the destructive reset.
 	if err := ensureAuthBootstrap(ctx, tx, bootstrapUsername, bootstrapPasswordHash); err != nil {
 		return fmt.Errorf("preserve authentication defaults: %w", err)
 	}
 	return tx.Commit()
+}
+
+// ResetSensors removes the matching Central-side mirror for selected sensors.
+// The caller separately queues the same local reset on each sensor.
+func (r *Repository) ResetSensors(ctx context.Context, operation string, sensorIDs []string) error {
+	clean := make([]string, 0, len(sensorIDs))
+	for _, id := range sensorIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			clean = append(clean, id)
+		}
+	}
+	if len(clean) == 0 {
+		return fmt.Errorf("sensor ids are required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	exec := func(q string) error {
+		_, e := tx.ExecContext(ctx, q, clean)
+		return e
+	}
+	clearTelemetry := func() error {
+		queries := []string{
+			`DELETE FROM sensor_metrics WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM protocol_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM dns_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM smb_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM flow_counters WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk_history WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM sensor_telemetry WHERE sensor_id=ANY($1::text[])`,
+		}
+		for _, q := range queries {
+			if err := exec(q); err != nil {
+				return err
+			}
+		}
+		_, e := tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NULL,last_sync_success_at=NULL,pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=0,sync_status='reset' WHERE id=ANY($1::text[])`, clean)
+		return e
+	}
+	clearAlerts := func() error {
+		for _, q := range []string{
+			`DELETE FROM alert_history WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk_history WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM siem_outbox WHERE kind='alert' AND payload->>'sensor_id'=ANY($1::text[])`,
+			`UPDATE sensor_telemetry SET alerts='[]'::jsonb,updated_at=NOW() WHERE sensor_id=ANY($1::text[])`,
+		} {
+			if err := exec(q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	clearIncidents := func() error {
+		// incident child rows cascade from both incident tables.
+		if err := exec(`DELETE FROM incidents WHERE sensor_id=ANY($1::text[])`); err != nil {
+			return err
+		}
+		return exec(`DELETE FROM malware_incidents WHERE sensor_id=ANY($1::text[])`)
+	}
+
+	switch operation {
+	case "telemetry":
+		err = clearTelemetry()
+	case "assets":
+		for _, q := range []string{
+			`DELETE FROM flow_counters WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_risk_history WHERE sensor_id=ANY($1::text[])`,
+			`UPDATE sensor_telemetry SET topology='{"Nodes":[],"Edges":[],"HoneypotThreshold":10}'::jsonb,udp_conversations='[]'::jsonb,updated_at=NOW() WHERE sensor_id=ANY($1::text[])`,
+		} {
+			if err = exec(q); err != nil {
+				break
+			}
+		}
+	case "alerts":
+		err = clearAlerts()
+	case "tags":
+		for _, q := range []string{
+			`DELETE FROM imported_tags WHERE sensor_id=ANY($1::text[])`,
+			`UPDATE sensor_telemetry SET tags='[]'::jsonb,tag_changes='[]'::jsonb,tag_events='[]'::jsonb,updated_at=NOW() WHERE sensor_id=ANY($1::text[])`,
+		} {
+			if err = exec(q); err != nil {
+				break
+			}
+		}
+	case "learning":
+		err = exec(`UPDATE sensor_telemetry SET baseline='{}'::jsonb,updated_at=NOW() WHERE sensor_id=ANY($1::text[])`)
+	case "analysis":
+		// Some Central mirror tables predate explicit FromAnalysis provenance.
+		// Clear the sensor's derived protocol/flow/topology mirror as a safe
+		// superset; live capture repopulates it, while stale PCAP evidence cannot
+		// survive an Analysis reset.
+		for _, q := range []string{
+			`DELETE FROM analysis_jobs WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM protocol_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM dns_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM smb_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM flow_counters WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+		} {
+			if err = exec(q); err != nil {
+				break
+			}
+		}
+	case "rules":
+		err = exec(`DELETE FROM sensor_rule_sets WHERE sensor_id=ANY($1::text[])`)
+	case "database":
+		if err = clearTelemetry(); err == nil {
+			err = clearAlerts()
+		}
+		if err == nil {
+			err = clearIncidents()
+		}
+	case "factory":
+		if err = clearTelemetry(); err == nil {
+			err = clearAlerts()
+		}
+		if err == nil {
+			err = clearIncidents()
+		}
+		for _, q := range []string{
+			`DELETE FROM sensor_rule_sets WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM analysis_jobs WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM reconnaissance_jobs WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_recon_profile WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_security_status WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM vulnerability_findings WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM imported_tags WHERE sensor_id=ANY($1::text[])`,
+			`UPDATE reconnaissance_campaigns SET last_run_at=NULL WHERE sensor_id=ANY($1::text[])`,
+		} {
+			if err == nil {
+				err = exec(q)
+			}
+		}
+	default:
+		err = fmt.Errorf("unsupported sensor reset operation %q", operation)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) AnalysisPathsForSensors(ctx context.Context, sensorIDs []string) ([]string, error) {
+	if len(sensorIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT stored_path FROM analysis_jobs WHERE sensor_id=ANY($1::text[])`, sensorIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out = append(out, path)
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (BackupRecord, error) {

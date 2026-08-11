@@ -76,6 +76,15 @@ func (h *LiveHub) Publish(event LiveEvent) {
 	}
 }
 
+func (h *LiveHub) ClearReplay() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.replay = nil
+	h.mu.Unlock()
+}
+
 func (h *LiveHub) subscribe(after uint64) (*liveSubscriber, []LiveEvent) {
 	sub := &liveSubscriber{ch: make(chan LiveEvent, 64)}
 	h.mu.Lock()

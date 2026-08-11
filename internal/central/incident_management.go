@@ -336,12 +336,14 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var correlationCutoff time.Time
+	_ = r.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT value::timestamptz FROM central_runtime_state WHERE key='incident_correlation_cutoff'),'1970-01-01'::timestamptz)`).Scan(&correlationCutoff)
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := syncBehaviorIncidents(ctx, tx); err != nil {
+	if err := syncBehaviorIncidents(ctx, tx, correlationCutoff); err != nil {
 		return err
 	}
 	for _, rule := range rules {
@@ -351,7 +353,7 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			// same built-in rule duplicates work and can overwrite NBA-specific scoring.
 			continue
 		}
-		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,ip,string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen) FROM alert_history WHERE ip<>'' AND status IN ('new','confirmed') AND last_seen>NOW()-($1*INTERVAL '1 minute') GROUP BY sensor_id,ip HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents)
+		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,ip,string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen) FROM alert_history WHERE ip<>'' AND status IN ('new','confirmed') AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$3 GROUP BY sensor_id,ip HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff)
 		if qerr != nil {
 			return qerr
 		}
@@ -413,8 +415,8 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 				SELECT $1,'alert',alert_key,severity,message,last_seen,$2::jsonb
 				FROM alert_history
 				WHERE sensor_id=$3 AND ip=$4 AND status IN ('new','confirmed')
-				  AND last_seen>NOW()-($5*INTERVAL '1 minute')
-				ON CONFLICT DO NOTHING`, id, string(metadata), c.SensorID, c.IP, rule.WindowMinutes); err != nil {
+				  AND last_seen>NOW()-($5*INTERVAL '1 minute') AND last_seen>$6
+				ON CONFLICT DO NOTHING`, id, string(metadata), c.SensorID, c.IP, rule.WindowMinutes, correlationCutoff); err != nil {
 				return err
 			}
 		}
@@ -422,7 +424,7 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx) error {
+func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
 	type candidate struct {
 		sensorID, ip, alertKey, severity, message string
 		count                                     uint64
@@ -442,7 +444,7 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx) error {
 		COALESCE((evidence->>'risk_score')::double precision,85),
 		COALESCE((evidence->>'confidence')::double precision,0.5),evidence
 		FROM alert_history WHERE type='behavior_incident_candidate' AND status<>'approved'
-		  AND last_seen>NOW()-($1*INTERVAL '1 minute')`, windowMinutes)
+		  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$2`, windowMinutes, cutoff)
 	if err != nil {
 		return err
 	}
@@ -522,11 +524,11 @@ func (r *Repository) RecalculateAssetRisk(ctx context.Context) error {
 		reasons := []string{}
 		recommendations := []string{}
 		var criticalAlerts int
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_history WHERE sensor_id=$1 AND ip=$2 AND status IN ('new','confirmed') AND severity IN ('critical','high') AND last_seen>NOW()-INTERVAL '30 days'`, sensor, ip).Scan(&criticalAlerts)
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_history WHERE sensor_id=$1 AND ip=$2 AND status IN ('new','confirmed') AND severity IN ('critical','high') AND last_seen>=NOW()-INTERVAL '5 minutes'`, sensor, ip).Scan(&criticalAlerts)
 		if criticalAlerts > 0 {
 			add := cappedAdd(criticalAlerts, alertWeight, 36)
 			technical += add
-			reasons = append(reasons, fmt.Sprintf("%d recent high/critical alerts", criticalAlerts))
+			reasons = append(reasons, fmt.Sprintf("%d active high/critical alerts", criticalAlerts))
 			recommendations = append(recommendations, "Investigate and contain active detections")
 		}
 		var vulnCritical, vulnHigh, vulnOther int

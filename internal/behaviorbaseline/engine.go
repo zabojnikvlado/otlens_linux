@@ -383,6 +383,30 @@ func (e *Engine) Status(now time.Time) Status {
 	return Status{Enabled: e.config.Enabled, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), Profiles: e.profiles.Load(), AssetProfiles: e.assetProfiles.Load(), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Evicted: e.evicted.Load()}
 }
 
+// Reset discards the complete learned behavior model and restarts the
+// learning clock on the next observation.
+func (e *Engine) Reset() {
+	for i := range e.shards {
+		e.shards[i].mu.Lock()
+		e.shards[i].profiles = make(map[Key]*Profile)
+		e.shards[i].mu.Unlock()
+		e.assetShards[i].mu.Lock()
+		e.assetShards[i].profiles = make(map[AssetKey]*AssetBehaviorProfile)
+		e.assetShards[i].mu.Unlock()
+	}
+	e.identityMu.Lock()
+	e.identityByIP = make(map[string]string)
+	e.identityMu.Unlock()
+	e.startMu.Lock()
+	e.learningStarted = time.Time{}
+	e.startMu.Unlock()
+	e.profiles.Store(0)
+	e.assetProfiles.Store(0)
+	e.observed.Store(0)
+	e.dropped.Store(0)
+	e.evicted.Store(0)
+}
+
 func (e *Engine) Snapshot(now time.Time) Snapshot {
 	mode, started := e.mode(now)
 	result := Snapshot{Version: 2, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), CapturedAt: now, Profiles: make([]Profile, 0, e.profiles.Load()), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Evicted: e.evicted.Load()}

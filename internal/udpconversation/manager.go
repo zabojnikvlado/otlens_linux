@@ -92,6 +92,25 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 	return manager
 }
 
+func (m *Manager) Reset() {
+	for index := 0; index < m.shardCount; index++ {
+		shard := &m.shards[index]
+		shard.mu.Lock()
+		shard.conversations = make(map[Key]*Conversation)
+		shard.lru = list.New()
+		shard.lruNodes = make(map[Key]*list.Element)
+		shard.mu.Unlock()
+	}
+	m.stats.active.Store(0)
+	m.stats.created.Store(0)
+	m.stats.updated.Store(0)
+	m.stats.expired.Store(0)
+	m.stats.evicted.Store(0)
+	m.stats.dropped.Store(0)
+	m.stats.packets.Store(0)
+	m.stats.bytes.Store(0)
+}
+
 func (m *Manager) GetOrCreate(key Key) *Conversation {
 	now := time.Now()
 	shard := m.shardFor(key)

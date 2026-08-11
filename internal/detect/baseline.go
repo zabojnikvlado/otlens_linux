@@ -211,21 +211,17 @@ func isMulticastMACAddr(mac string) bool {
 // one specific never-before-seen communication pattern. Caller must
 // hold e.mutex.
 //
-// The pattern is also added to learnedPatterns once alerted, so a
-// legitimate-but-rare relationship (e.g. a monthly maintenance job
-// connecting for the first time after the learning window closed)
-// alerts once instead of on every single packet of that first
-// occurrence — the operator can review and dismiss it, but isn't
-// flooded.
+// A post-learning pattern is deliberately NOT added to learnedPatterns here.
+// It becomes trusted baseline only after an analyst explicitly approves the
+// alert. Episode deduplication below prevents a continuous packet stream from
+// flooding the alert store while it is awaiting review.
 func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
-
-	e.learnedPatterns[key] = true
 
 	now := time.Now()
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -252,9 +248,7 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 		e.logNewAlert(alert)
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 }
 
 // baselineKey builds a direction-independent identity for "asset A

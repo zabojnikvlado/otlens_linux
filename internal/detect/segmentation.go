@@ -153,7 +153,7 @@ func (e *Engine) handleSegmentation(packet core.Packet) {
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -181,8 +181,6 @@ func (e *Engine) handleSegmentation(packet core.Packet) {
 
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 
 }

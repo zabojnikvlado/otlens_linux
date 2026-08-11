@@ -74,6 +74,9 @@ func (e *Engine) handleLateralMovement(p core.Packet) {
 		}
 	}
 	e.lateralData.mutex.Unlock()
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 	if fanout >= e.lateral.FanOutThreshold {
 		e.raiseLateral("admin_fanout", p.SrcIP, p.DstIP, p.DstPort, 85, fmt.Sprintf("%s contacted %d internal hosts over administrative services within %s", p.SrcIP, fanout, e.lateral.Window), map[string]interface{}{"lateral_movement_score": 85, "lateral_movement_confidence": 80, "fanout_hosts": fanout, "destination_port": p.DstPort})
 	}
@@ -89,6 +92,12 @@ func (e *Engine) raiseLateral(kind, src, dst string, port uint16, score int, mes
 		return
 	}
 	id := fmt.Sprintf("lateral|%s|%s|%s|%d", kind, src, dst, port)
+	if kind == "admin_fanout" {
+		// Fan-out is a source-host behavior, not one finding per destination.
+		// Keying it by the latest destination multiplied one scan into hundreds
+		// of distinct alerts. Keep the current destination in evidence instead.
+		id = fmt.Sprintf("lateral|%s|%s", kind, src)
+	}
 	now := time.Now()
 	evidence["signal"] = kind
 	evidence["source_ip"] = src
@@ -96,21 +105,25 @@ func (e *Engine) raiseLateral(kind, src, dst string, port uint16, score int, mes
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	a, exists := e.alerts[id]
-	if exists && !e.allowAlertOccurrenceLocked(a) {
+	if exists && a.Status == AlertStatusApproved {
 		return
 	}
+	sev := "high"
+	if score >= 90 {
+		sev = "critical"
+	}
 	if !exists {
-		sev := "high"
-		if score >= 90 {
-			sev = "critical"
-		}
 		a = &Alert{ID: id, Type: AlertLateralMovement, Severity: sev, Message: message, IP: src, FirstSeen: now, Status: AlertStatusNew, Evidence: evidence}
 		e.alerts[id] = a
 		e.logNewAlert(a)
+	} else {
+		a.Message = message
+		a.Evidence = evidence
+		if sev == "critical" {
+			a.Severity = sev
+		}
 	}
-	a.LastSeen = now
-	a.Count++
-	a.Synced = false
+	e.recordEpisodeAlertLocked(a, now, e.lateral.Window)
 }
 func maxInt(a, b int) int {
 	if a > b {

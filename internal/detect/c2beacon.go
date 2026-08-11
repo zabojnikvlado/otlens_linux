@@ -118,6 +118,9 @@ func (e *Engine) handleC2Beacon(packet core.Packet) {
 	if !ok || mean < e.c2BeaconMinInterval || mean > e.c2BeaconMaxInterval || cv > e.c2BeaconMaxCV {
 		return
 	}
+	if e.behaviorDetectionsSuppressed() {
+		return
+	}
 
 	e.raiseC2BeaconAlert(key, packet.SrcIP, packet.DstIP, packet.DstPort, mean, cv)
 }
@@ -194,7 +197,7 @@ func (e *Engine) raiseC2BeaconAlert(key, srcIP, dstIP string, dstPort uint16, me
 
 	alert, exists := e.alerts[key]
 
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	if exists && alert.Status == AlertStatusApproved {
 		return
 	}
 
@@ -234,8 +237,6 @@ func (e *Engine) raiseC2BeaconAlert(key, srcIP, dstIP string, dstPort uint16, me
 
 	}
 
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
 
 }

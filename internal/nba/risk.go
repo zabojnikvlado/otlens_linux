@@ -126,6 +126,14 @@ func (e *RiskEngine) Stop() {
 	e.wg.Wait()
 }
 
+// Reset clears behavior risk assessments derived from the previous model.
+func (e *RiskEngine) Reset() {
+	e.mu.Lock()
+	e.items = nil
+	e.telemetry = RiskTelemetry{}
+	e.mu.Unlock()
+}
+
 func (e *RiskEngine) GetAssessments() []RiskAssessment {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
