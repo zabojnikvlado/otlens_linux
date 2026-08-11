@@ -2,116 +2,113 @@ package detect
 
 import (
 	"fmt"
+	"net"
+	"sort"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/netutil"
 )
 
-// startExternalCommunicationWatch consumes core.EventPacketParsed (all
-// IP traffic) to detect an internal/private asset exchanging traffic
-// with a public internet address — see handleExternalCommunication's
-// doc comment for why this exists as an alert rather than something
-// the Topology tab draws.
 func (e *Engine) startExternalCommunicationWatch(bus *core.EventBus) {
-
-	ch := bus.Subscribe(
-		core.EventPacketParsed,
-	)
-
+	ch := bus.Subscribe(core.EventPacketParsed)
 	go func() {
-
 		for event := range ch {
-
-			packet, ok := event.Data.(core.Packet)
-
-			if !ok {
-				continue
+			if packet, ok := event.Data.(core.Packet); ok {
+				e.handleExternalCommunication(packet)
 			}
-
-			e.handleExternalCommunication(packet)
-
 		}
-
 	}()
-
 }
 
-// handleExternalCommunication flags traffic between a private/internal
-// address and a public one. The Topology map deliberately excludes
-// non-private endpoints entirely (see internal/topology/build.go) —
-// internet-facing traffic has no stable identity there anyway (rotating
-// CDN/cloud IPs would otherwise make the Central-side topology ledger
-// grow without bound, the same class of problem alert history had
-// before delta-sync) — so this alert is what preserves the "does
-// anything in my OT network talk to the internet at all" visibility
-// instead, without needing a node on the map for every IP a device ever
-// happens to contact.
-//
-// Deduplicated per internal IP, not per (internal, external) pair: a
-// device that talks to many different external addresses (typical for
-// anything doing normal DNS/NTP/update-check traffic) is one alert
-// whose episode Count increases only after a quiet gap, not a flood of one alert per destination. Traffic
-// entirely inside the network, or — unusually — entirely outside it,
-// isn't this rule's concern; exactly one side must be private.
+// handleExternalCommunication keeps outbound and inbound exposure separate.
+// Alerts are grouped by external network scope (/24 for IPv4, /64 for IPv6).
+// That keeps CDN-style endpoint churn bounded while making analyst approval
+// safe: approving one legitimate destination network does not suppress every
+// future Internet destination for the same OT asset.
 func (e *Engine) handleExternalCommunication(packet core.Packet) {
-
-	if !e.isRuleEnabled(string(AlertExternalCommunication)) {
-		return
-	}
-
 	if packet.SrcIP == "" || packet.DstIP == "" {
 		return
 	}
-
 	srcPrivate, dstPrivate := isPrivateIP(packet.SrcIP), isPrivateIP(packet.DstIP)
-
-	if srcPrivate == dstPrivate {
+	internalIP, externalIP, direction, peerPort := "", "", "", uint16(0)
+	switch {
+	case srcPrivate && netutil.IsPublicInternetUnicast(packet.DstIP):
+		internalIP, externalIP, direction, peerPort = packet.SrcIP, packet.DstIP, "outbound", packet.DstPort
+	case dstPrivate && netutil.IsPublicInternetUnicast(packet.SrcIP):
+		internalIP, externalIP, direction, peerPort = packet.DstIP, packet.SrcIP, "inbound", packet.SrcPort
+	default:
 		return
 	}
-
-	internalIP, externalIP := packet.SrcIP, packet.DstIP
-
-	if dstPrivate {
-		internalIP, externalIP = packet.DstIP, packet.SrcIP
+	e.excludePacketFromLearning(packet, "external communication requires explicit policy approval")
+	now := packet.Timestamp
+	if now.IsZero() {
+		now = time.Now()
 	}
 
-	key := fmt.Sprintf("external|%s", internalIP)
-
-	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && alert.Status == AlertStatusApproved {
-		return
+	scope := externalPeerScope(externalIP)
+	bucket := direction + "|" + internalIP + "|" + scope
+	peerKey := fmt.Sprintf("%s:%d", externalIP, peerPort)
+	e.policyMutex.Lock()
+	if e.externalPeers == nil {
+		e.externalPeers = make(map[string]map[string]bool)
 	}
-
-	if !exists {
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     AlertExternalCommunication,
-			Severity: "medium",
-			Message: fmt.Sprintf(
-				"%s communicated with external address %s",
-				internalIP, externalIP,
-			),
-
-			IP: internalIP,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
+	if e.externalPeers[bucket] == nil {
+		e.externalPeers[bucket] = map[string]bool{}
+	}
+	e.externalPeers[bucket][peerKey] = true
+	// Keep memory bounded; the current peer remains evidence even when older
+	// peers are evicted from the summary set.
+	if len(e.externalPeers[bucket]) > 64 {
+		for k := range e.externalPeers[bucket] {
+			if k != peerKey {
+				delete(e.externalPeers[bucket], k)
+				if len(e.externalPeers[bucket]) <= 64 {
+					break
+				}
+			}
 		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-
+	}
+	peers := make([]string, 0, len(e.externalPeers[bucket]))
+	for k := range e.externalPeers[bucket] {
+		peers = append(peers, k)
+	}
+	e.policyMutex.Unlock()
+	sort.Strings(peers)
+	shown := peers
+	if len(shown) > 20 {
+		shown = shown[len(shown)-20:]
 	}
 
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
+	ti := false
+	if e.threatIntel != nil {
+		_, ti = e.threatIntel.MatchIP(externalIP)
+	}
+	severity := "medium"
+	if direction == "inbound" {
+		severity = "high"
+	}
+	evidence := map[string]interface{}{
+		"direction": direction, "internal_ip": internalIP, "external_ip": externalIP, "external_scope": scope,
+		"external_port": peerPort, "destinations_seen": shown, "destination_count": len(peers),
+		"threat_intel_match": ti,
+	}
+	e.raiseBuiltinAlert(string(AlertExternalCommunication), AlertExternalCommunication, severity,
+		fmt.Sprintf("external|%s|%s|%s", direction, internalIP, scope),
+		fmt.Sprintf("%s external communication: %s <-> %s:%d (%d public endpoint(s) observed)", direction, internalIP, externalIP, peerPort, len(peers)),
+		internalIP, evidence, now, alertEpisodeGap)
+}
 
+// externalPeerScope returns a stable analyst-approval scope. It deliberately
+// groups nearby public endpoints without turning an approval into an
+// asset-wide Internet allow rule.
+func externalPeerScope(ipText string) string {
+	ip := net.ParseIP(ipText)
+	if ip == nil {
+		return ipText
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return (&net.IPNet{IP: v4.Mask(net.CIDRMask(24, 32)), Mask: net.CIDRMask(24, 32)}).String()
+	}
+	return (&net.IPNet{IP: ip.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
 }

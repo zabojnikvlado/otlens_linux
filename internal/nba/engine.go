@@ -20,18 +20,22 @@ type Config struct {
 }
 
 type Engine struct {
-	bus             *core.EventBus
-	baseline        *behaviorbaseline.Engine
-	config          Config
-	mu              sync.RWMutex
-	evaluator       *Evaluator
-	anomalies       []Anomaly
-	last            map[string]time.Time
-	telemetry       Telemetry
-	learningSkipped atomic.Uint64
-	stop            chan struct{}
-	stopOnce        sync.Once
-	wg              sync.WaitGroup
+	bus               *core.EventBus
+	baseline          *behaviorbaseline.Engine
+	config            Config
+	mu                sync.RWMutex
+	evaluator         *Evaluator
+	evaluatorRevision uint64
+	evaluatorBuiltAt  time.Time
+	previewEvaluator  *Evaluator
+	previewBuiltAt    time.Time
+	anomalies         []Anomaly
+	last              map[string]time.Time
+	telemetry         Telemetry
+	learningSkipped   atomic.Uint64
+	stop              chan struct{}
+	stopOnce          sync.Once
+	wg                sync.WaitGroup
 }
 
 func New(bus *core.EventBus, baseline *behaviorbaseline.Engine, config Config) *Engine {
@@ -96,14 +100,40 @@ func (e *Engine) consumeApps(events <-chan core.Event) {
 	}
 }
 func (e *Engine) evaluate(input Input) {
-	if e.baseline.Status(input.At).Mode != behaviorbaseline.ModeMonitoring {
+	if input.At.IsZero() {
+		input.At = time.Now().UTC()
+	}
+	status := e.baseline.Status(input.At)
+	if status.Mode != behaviorbaseline.ModeMonitoring {
 		e.learningSkipped.Add(1)
+		e.evaluatePreview(input)
 		return
 	}
+
+	// A newly-seen asset after global learning gets its own candidate/grace
+	// phase. The explicit new_asset detector can still notify the operator, but
+	// NBA does not pile behavior findings onto an asset that has not accumulated
+	// enough observations to be statistically meaningful yet.
+	trusted := false
+	if input.SrcAssetID != "" {
+		trusted = e.baseline.IsTrustedAsset(input.SrcAssetID, input.At)
+	} else {
+		trusted = e.baseline.IsTrustedIP(input.Key.SensorID, input.Key.SrcIP, input.At)
+	}
+	if !trusted {
+		e.mu.Lock()
+		e.telemetry.CandidateGraceSkipped++
+		e.mu.Unlock()
+		return
+	}
+
 	e.mu.Lock()
 	e.telemetry.EvaluatedTotal++
-	if e.evaluator == nil {
+	revision := e.baseline.Revision()
+	if e.evaluator == nil || e.evaluatorRevision != revision || input.At.Sub(e.evaluatorBuiltAt) >= time.Minute {
 		e.evaluator = NewEvaluator(e.baseline.Snapshot(input.At))
+		e.evaluatorRevision = revision
+		e.evaluatorBuiltAt = input.At
 	}
 	anomaly := e.evaluator.Evaluate(input)
 	if anomaly == nil || anomaly.Score < e.config.MinScore {
@@ -127,6 +157,33 @@ func (e *Engine) evaluate(input Input) {
 	e.mu.Unlock()
 	e.bus.Publish(core.Event{Type: core.EventBehaviorAnomaly, Timestamp: input.At, Data: *anomaly})
 }
+
+// evaluatePreview implements "what would alert now?" during learning without
+// publishing any finding. A snapshot is held for 30 seconds so new observations
+// are evaluated against the recent learned state rather than immediately
+// teaching themselves into the model before they can be previewed.
+func (e *Engine) evaluatePreview(input Input) {
+	e.mu.Lock()
+	if e.previewEvaluator == nil || e.previewBuiltAt.IsZero() || input.At.Sub(e.previewBuiltAt) >= 30*time.Second {
+		e.previewEvaluator = NewEvaluator(e.baseline.Snapshot(input.At))
+		e.previewBuiltAt = input.At
+		e.mu.Unlock()
+		return
+	}
+	e.telemetry.PreviewEvaluatedTotal++
+	anomaly := e.previewEvaluator.Evaluate(input)
+	if anomaly != nil && anomaly.Score >= e.config.MinScore {
+		e.telemetry.PreviewAnomaliesTotal++
+		if anomaly.Score > e.telemetry.PreviewTopScore {
+			e.telemetry.PreviewTopScore = anomaly.Score
+			if len(anomaly.Reasons) > 0 {
+				e.telemetry.PreviewTopReason = anomaly.Reasons[0].Message
+			}
+		}
+	}
+	e.mu.Unlock()
+}
+
 func (e *Engine) GetAnomalies() []Anomaly {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -141,6 +198,10 @@ func (e *Engine) GetAnomalies() []Anomaly {
 func (e *Engine) Reset() {
 	e.mu.Lock()
 	e.evaluator = nil
+	e.evaluatorRevision = 0
+	e.evaluatorBuiltAt = time.Time{}
+	e.previewEvaluator = nil
+	e.previewBuiltAt = time.Time{}
 	e.anomalies = nil
 	e.last = make(map[string]time.Time)
 	e.telemetry = Telemetry{}
@@ -195,5 +256,9 @@ func (e *Engine) Restore(snapshot Snapshot) error {
 	e.learningSkipped.Store(snapshot.Telemetry.LearningSkippedTotal)
 	e.telemetry.ActiveAnomalies = len(e.anomalies)
 	e.evaluator = nil
+	e.evaluatorRevision = 0
+	e.evaluatorBuiltAt = time.Time{}
+	e.previewEvaluator = nil
+	e.previewBuiltAt = time.Time{}
 	return nil
 }

@@ -4,6 +4,8 @@ package store
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -121,6 +123,9 @@ func (e *Engine) startBaselineWatch(bus *core.EventBus) {
 
 			e.mutex.Lock()
 			e.learningActive = false
+			for _, tag := range e.tags {
+				finalizeRobustBaseline(tag)
+			}
 			e.mutex.Unlock()
 
 		}
@@ -259,6 +264,17 @@ func (e *Engine) ResetBaseline() {
 		}
 		tag.MinValue = nil
 		tag.MaxValue = nil
+		tag.BaselineSamples = nil
+		tag.BaselineSampleCount = 0
+		tag.BaselineMedian = 0
+		tag.BaselineMAD = 0
+		tag.BaselineP05 = 0
+		tag.BaselineP95 = 0
+		tag.BaselineTypicalDelta = 0
+		tag.BaselineTypicalRate = 0
+		tag.BaselineLastNumeric = 0
+		tag.BaselineLastNumericAt = time.Time{}
+		tag.BaselineHasNumeric = false
 	}
 }
 
@@ -390,6 +406,7 @@ func (e *Engine) updateTag(
 		tag.FromAnalysis = false
 	}
 
+	previousSeen := tag.LastSeen
 	tag.LastSeen = now
 	tag.PollCount++
 
@@ -429,6 +446,7 @@ func (e *Engine) updateTag(
 				if maxNumeric, maxOK := numericValue(tag.MaxValue); !maxOK || numeric > maxNumeric {
 					tag.MaxValue = value
 				}
+				updateRobustBaseline(tag, numeric, now)
 
 			} else {
 
@@ -439,32 +457,120 @@ func (e *Engine) updateTag(
 				// it's simply never flagged by this mechanism.
 				minNumeric, minOK := numericValue(tag.MinValue)
 				maxNumeric, maxOK := numericValue(tag.MaxValue)
+				low, high, robustOK := robustBaselineBounds(tag)
+				if robustOK {
+					minNumeric, maxNumeric, minOK, maxOK = low, high, true, true
+				}
+				delta := 0.0
+				rate := 0.0
+				if oldNumeric, oldOK := numericValue(oldValue); oldOK {
+					delta = math.Abs(numeric - oldNumeric)
+					if !previousSeen.IsZero() && now.After(previousSeen) {
+						rate = delta / now.Sub(previousSeen).Seconds()
+					}
+				}
+				rateLimit := tag.BaselineTypicalRate * 6
+				reason := ""
+				if minOK && maxOK && (numeric < minNumeric || numeric > maxNumeric) {
+					reason = "robust_range"
+				} else if rateLimit > 0 && rate > rateLimit {
+					reason = "rate_of_change"
+				}
 
-				if minOK && maxOK && (numeric < minNumeric || numeric > maxNumeric) && e.eventBus != nil {
-
-					e.eventBus.Publish(
-						core.Event{
-							Type: core.EventValueOutOfRange,
-							Data: core.OutOfRangeValue{
-								TagKey: key,
-
-								DeviceIP:     deviceIP,
-								DevicePort:   devicePort,
-								AddressSpace: addressSpace,
-								Address:      address,
-
-								MinValue: tag.MinValue,
-								MaxValue: tag.MaxValue,
-								Value:    value,
-							},
-						},
-					)
+				if reason != "" && e.eventBus != nil {
+					e.eventBus.Publish(core.Event{Type: core.EventValueOutOfRange, Data: core.OutOfRangeValue{
+						TagKey: key, DeviceIP: deviceIP, DevicePort: devicePort, AddressSpace: addressSpace, Address: address,
+						MinValue: minNumeric, MaxValue: maxNumeric, Value: value, Reason: reason, Delta: delta, Rate: rate, RateLimit: rateLimit,
+					}})
 				}
 			}
 		}
 	}
 
 	return oldValue, changed
+}
+
+const robustValueReservoir = 128
+
+func updateRobustBaseline(tag *Tag, value float64, at time.Time) {
+	if tag == nil {
+		return
+	}
+	tag.BaselineSampleCount++
+	if tag.BaselineHasNumeric {
+		delta := math.Abs(value - tag.BaselineLastNumeric)
+		if delta > 0 {
+			if tag.BaselineTypicalDelta == 0 {
+				tag.BaselineTypicalDelta = delta
+			} else {
+				tag.BaselineTypicalDelta = .9*tag.BaselineTypicalDelta + .1*delta
+			}
+			if !tag.BaselineLastNumericAt.IsZero() && at.After(tag.BaselineLastNumericAt) {
+				rate := delta / at.Sub(tag.BaselineLastNumericAt).Seconds()
+				if tag.BaselineTypicalRate == 0 {
+					tag.BaselineTypicalRate = rate
+				} else {
+					tag.BaselineTypicalRate = .9*tag.BaselineTypicalRate + .1*rate
+				}
+			}
+		}
+	}
+	tag.BaselineLastNumeric, tag.BaselineLastNumericAt, tag.BaselineHasNumeric = value, at, true
+	if len(tag.BaselineSamples) < robustValueReservoir {
+		tag.BaselineSamples = append(tag.BaselineSamples, value)
+	} else {
+		idx := int((tag.BaselineSampleCount * 11400714819323198485) % robustValueReservoir)
+		tag.BaselineSamples[idx] = value
+	}
+	if tag.BaselineSampleCount%32 == 0 {
+		finalizeRobustBaseline(tag)
+	}
+}
+
+func finalizeRobustBaseline(tag *Tag) {
+	if tag == nil || len(tag.BaselineSamples) == 0 {
+		return
+	}
+	values := append([]float64(nil), tag.BaselineSamples...)
+	sort.Float64s(values)
+	quantile := func(q float64) float64 {
+		if len(values) == 1 {
+			return values[0]
+		}
+		pos := q * float64(len(values)-1)
+		lo, hi := int(math.Floor(pos)), int(math.Ceil(pos))
+		if lo == hi {
+			return values[lo]
+		}
+		f := pos - float64(lo)
+		return values[lo]*(1-f) + values[hi]*f
+	}
+	median := quantile(.5)
+	dev := make([]float64, len(values))
+	for i, v := range values {
+		dev[i] = math.Abs(v - median)
+	}
+	sort.Float64s(dev)
+	mad := dev[len(dev)/2]
+	if len(dev)%2 == 0 && len(dev) > 1 {
+		mad = (dev[len(dev)/2-1] + dev[len(dev)/2]) / 2
+	}
+	tag.BaselineMedian, tag.BaselineMAD, tag.BaselineP05, tag.BaselineP95 = median, mad, quantile(.05), quantile(.95)
+}
+
+func robustBaselineBounds(tag *Tag) (float64, float64, bool) {
+	if tag == nil || tag.BaselineSampleCount < 30 || len(tag.BaselineSamples) < 10 {
+		return 0, 0, false
+	}
+	if tag.BaselineP05 == 0 && tag.BaselineP95 == 0 {
+		finalizeRobustBaseline(tag)
+	}
+	span := tag.BaselineP95 - tag.BaselineP05
+	deadband := math.Max(span*.25, tag.BaselineMAD*3*1.4826)
+	if deadband == 0 {
+		deadband = math.Max(1, math.Abs(tag.BaselineMedian)*.02)
+	}
+	return tag.BaselineP05 - deadband, tag.BaselineP95 + deadband, true
 }
 
 // numericValue converts a decoded Tag value into a float64 for

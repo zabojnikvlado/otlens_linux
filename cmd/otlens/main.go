@@ -324,6 +324,13 @@ func main() {
 							log.Printf("OTLens sensor capture start failed: %v", err)
 						}
 					}()
+				case "baseline.candidate.promote":
+					if err := application.BehaviorBaseline.PromoteCandidate(command.Target); err != nil {
+						log.Printf("OTLens baseline candidate promotion failed: %v", err)
+					} else {
+						application.AnomalyEngine.Reset()
+						log.Printf("OTLens baseline candidate promoted: %s", command.Target)
+					}
 				case "asset.confirm":
 					application.AssetEngine.Confirm(command.Target)
 				case "asset.delete":
@@ -344,6 +351,13 @@ func main() {
 						}
 					} else if err := application.DetectEngine.UpsertPolicyRule(&rule); err != nil {
 						log.Printf("OTLens rule update failed: %v", err)
+					}
+				case "rule.policy":
+					var patch detect.RulePolicyPatch
+					if err := json.Unmarshal([]byte(command.Target), &patch); err != nil {
+						log.Printf("OTLens invalid rule.policy command: %v", err)
+					} else if err := application.DetectEngine.ApplyRulePolicyPatch(patch); err != nil {
+						log.Printf("OTLens rule policy update failed: %v", err)
 					}
 				case "rule.toggle":
 					var request struct {

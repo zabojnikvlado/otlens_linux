@@ -155,7 +155,7 @@ func parse(p core.Packet) (Observation, bool) {
 	isResponse := flags&0x8000 != 0
 	qd := int(binary.BigEndian.Uint16(data[4:6]))
 	an := int(binary.BigEndian.Uint16(data[6:8]))
-	obs := Observation{Timestamp: p.Timestamp, TransactionID: binary.BigEndian.Uint16(data[0:2]), QueryName: "", ResponseCode: uint8(flags & 0x000f), IsResponse: isResponse, AnswerCount: an}
+	obs := Observation{Timestamp: p.Timestamp, TransactionID: binary.BigEndian.Uint16(data[0:2]), QueryName: "", ResponseCode: uint8(flags & 0x000f), IsResponse: isResponse, AnswerCount: an, PayloadBytes: len(data)}
 	if isResponse {
 		obs.ClientIP, obs.ServerIP = p.DstIP, p.SrcIP
 	} else {

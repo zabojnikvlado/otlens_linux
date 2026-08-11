@@ -185,58 +185,23 @@ func beaconRegularity(samples []time.Time) (mean time.Duration, cv float64, ok b
 }
 
 func (e *Engine) raiseC2BeaconAlert(key, srcIP, dstIP string, dstPort uint16, mean time.Duration, cv float64) {
-
-	if !e.isRuleEnabled(string(AlertC2Beacon)) {
-		return
-	}
-
 	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && alert.Status == AlertStatusApproved {
-		return
+	score := 60 + minInt(25, int((e.c2BeaconMaxCV-cv)*100))
+	signals := []string{"regular_connection_interval"}
+	evidence := map[string]interface{}{"c2_score": score, "c2_confidence": 70, "c2_signals": signals, "mean_interval_seconds": mean.Seconds(), "coefficient_of_variation": cv, "destination_ip": dstIP, "destination_port": dstPort}
+	if e.threatIntel != nil {
+		if indicator, ok := e.threatIntel.MatchIP(dstIP); ok {
+			score = minInt(100, score+40)
+			signals = append(signals, "threat_intel_match")
+			evidence["threat_intel_provider"] = indicator.Provider
+			evidence["threat_intel_confidence"] = indicator.Confidence
+		}
 	}
-
-	if !exists {
-		score := 60 + minInt(25, int((e.c2BeaconMaxCV-cv)*100))
-		signals := []string{"regular_connection_interval"}
-		evidence := map[string]interface{}{"c2_score": score, "c2_confidence": 70, "c2_signals": signals, "mean_interval_seconds": mean.Seconds(), "coefficient_of_variation": cv, "destination_ip": dstIP, "destination_port": dstPort}
-		if e.threatIntel != nil {
-			if indicator, ok := e.threatIntel.MatchIP(dstIP); ok {
-				score = minInt(100, score+40)
-				signals = append(signals, "threat_intel_match")
-				evidence["threat_intel_provider"] = indicator.Provider
-				evidence["threat_intel_confidence"] = indicator.Confidence
-			}
-		}
-		evidence["c2_score"] = score
-		evidence["c2_confidence"] = minInt(95, 65+len(signals)*10)
-		evidence["c2_signals"] = signals
-		severity := "high"
-		if score >= 85 {
-			severity = "critical"
-		}
-		alert = &Alert{
-			ID:        key,
-			Type:      AlertC2Beacon,
-			Severity:  severity,
-			Message:   fmt.Sprintf("%s connects to %s:%d at a suspiciously regular ~%s interval (%.0f%% variation) — possible C2 beaconing", srcIP, dstIP, dstPort, mean.Round(time.Second), cv*100),
-			IP:        srcIP,
-			Evidence:  evidence,
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-
+	evidence["c2_score"], evidence["c2_confidence"], evidence["c2_signals"] = score, minInt(95, 65+len(signals)*10), signals
+	sev := "high"
+	if score >= 85 {
+		sev = "critical"
 	}
-
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
-
+	e.raiseBuiltinAlert(string(AlertC2Beacon), AlertC2Beacon, sev, key,
+		fmt.Sprintf("%s connects to %s:%d at a suspiciously regular ~%s interval (%.0f%% variation) — possible C2 beaconing", srcIP, dstIP, dstPort, mean.Round(time.Second), cv*100), srcIP, evidence, now, alertEpisodeGap)
 }

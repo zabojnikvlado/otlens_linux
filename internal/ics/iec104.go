@@ -22,8 +22,15 @@ func parseIEC104(p core.Packet) (Message, bool) {
 		m.FunctionName = "ASDU"
 	}
 	m.Details["type_id"] = typ
-	if typ >= 45 && typ <= 50 || typ == 103 || typ == 105 {
-		m.Details["security_relevant"] = true
+	switch {
+	case typ >= 45 && typ <= 50:
+		setOperation(&m, "command", true, true, false)
+	case typ == 103:
+		setOperation(&m, "time", true, true, false)
+	case typ == 105:
+		setOperation(&m, "mode", true, true, true)
+	case typ == 100:
+		setOperation(&m, "read", false, false, false)
 	}
 	return m, true
 }

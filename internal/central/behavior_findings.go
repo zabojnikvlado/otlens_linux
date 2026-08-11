@@ -25,15 +25,27 @@ type AssetBehaviorProfile struct {
 }
 
 type NetworkBehaviorOverview struct {
-	NetworkHealth    float64                `json:"network_health"`
-	State            string                 `json:"state"`
-	LearningComplete bool                   `json:"learning_complete"`
-	Coverage         float64                `json:"coverage"`
-	ActiveBaselines  uint64                 `json:"active_baselines"`
-	BehaviorAlerts   int                    `json:"behavior_alerts"`
-	AffectedAssets   int                    `json:"affected_assets"`
-	TopAnomaly       *AssetBehaviorProfile  `json:"top_anomaly,omitempty"`
-	Profiles         []AssetBehaviorProfile `json:"profiles"`
+	NetworkHealth     float64                `json:"network_health"`
+	State             string                 `json:"state"`
+	LearningComplete  bool                   `json:"learning_complete"`
+	Coverage          float64                `json:"coverage"`
+	LearningReadiness float64                `json:"learning_readiness"`
+	MatureAssets      int                    `json:"mature_assets"`
+	LearningAssets    int                    `json:"learning_assets"`
+	CandidatePatterns int                    `json:"candidate_patterns"`
+	CandidateAssets   int                    `json:"candidate_assets"`
+	NewPatternRate    float64                `json:"new_pattern_rate"`
+	TimeCoverage      float64                `json:"time_coverage"`
+	ExcludedLearning  uint64                 `json:"excluded_learning"`
+	PreviewEvaluated  uint64                 `json:"preview_evaluated"`
+	PreviewAnomalies  uint64                 `json:"preview_anomalies"`
+	PreviewTopScore   float64                `json:"preview_top_score"`
+	PreviewTopReason  string                 `json:"preview_top_reason,omitempty"`
+	ActiveBaselines   uint64                 `json:"active_baselines"`
+	BehaviorAlerts    int                    `json:"behavior_alerts"`
+	AffectedAssets    int                    `json:"affected_assets"`
+	TopAnomaly        *AssetBehaviorProfile  `json:"top_anomaly,omitempty"`
+	Profiles          []AssetBehaviorProfile `json:"profiles"`
 }
 
 func behaviorReadAccess() gin.HandlerFunc {
@@ -71,28 +83,69 @@ func toString(value interface{}) string {
 func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.TelemetrySnapshot, assetCount int) NetworkBehaviorOverview {
 	type baselineStatus struct {
 		Behavior struct {
-			Enabled       bool   `json:"enabled"`
-			Mode          string `json:"mode"`
-			Profiles      uint64 `json:"profiles"`
-			AssetProfiles uint64 `json:"asset_profiles"`
+			Enabled           bool    `json:"enabled"`
+			Mode              string  `json:"mode"`
+			Profiles          uint64  `json:"profiles"`
+			AssetProfiles     uint64  `json:"asset_profiles"`
+			Readiness         float64 `json:"readiness"`
+			MatureAssets      int     `json:"mature_assets"`
+			LearningAssets    int     `json:"learning_assets"`
+			CandidatePatterns int     `json:"candidate_patterns"`
+			CandidateAssets   int     `json:"candidate_assets"`
+			NewPatternRate    float64 `json:"new_pattern_rate"`
+			TimeCoverage      float64 `json:"time_coverage"`
+			Excluded          uint64  `json:"excluded"`
 		} `json:"behavior"`
+		Anomaly struct {
+			PreviewEvaluatedTotal uint64  `json:"preview_evaluated_total"`
+			PreviewAnomaliesTotal uint64  `json:"preview_anomalies_total"`
+			PreviewTopScore       float64 `json:"preview_top_score"`
+			PreviewTopReason      string  `json:"preview_top_reason"`
+		} `json:"anomaly"`
 	}
 	overview := NetworkBehaviorOverview{LearningComplete: true, State: "unknown", Profiles: []AssetBehaviorProfile{}}
 	var covered uint64
+	var readinessTotal, patternRateTotal, timeCoverageTotal float64
+	enabledSensors := 0
 	for _, snapshot := range telemetry {
 		var status baselineStatus
 		if json.Unmarshal(snapshot.Baseline, &status) != nil || !status.Behavior.Enabled {
 			overview.LearningComplete = false
 			continue
 		}
+		enabledSensors++
 		overview.ActiveBaselines += status.Behavior.Profiles
-		covered += status.Behavior.AssetProfiles
+		overview.MatureAssets += status.Behavior.MatureAssets
+		overview.LearningAssets += status.Behavior.LearningAssets
+		overview.CandidatePatterns += status.Behavior.CandidatePatterns
+		overview.CandidateAssets += status.Behavior.CandidateAssets
+		overview.ExcludedLearning += status.Behavior.Excluded
+		overview.PreviewEvaluated += status.Anomaly.PreviewEvaluatedTotal
+		overview.PreviewAnomalies += status.Anomaly.PreviewAnomaliesTotal
+		if status.Anomaly.PreviewTopScore > overview.PreviewTopScore {
+			overview.PreviewTopScore = status.Anomaly.PreviewTopScore
+			overview.PreviewTopReason = status.Anomaly.PreviewTopReason
+		}
+		readinessTotal += math.Max(0, math.Min(1, status.Behavior.Readiness))
+		patternRateTotal += math.Max(0, status.Behavior.NewPatternRate)
+		timeCoverageTotal += math.Max(0, math.Min(1, status.Behavior.TimeCoverage))
+		if status.Behavior.MatureAssets > 0 {
+			covered += uint64(status.Behavior.MatureAssets)
+		} else {
+			// Backwards compatible fallback for older sensor telemetry.
+			covered += status.Behavior.AssetProfiles
+		}
 		if status.Behavior.Mode != "monitoring" {
 			overview.LearningComplete = false
 		}
 	}
-	if len(telemetry) == 0 {
+	if len(telemetry) == 0 || enabledSensors == 0 {
 		overview.LearningComplete = false
+	}
+	if enabledSensors > 0 {
+		overview.LearningReadiness = readinessTotal * 100 / float64(enabledSensors)
+		overview.NewPatternRate = patternRateTotal / float64(enabledSensors)
+		overview.TimeCoverage = timeCoverageTotal * 100 / float64(enabledSensors)
 	}
 	if assetCount > 0 {
 		overview.Coverage = math.Min(100, float64(covered)*100/float64(assetCount))

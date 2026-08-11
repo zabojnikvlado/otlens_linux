@@ -30,8 +30,11 @@ func parseEtherNetIP(p core.Packet) (Message, bool) {
 		if len(b) > 40 {
 			svc := b[len(b)-1]
 			m.Details["cip_service"] = svc
-			if svc == 0x4d || svc == 0x4e || svc == 0x10 || svc == 0x53 {
-				m.Details["security_relevant"] = true
+			switch svc {
+			case 0x4d, 0x4e, 0x10, 0x53:
+				setOperation(&m, "write", true, true, false)
+			case 0x01, 0x0e, 0x4c:
+				setOperation(&m, "read", false, false, false)
 			}
 		}
 	}

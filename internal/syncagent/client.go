@@ -293,7 +293,7 @@ func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	}
 	return nil
 }
-func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error, applyThreatIntel func(management.ThreatIntelSnapshot) error) ([]management.Command, error) {
+func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error, applyThreatIntel func(management.ThreatIntelSnapshot) error, applyAssetContexts func([]management.AssetPolicyContext) error) ([]management.Command, error) {
 	syncURL := fmt.Sprintf("%s/v1/sensors/%s/sync?threat_intel_version=%d", strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.SensorID, c.threatIntelVersion)
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, syncURL, nil)
 	if e != nil {
@@ -315,12 +315,36 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	if out.RuleSet != nil && out.RulesVersion > c.rulesVersion {
 		rules := make([]*detect.Rule, 0, len(out.RuleSet.Rules))
 		for _, r := range out.RuleSet.Rules {
-			rules = append(rules, &detect.Rule{ID: r.ID, Name: r.Name, Kind: detect.RuleKind(r.Kind), Enabled: r.Enabled, Field: detect.RuleField(r.Field), Value: r.Value, Severity: r.Severity, AlertType: detect.AlertType(r.AlertType)})
+			groups := make([]detect.RuleGroup, 0, len(r.Groups))
+			for _, g := range r.Groups {
+				conditions := make([]detect.RuleCondition, 0, len(g.Conditions))
+				for _, x := range g.Conditions {
+					conditions = append(conditions, detect.RuleCondition{Field: detect.RuleField(x.Field), Operator: x.Operator, Value: x.Value})
+				}
+				groups = append(groups, detect.RuleGroup{Operator: g.Operator, Conditions: conditions})
+			}
+			actions := make([]detect.RuleAction, 0, len(r.Actions))
+			for _, a := range r.Actions {
+				actions = append(actions, detect.RuleAction{Type: a.Type})
+			}
+			rules = append(rules, &detect.Rule{
+				ID: r.ID, Name: r.Name, Description: r.Description, Category: r.Category, Kind: detect.RuleKind(r.Kind),
+				Enabled: r.Enabled, Severity: r.Severity, SeverityOverride: r.SeverityOverride, Priority: r.Priority, Simulation: r.Simulation, Version: r.Version,
+				Groups: groups, GroupOperator: r.GroupOperator, Actions: actions,
+				Suppression: detect.RuleSuppression{Mode: r.Suppression.Mode, IntervalSeconds: r.Suppression.IntervalSeconds}, Schedule: r.Schedule,
+				Field: detect.RuleField(r.Field), Value: r.Value, AlertType: detect.AlertType(r.AlertType),
+				Detector: r.Detector, MITRETactics: append([]string(nil), r.MITRETactics...), MITRETechniques: append([]string(nil), r.MITRETechniques...), Prerequisites: append([]string(nil), r.Prerequisites...), Protocols: append([]string(nil), r.Protocols...), Parameters: cloneFloatMap(r.Parameters),
+			})
 		}
 		if e := apply(rules); e != nil {
 			return nil, e
 		}
 		c.rulesVersion = out.RulesVersion
+	}
+	if applyAssetContexts != nil {
+		if e := applyAssetContexts(out.AssetContexts); e != nil {
+			return nil, e
+		}
 	}
 	if out.ThreatIntel != nil && out.ThreatIntelVersion > c.threatIntelVersion && applyThreatIntel != nil {
 		if e := applyThreatIntel(*out.ThreatIntel); e != nil {
@@ -457,4 +481,15 @@ func (c *Client) PushReconResult(ctx context.Context, jobID string, results []ma
 		return syncErr("reconnaissance result upload failed", resp)
 	}
 	return nil
+}
+
+func cloneFloatMap(in map[string]float64) map[string]float64 {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

@@ -3,6 +3,7 @@ package central
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,156 @@ func reconChanges(previous *management.ReconResult, current management.ReconResu
 	return out
 }
 
+type reconBuiltinPolicy struct {
+	Enabled          bool                       `json:"enabled"`
+	Severity         string                     `json:"severity"`
+	SeverityOverride bool                       `json:"severity_override"`
+	Simulation       bool                       `json:"simulation"`
+	Suppression      management.RuleSuppression `json:"suppression"`
+	Schedule         string                     `json:"schedule"`
+}
+
+func reconRulePolicyTx(ctx context.Context, tx *sql.Tx, sensorID, ruleID, fallbackSeverity string) reconBuiltinPolicy {
+	out := reconBuiltinPolicy{Enabled: true, Severity: fallbackSeverity}
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT rules FROM sensor_telemetry WHERE sensor_id=$1`, sensorID).Scan(&raw); err != nil {
+		return out
+	}
+	var rows []struct {
+		ID               string                     `json:"id"`
+		Enabled          bool                       `json:"enabled"`
+		Severity         string                     `json:"severity"`
+		SeverityOverride bool                       `json:"severity_override"`
+		Simulation       bool                       `json:"simulation"`
+		Suppression      management.RuleSuppression `json:"suppression"`
+		Schedule         string                     `json:"schedule"`
+	}
+	if json.Unmarshal(raw, &rows) != nil {
+		return out
+	}
+	for _, r := range rows {
+		if r.ID == ruleID {
+			out.Enabled = r.Enabled
+			out.Simulation = r.Simulation
+			out.SeverityOverride = r.SeverityOverride
+			out.Suppression = r.Suppression
+			out.Schedule = r.Schedule
+			if r.SeverityOverride && strings.TrimSpace(r.Severity) != "" {
+				out.Severity = strings.ToLower(strings.TrimSpace(r.Severity))
+			}
+			return out
+		}
+	}
+	return out
+}
+
+func reconScheduleAllows(schedule string, now time.Time) bool {
+	schedule = strings.TrimSpace(strings.ToLower(schedule))
+	if schedule == "" || schedule == "always" {
+		return true
+	}
+	window := schedule
+	if i := strings.Index(schedule, "@"); i >= 0 {
+		days, candidate := schedule[:i], schedule[i+1:]
+		weekday := strings.ToLower(now.UTC().Weekday().String()[:3])
+		allowed := false
+		for _, day := range strings.Split(days, ",") {
+			day = strings.TrimSpace(day)
+			if day == weekday || (day == "weekday" && weekday != "sat" && weekday != "sun") || (day == "weekend" && (weekday == "sat" || weekday == "sun")) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+		window = candidate
+	}
+	parts := strings.Split(window, "-")
+	if len(parts) != 2 {
+		return false
+	}
+	parse := func(v string) (int, bool) {
+		var h, m int
+		if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d:%d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+			return 0, false
+		}
+		return h*60 + m, true
+	}
+	from, okFrom := parse(parts[0])
+	to, okTo := parse(parts[1])
+	if !okFrom || !okTo {
+		return false
+	}
+	minute := now.UTC().Hour()*60 + now.UTC().Minute()
+	if from <= to {
+		return minute >= from && minute < to
+	}
+	return minute >= from || minute < to
+}
+
+func insertReconDerivedAlertTx(ctx context.Context, tx *sql.Tx, sensorID, ruleID, alertType, fallbackSeverity, key, message, ip string, evidence map[string]interface{}) error {
+	policy := reconRulePolicyTx(ctx, tx, sensorID, ruleID, fallbackSeverity)
+	now := time.Now().UTC()
+	if !policy.Enabled || policy.Simulation || !reconScheduleAllows(policy.Schedule, now) {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(policy.Suppression.Mode))
+	if mode == "" {
+		mode = "aggregate"
+	}
+	if mode == "once" || mode == "interval" {
+		var lastSeen time.Time
+		err := tx.QueryRowContext(ctx, `SELECT last_seen FROM alert_history WHERE sensor_id=$1 AND alert_key=$2`, sensorID, key).Scan(&lastSeen)
+		if err == nil {
+			if mode == "once" {
+				return nil
+			}
+			interval := time.Duration(policy.Suppression.IntervalSeconds) * time.Second
+			if interval <= 0 {
+				interval = 5 * time.Minute
+			}
+			if now.Sub(lastSeen) < interval {
+				return nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if mode == "every" {
+		key = fmt.Sprintf("%s|%d", key, now.UnixNano())
+	}
+	ev, _ := json.Marshal(evidence)
+	_, err := tx.ExecContext(ctx, `INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen,evidence)
+		VALUES($1,$2,$3,$4,$5,$6,'new',1,$7,$7,$8)
+		ON CONFLICT(sensor_id,alert_key) DO UPDATE SET severity=EXCLUDED.severity,message=EXCLUDED.message,last_seen=EXCLUDED.last_seen,
+		count=CASE WHEN alert_history.last_seen < EXCLUDED.last_seen-INTERVAL '5 minutes' THEN alert_history.count+1 ELSE alert_history.count END,
+		evidence=EXCLUDED.evidence,status=CASE WHEN alert_history.status='approved' THEN alert_history.status ELSE 'new' END`, sensorID, key, alertType, policy.Severity, message, ip, now, ev)
+	return err
+}
+
+func persistReconSecurityChangesTx(ctx context.Context, tx *sql.Tx, sensorID string, x management.ReconResult) error {
+	for _, ch := range x.Changes {
+		if ch.Kind != "changed" {
+			continue
+		}
+		ev := map[string]interface{}{"source": "reconnaissance_profile", "field": ch.Field, "previous": ch.Previous, "current": ch.Current, "job_target": x.Target}
+		switch ch.Field {
+		case "firmware":
+			if err := insertReconDerivedAlertTx(ctx, tx, sensorID, "builtin.firmware_change", "firmware_change", "critical",
+				fmt.Sprintf("recon-firmware|%s|%s", x.Target, ch.Current), fmt.Sprintf("Firmware on %s changed from %s to %s", x.Target, ch.Previous, ch.Current), x.Target, ev); err != nil {
+				return err
+			}
+		case "hostname", "vendor", "model", "serial", "operating_system":
+			if err := insertReconDerivedAlertTx(ctx, tx, sensorID, "builtin.asset_identity_drift", "asset_identity_drift", "high",
+				fmt.Sprintf("recon-identity|%s|%s|%s", x.Target, ch.Field, ch.Current), fmt.Sprintf("Asset %s identity field %s changed from %s to %s", x.Target, ch.Field, ch.Previous, ch.Current), x.Target, ev); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (r *Repository) CreateReconJob(ctx context.Context, j management.ReconJob) error {
 	t, _ := json.Marshal(j.Targets)
 	p, _ := json.Marshal(j.Policy)
@@ -145,6 +296,9 @@ func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results
 			previousPtr = &previous
 		}
 		x.Changes = reconChanges(previousPtr, *x)
+		if err = persistReconSecurityChangesTx(ctx, tx, sensorID, *x); err != nil {
+			return err
+		}
 		services, _ := json.Marshal(x.Services)
 		evidence, _ := json.Marshal(x.Evidence)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_profile(sensor_id,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at)

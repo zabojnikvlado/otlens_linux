@@ -67,24 +67,31 @@ type RuleSuppression struct {
 }
 
 type Rule struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Description   string          `json:"description,omitempty"`
-	Category      string          `json:"category,omitempty"`
-	Kind          string          `json:"kind"`
-	Enabled       bool            `json:"enabled"`
-	Severity      string          `json:"severity,omitempty"`
-	Priority      int             `json:"priority,omitempty"`
-	Simulation    bool            `json:"simulation,omitempty"`
-	Version       int             `json:"version,omitempty"`
-	Groups        []RuleGroup     `json:"groups,omitempty"`
-	GroupOperator string          `json:"group_operator,omitempty"`
-	Actions       []RuleAction    `json:"actions,omitempty"`
-	Suppression   RuleSuppression `json:"suppression,omitempty"`
-	Schedule      string          `json:"schedule,omitempty"`
-	Field         string          `json:"field,omitempty"`
-	Value         string          `json:"value,omitempty"`
-	AlertType     string          `json:"alert_type,omitempty"`
+	ID               string             `json:"id"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description,omitempty"`
+	Category         string             `json:"category,omitempty"`
+	Kind             string             `json:"kind"`
+	Enabled          bool               `json:"enabled"`
+	Severity         string             `json:"severity,omitempty"`
+	SeverityOverride bool               `json:"severity_override,omitempty"`
+	Priority         int                `json:"priority,omitempty"`
+	Simulation       bool               `json:"simulation,omitempty"`
+	Version          int                `json:"version,omitempty"`
+	Groups           []RuleGroup        `json:"groups,omitempty"`
+	GroupOperator    string             `json:"group_operator,omitempty"`
+	Actions          []RuleAction       `json:"actions,omitempty"`
+	Suppression      RuleSuppression    `json:"suppression,omitempty"`
+	Schedule         string             `json:"schedule,omitempty"`
+	Detector         string             `json:"detector,omitempty"`
+	MITRETactics     []string           `json:"mitre_tactics,omitempty"`
+	MITRETechniques  []string           `json:"mitre_techniques,omitempty"`
+	Prerequisites    []string           `json:"prerequisites,omitempty"`
+	Protocols        []string           `json:"protocols,omitempty"`
+	Parameters       map[string]float64 `json:"parameters,omitempty"`
+	Field            string             `json:"field,omitempty"`
+	Value            string             `json:"value,omitempty"`
+	AlertType        string             `json:"alert_type,omitempty"`
 }
 
 type SensorRegistration struct {
@@ -181,6 +188,14 @@ type ThreatIntelSnapshot struct {
 	Indicators  []ThreatIntelIndicator `json:"indicators"`
 }
 
+type AssetPolicyContext struct {
+	AssetIP        string   `json:"asset_ip"`
+	AssetRole      string   `json:"asset_role,omitempty"`
+	Criticality    string   `json:"criticality,omitempty"`
+	Zone           string   `json:"zone,omitempty"`
+	PurdueOverride *float64 `json:"purdue_override,omitempty"`
+}
+
 type SyncResponse struct {
 	ConfigVersion      int64                `json:"config_version"`
 	RulesVersion       int64                `json:"rules_version"`
@@ -188,6 +203,7 @@ type SyncResponse struct {
 	Commands           []Command            `json:"commands,omitempty"`
 	ThreatIntelVersion int64                `json:"threat_intel_version,omitempty"`
 	ThreatIntel        *ThreatIntelSnapshot `json:"threat_intel,omitempty"`
+	AssetContexts      []AssetPolicyContext `json:"asset_contexts,omitempty"`
 }
 
 // TelemetrySnapshot is the periodically uploaded sensor view used by the

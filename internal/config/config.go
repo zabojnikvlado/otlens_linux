@@ -161,6 +161,21 @@ type Config struct {
 		BucketDuration   time.Duration
 		MaxProfiles      int
 		MaxAssetProfiles int
+
+		// Readiness/maturity controls. LearningDuration is the minimum time;
+		// the behavior baseline may continue until the observed network is stable
+		// enough, capped by MaxLearningMultiplier.
+		MinAssetSamples       int
+		MinAssetAge           time.Duration
+		ReadinessThreshold    float64
+		MaxLearningMultiplier float64
+		CandidateMinSamples   int
+		CandidateMinDays      int
+		MinStatSamples        int
+		// Optional UTC maintenance windows, e.g. "weekend@02:00-04:00" or
+		// "mon,tue@22:00-23:00". Maintenance traffic is learned under a
+		// separate maintenance context and never contaminates production behavior.
+		MaintenanceWindows []string
 	}
 
 	NBA struct {
@@ -209,9 +224,9 @@ type Config struct {
 	// Detect controls the anomaly/rule detection engine's tunables
 	// that aren't baseline-learning-specific — see internal/detect.
 	Detect struct {
-		// How many consecutive conflicting ARP claims for the same
-		// IP are required before treating the new MAC as legitimate
-		// (debounces against a single stray/retransmitted packet).
+		// How many consecutive conflicting ARP claims are required before a
+		// duplicate-IP/gateway-identity alert is escalated. Repetition never
+		// auto-trusts a new MAC; analyst approval is required.
 		ARPConfirmThreshold int
 
 		// Segmentation flags traffic that jumps too many Purdue Model
@@ -233,6 +248,15 @@ type Config struct {
 			// default) allows adjacent-level traffic (e.g. Level 2 to
 			// Level 3) but flags anything that skips a level.
 			MaxLevelJump float64
+			// Policy is an optional explicit zone matrix evaluated before the
+			// Purdue-level fallback. Use "*"/"any" as wildcards.
+			Policy []struct {
+				SourceZone      string
+				DestinationZone string
+				Protocol        string
+				Direction       string
+				Allowed         bool
+			}
 		}
 
 		// Reconnaissance flags a source IP that contacts an unusually
@@ -515,7 +539,7 @@ type CentralConfig struct {
 	// roles, sessions), and system_backups are never affected by this,
 	// regardless of size pressure.
 	DatabaseRetention struct {
-		Enabled bool `mapstructure:"enabled"`
+		Enabled bool
 		// Interval is how often the retention sweep runs.
 		Interval time.Duration `mapstructure:"interval"`
 		// *Days are age-based cutoffs, one per category. A row older than
@@ -583,7 +607,7 @@ type CentralConfig struct {
 	// report_history and viewable from the Reports tab regardless of
 	// whether email delivery is configured or succeeds.
 	Reports struct {
-		Enabled bool `mapstructure:"enabled"`
+		Enabled bool
 		// Schedule is currently "weekly" only — DayOfWeek (monday..sunday)
 		// and HourUTC (0-23) say when in that cycle.
 		Schedule   string   `mapstructure:"schedule"`
@@ -760,6 +784,14 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("baseline.bucketduration", time.Hour)
 	viper.SetDefault("baseline.maxprofiles", 100000)
 	viper.SetDefault("baseline.maxassetprofiles", 100000)
+	viper.SetDefault("baseline.minassetsamples", 50)
+	viper.SetDefault("baseline.minassetage", 5*time.Minute)
+	viper.SetDefault("baseline.readinessthreshold", 0.85)
+	viper.SetDefault("baseline.maxlearningmultiplier", 2.0)
+	viper.SetDefault("baseline.candidateminsamples", 20)
+	viper.SetDefault("baseline.candidatemindays", 3)
+	viper.SetDefault("baseline.minstatsamples", 30)
+	viper.SetDefault("baseline.maintenancewindows", []string{})
 	viper.SetDefault("nba.enabled", true)
 	viper.SetDefault("nba.minscore", 40.0)
 	viper.SetDefault("nba.maxanomalies", 10000)

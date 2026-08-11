@@ -11,6 +11,8 @@
 package detect
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,12 +41,9 @@ type Engine struct {
 	candidateCount map[string]int
 
 	// arpConfirmThreshold is how many consecutive conflicting claims
-	// for the same IP are required before the new MAC is accepted as
-	// the legitimate mapping. This debounces the detector against a
-	// single stray/retransmitted packet — real MAC changes (a NIC
-	// swap, DHCP handing the IP to a new device) repeat consistently;
-	// an attacker's spoofed replies also repeat, but flagging on the
-	// very first packet would also flag ordinary transient noise.
+	// for the same IP are required before companion duplicate-IP/gateway
+	// alerts are escalated. A repeated claimant is never auto-promoted
+	// to trusted identity; an analyst must approve the change.
 	arpConfirmThreshold int
 
 	// Baseline learning state — see baseline.go.
@@ -54,6 +53,9 @@ type Engine struct {
 	learningDuration time.Duration
 	learnedPatterns  map[string]bool
 	learnedAssets    map[string]bool
+	assetFirstSeen   map[string]time.Time
+	assetSamples     map[string]uint64
+	patternCreatedAt []time.Time
 
 	// eventBus is retained (not just used transiently in Start) so
 	// baseline.go can publish core.EventBaselineLearningComplete the
@@ -82,6 +84,7 @@ type Engine struct {
 	segmentationEnabled bool
 	vlanLevels          map[uint16]float64
 	maxLevelJump        float64
+	segmentationPolicy  []SegmentationPolicyRule
 	ipVLANMutex         sync.RWMutex
 	ipVLAN              map[string]uint16
 
@@ -99,6 +102,7 @@ type Engine struct {
 	scanMutex             sync.Mutex
 	hostScanSeen          map[string]map[string]time.Time         // srcIP -> dstIP -> last seen
 	portScanSeen          map[string]map[string]map[int]time.Time // srcIP -> dstIP -> port -> last seen
+	reconSignals          map[string][]time.Time
 
 	// c2BeaconEnabled/*/beaconMutex/beaconHistory/beaconLastTouch — see
 	// config.SensorConfig.Detect.C2Beacon and c2beacon.go.
@@ -131,6 +135,33 @@ type Engine struct {
 	c2DNSMutex    sync.Mutex
 	c2NXDomains   map[string][]time.Time
 	c2Subdomains  map[string]map[string]time.Time
+
+	// Product built-in policy/context state. Central supplies operator-owned
+	// asset roles/zones; protocol/management relationships are learned locally
+	// during baseline and remain bounded maps keyed by observed assets.
+	policyMutex   sync.Mutex
+	assetContexts map[string]AssetPolicyContext
+	otAssets      map[string]bool
+	// Access, command authority and time-setting authority are learned
+	// separately. A historian that merely reads a PLC during learning must not
+	// become authorized to write/operate it after learning.
+	trustedOTAccess          map[string]map[string]bool
+	trustedOTMasters         map[string]map[string]bool
+	trustedOTTimeSources     map[string]map[string]bool
+	trustedOTProtocols       map[string]map[string]bool
+	trustedRemoteMgmt        map[string]bool
+	policyLearningQuarantine map[string]time.Time
+	engineeringTargets       map[string]map[string]time.Time
+	remoteTransfers          map[string]*packetWindow
+	ioBursts                 map[string][]time.Time
+	dnpSelect                map[string]time.Time
+	icsErrors                map[string][]time.Time
+	reporting                map[string]*reportingState
+	hostnameByMAC            map[string]string
+	gratuitousARP            map[string][]time.Time
+	externalPeers            map[string]map[string]bool
+	dnsTunnel                map[string]*dnsTunnelState
+	lastPacketObserved       time.Time
 }
 
 // NewEngine creates a detection engine. learningDuration controls
@@ -196,6 +227,8 @@ func NewEngine(
 		learningDuration: learningDuration,
 		learnedPatterns:  make(map[string]bool),
 		learnedAssets:    make(map[string]bool),
+		assetFirstSeen:   make(map[string]time.Time),
+		assetSamples:     make(map[string]uint64),
 
 		alerts: make(map[string]*Alert),
 
@@ -215,6 +248,7 @@ func NewEngine(
 		portScanThreshold:     portScanThreshold,
 		hostScanSeen:          make(map[string]map[string]time.Time),
 		portScanSeen:          make(map[string]map[string]map[int]time.Time),
+		reconSignals:          make(map[string][]time.Time),
 
 		c2BeaconEnabled:         c2BeaconEnabled,
 		c2BeaconMinSamples:      c2BeaconMinSamples,
@@ -229,6 +263,25 @@ func NewEngine(
 		lateralData:  lateralState{fanout: make(map[string]map[string]time.Time), transfers: make(map[string]*trafficWindow), inboundAdmin: make(map[string]map[string]time.Time)},
 		c2NXDomains:  make(map[string][]time.Time),
 		c2Subdomains: make(map[string]map[string]time.Time),
+
+		assetContexts:            make(map[string]AssetPolicyContext),
+		otAssets:                 make(map[string]bool),
+		trustedOTAccess:          make(map[string]map[string]bool),
+		trustedOTMasters:         make(map[string]map[string]bool),
+		trustedOTTimeSources:     make(map[string]map[string]bool),
+		trustedOTProtocols:       make(map[string]map[string]bool),
+		trustedRemoteMgmt:        make(map[string]bool),
+		policyLearningQuarantine: make(map[string]time.Time),
+		engineeringTargets:       make(map[string]map[string]time.Time),
+		remoteTransfers:          make(map[string]*packetWindow),
+		ioBursts:                 make(map[string][]time.Time),
+		dnpSelect:                make(map[string]time.Time),
+		icsErrors:                make(map[string][]time.Time),
+		reporting:                make(map[string]*reportingState),
+		hostnameByMAC:            make(map[string]string),
+		gratuitousARP:            make(map[string][]time.Time),
+		externalPeers:            make(map[string]map[string]bool),
+		dnsTunnel:                make(map[string]*dnsTunnelState),
 	}
 
 	if e.reconWindow <= 0 {
@@ -353,6 +406,7 @@ func (e *Engine) Start(bus *core.EventBus) {
 
 	e.startARPWatch(bus)
 	e.startICSWatch(bus)
+	e.startICSParseErrorWatch(bus)
 	e.startBaselineWatch(bus)
 	e.startAssetUnconfirmedWatch(bus)
 	e.startValueOutOfRangeWatch(bus)
@@ -367,7 +421,11 @@ func (e *Engine) Start(bus *core.EventBus) {
 	e.startLateralMovementWatch(bus)
 	e.startSMBLateralWatch(bus)
 	e.startC2CorrelationWatch(bus)
+	e.startDNSTunnelWatch(bus)
 	e.startBehaviorFindingWatch(bus)
+	e.startBuiltinNetworkPolicyWatch(bus)
+	e.startIdentityPolicyWatch(bus)
+	e.startOTReportingWatch(bus)
 	e.startCustomRuleWatch(bus)
 
 }
@@ -456,15 +514,24 @@ func (e *Engine) logNewAlert(alert *Alert) {
 // from a client's cached view).
 func (e *Engine) ApproveAlert(id string) bool {
 	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
 	alert, exists := e.alerts[id]
 	if !exists {
+		e.mutex.Unlock()
 		return false
 	}
 	alert.Status = AlertStatusApproved
 	alert.StatusChangedAt = time.Now()
 	alert.Synced = false
+
+	// Copy the fields needed for trust promotion before releasing the alert
+	// mutex. Policy-learning state uses a separate mutex and must never be
+	// mutated while holding e.mutex, otherwise concurrent detector paths could
+	// invert lock order.
+	alertType, alertIP := alert.Type, alert.IP
+	evidence := make(map[string]interface{}, len(alert.Evidence))
+	for k, v := range alert.Evidence {
+		evidence[k] = v
+	}
 
 	// A post-learning communication deviation becomes trusted baseline only
 	// after an analyst explicitly approves it. Older builds silently learned it
@@ -472,7 +539,101 @@ func (e *Engine) ApproveAlert(id string) bool {
 	if alert.Type == AlertNewCommunication {
 		e.learnedPatterns[alert.ID] = true
 	}
+	// ARP identity changes are never auto-promoted by packet repetition. An
+	// explicit analyst approval is the trust transition.
+	if alert.Type == AlertARPSpoof || alert.Type == AlertDuplicateIP || alert.Type == AlertGatewayMACChanged {
+		newMAC := alert.NewMAC
+		if newMAC == "" {
+			newMAC = evidenceString(evidence, "new_mac")
+		}
+		if alert.IP != "" && newMAC != "" {
+			e.knownMAC[alert.IP] = newMAC
+			delete(e.candidateMAC, alert.IP)
+			delete(e.candidateCount, alert.IP)
+		}
+	}
+	e.mutex.Unlock()
+
+	src := evidenceString(evidence, "source_ip")
+	if src == "" {
+		src = evidenceString(evidence, "client_ip")
+	}
+	dst := evidenceString(evidence, "target_ip")
+	if dst == "" {
+		dst = evidenceString(evidence, "destination_ip")
+	}
+	if dst == "" && alertType == AlertUnexpectedOTProtocol {
+		dst = alertIP
+	}
+	protocol := evidenceString(evidence, "protocol")
+	if protocol == "" {
+		protocol = evidenceString(evidence, "ot_protocol")
+	}
+	port := evidenceUint16(evidence, "service_port")
+	if port == 0 {
+		port = evidenceUint16(evidence, "destination_port")
+	}
+
+	// Approval is also an explicit relationship-policy decision for findings
+	// that represent previously unknown access/authority. This provides the
+	// operator-owned "approved sources/destinations" layer without silently
+	// learning security-sensitive traffic.
+	switch alertType {
+	case AlertUnauthorizedOTCommand, AlertUnauthorizedOTWrite, AlertUnexpectedEngineeringAccess:
+		e.approveOTAccessRelationship(src, dst, protocol, port, true)
+	case AlertDirectOTProtocolAccess:
+		e.approveOTAccessRelationship(src, dst, protocol, port, false)
+	case AlertUnexpectedOTProtocol:
+		e.approveOTAccessRelationship(src, dst, protocol, port, false)
+	case AlertUnauthorizedTimeChange:
+		e.approveOTTimeSource(src, dst)
+	case AlertFirstSeenRemoteManagement, AlertRemoteAdminIntoOT:
+		e.approveRemoteManagement(src, dst, port)
+	case AlertSMBIntoOT:
+		e.approveRemoteManagement(src, dst, 445)
+	}
 	return true
+}
+
+func evidenceString(evidence map[string]interface{}, key string) string {
+	if evidence == nil {
+		return ""
+	}
+	if v, ok := evidence[key].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func evidenceUint16(evidence map[string]interface{}, key string) uint16 {
+	if evidence == nil {
+		return 0
+	}
+	switch v := evidence[key].(type) {
+	case uint16:
+		return v
+	case uint32:
+		if v <= 65535 {
+			return uint16(v)
+		}
+	case uint64:
+		if v <= 65535 {
+			return uint16(v)
+		}
+	case int:
+		if v >= 0 && v <= 65535 {
+			return uint16(v)
+		}
+	case float64:
+		if v >= 0 && v <= 65535 {
+			return uint16(v)
+		}
+	case string:
+		if n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 16); err == nil {
+			return uint16(n)
+		}
+	}
+	return 0
 }
 
 // allowAlertOccurrenceLocked applies the operator verdict before an alert is
@@ -717,10 +878,13 @@ func (e *Engine) Clear() {
 // specifically, doesn't re-flag every already-known device as
 // newly unconfirmed on every restart.
 type BaselineSnapshot struct {
-	Mode            BaselineMode
-	LearningStarted time.Time
-	LearnedPatterns map[string]bool
-	LearnedAssets   map[string]bool
+	Mode             BaselineMode
+	LearningStarted  time.Time
+	LearnedPatterns  map[string]bool
+	LearnedAssets    map[string]bool
+	AssetFirstSeen   map[string]time.Time
+	AssetSamples     map[string]uint64
+	PatternCreatedAt []time.Time
 }
 
 // BaselineSnapshot captures the current baseline state for
@@ -741,12 +905,23 @@ func (e *Engine) BaselineSnapshot() BaselineSnapshot {
 	for k, v := range e.learnedAssets {
 		assets[k] = v
 	}
+	firstSeen := make(map[string]time.Time, len(e.assetFirstSeen))
+	for k, v := range e.assetFirstSeen {
+		firstSeen[k] = v
+	}
+	samples := make(map[string]uint64, len(e.assetSamples))
+	for k, v := range e.assetSamples {
+		samples[k] = v
+	}
 
 	return BaselineSnapshot{
-		Mode:            e.baselineMode,
-		LearningStarted: e.learningStarted,
-		LearnedPatterns: patterns,
-		LearnedAssets:   assets,
+		Mode:             e.baselineMode,
+		LearningStarted:  e.learningStarted,
+		LearnedPatterns:  patterns,
+		LearnedAssets:    assets,
+		AssetFirstSeen:   firstSeen,
+		AssetSamples:     samples,
+		PatternCreatedAt: append([]time.Time(nil), e.patternCreatedAt...),
 	}
 }
 
@@ -774,6 +949,13 @@ func (e *Engine) RestoreBaseline(snapshot BaselineSnapshot) {
 	for k, v := range snapshot.LearnedAssets {
 		e.learnedAssets[k] = v
 	}
+	for k, v := range snapshot.AssetFirstSeen {
+		e.assetFirstSeen[k] = v
+	}
+	for k, v := range snapshot.AssetSamples {
+		e.assetSamples[k] = v
+	}
+	e.patternCreatedAt = append([]time.Time(nil), snapshot.PatternCreatedAt...)
 }
 
 // ResetBaseline actually clears learning state back to zero,
@@ -805,6 +987,9 @@ func (e *Engine) ResetBaseline() {
 	e.learningStarted = time.Time{}
 	e.learnedPatterns = make(map[string]bool)
 	e.learnedAssets = make(map[string]bool)
+	e.assetFirstSeen = make(map[string]time.Time)
+	e.assetSamples = make(map[string]uint64)
+	e.patternCreatedAt = nil
 }
 
 // KnownMACSnapshot captures the current confirmed IP->MAC mapping

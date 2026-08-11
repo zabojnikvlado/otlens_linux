@@ -48,7 +48,7 @@ type Message struct {
 // only has to fill in what's specific to it.
 func newMessage(packet core.Packet, protocol string) Message {
 
-	return Message{
+	m := Message{
 		Timestamp: packet.Timestamp,
 
 		FromAnalysis: packet.FromAnalysis,
@@ -62,4 +62,6 @@ func newMessage(packet core.Packet, protocol string) Message {
 
 		Details: make(map[string]any),
 	}
+	m.Details["payload_size"] = len(packet.AppPayload)
+	return m
 }

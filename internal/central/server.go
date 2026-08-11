@@ -392,7 +392,8 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/malware-incidents/contact-trace", requireAction(ActionAlertConfirmApprove), s.createMalwareContactTrace)
 	api.GET("/malware-incidents/:id", requireView(ViewAlerts), s.getMalwareIncident)
 	api.GET("/malware-incidents/:id/contact-graph", requireView(ViewTopology), s.getMalwareContactGraph)
-	api.GET("/baseline", requireView(ViewDashboard), s.baseline)
+	api.GET("/baseline", behaviorReadAccess(), s.baseline)
+	api.POST("/sensors/:id/baseline/candidates/promote", requireAction(ActionAlertConfirmApprove), s.promoteBaselineCandidate)
 	api.GET("/dashboard/trends", requireView(ViewDashboard), s.dashboardTrends)
 	api.GET("/reports", requireView(ViewDashboard), s.listReports)
 	api.GET("/reports/:id", requireView(ViewDashboard), s.getReport)
@@ -2038,27 +2039,98 @@ func (s *Server) createRule(c *gin.Context) {
 
 func (s *Server) updateRule(c *gin.Context) {
 	var req struct {
-		Enabled *bool `json:"enabled"`
+		Enabled          *bool                       `json:"enabled,omitempty"`
+		Severity         *string                     `json:"severity,omitempty"`
+		SeverityOverride *bool                       `json:"severity_override,omitempty"`
+		Priority         *int                        `json:"priority,omitempty"`
+		Simulation       *bool                       `json:"simulation,omitempty"`
+		Suppression      *management.RuleSuppression `json:"suppression,omitempty"`
+		Schedule         *string                     `json:"schedule,omitempty"`
+		Parameters       *map[string]float64         `json:"parameters,omitempty"`
 	}
-	if c.ShouldBindJSON(&req) != nil || req.Enabled == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "enabled is required"})
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule policy"})
 		return
+	}
+	if req.Enabled == nil && req.Severity == nil && req.SeverityOverride == nil && req.Priority == nil && req.Simulation == nil && req.Suppression == nil && req.Schedule == nil && req.Parameters == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one policy field is required"})
+		return
+	}
+	if req.Severity != nil {
+		v := strings.ToLower(strings.TrimSpace(*req.Severity))
+		switch v {
+		case "info", "low", "medium", "high", "critical":
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid severity"})
+			return
+		}
+		*req.Severity = v
+	}
+	if req.Priority != nil && *req.Priority <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "priority must be positive"})
+		return
+	}
+	if req.Suppression != nil {
+		v := strings.ToLower(strings.TrimSpace(req.Suppression.Mode))
+		switch v {
+		case "every", "once", "interval", "aggregate":
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid suppression mode"})
+			return
+		}
+		if v == "interval" && req.Suppression.IntervalSeconds <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "interval_seconds must be positive"})
+			return
+		}
+		req.Suppression.Mode = v
+	}
+	if req.Parameters != nil {
+		for key, value := range *req.Parameters {
+			if strings.TrimSpace(key) == "" || value < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "rule parameters must use non-empty names and non-negative numeric values"})
+				return
+			}
+		}
 	}
 	sensorID, ruleID := c.Param("id"), c.Param("rule")
-	payload, _ := json.Marshal(map[string]interface{}{"id": ruleID, "enabled": *req.Enabled})
-	if err := s.Repo.QueueCommands(c, sensorID, "rule.toggle", []string{string(payload)}); err != nil {
+	payload := map[string]interface{}{"id": ruleID}
+	if req.Enabled != nil {
+		payload["enabled"] = *req.Enabled
+	}
+	if req.Severity != nil {
+		payload["severity"] = *req.Severity
+		// A severity submitted by an operator is an explicit policy override.
+		// Dynamic detectors otherwise keep their computed severity.
+		payload["severity_override"] = true
+	}
+	if req.SeverityOverride != nil {
+		payload["severity_override"] = *req.SeverityOverride
+	}
+	if req.Priority != nil {
+		payload["priority"] = *req.Priority
+	}
+	if req.Simulation != nil {
+		payload["simulation"] = *req.Simulation
+	}
+	if req.Suppression != nil {
+		payload["suppression"] = *req.Suppression
+	}
+	if req.Schedule != nil {
+		payload["schedule"] = *req.Schedule
+	}
+	if req.Parameters != nil {
+		payload["parameters"] = *req.Parameters
+	}
+	data, _ := json.Marshal(payload)
+	if err := s.Repo.QueueCommands(c, sensorID, "rule.policy", []string{string(data)}); err != nil {
 		respondInternalError(c, err)
 		return
-	}
-	state := "disabled"
-	if *req.Enabled {
-		state = "enabled"
 	}
 	label := ruleID
 	if name, ok := s.Repo.RuleName(c, sensorID, ruleID); ok {
 		label = fmt.Sprintf("%s (%s)", name, ruleID)
 	}
-	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("rule %s: %s", state, label), sensorID)
+	s.logAudit(c, identityFromContext(c).Username, "rule policy updated: "+label, sensorID)
 	c.Status(http.StatusAccepted)
 }
 
@@ -2085,6 +2157,23 @@ func (s *Server) baseline(c *gin.Context) {
 		}
 	}
 	c.JSON(200, out)
+}
+
+func (s *Server) promoteBaselineCandidate(c *gin.Context) {
+	var req struct {
+		CandidateID string `json:"candidate_id"`
+	}
+	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.CandidateID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "candidate_id is required"})
+		return
+	}
+	candidateID := strings.TrimSpace(req.CandidateID)
+	if err := s.Repo.QueueCommands(c.Request.Context(), c.Param("id"), "baseline.candidate.promote", []string{candidateID}); err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, "behavior baseline candidate promotion queued", c.Param("id")+":"+candidateID)
+	c.Status(http.StatusAccepted)
 }
 
 // dashboardTrends backs the Dashboard tab's trend charts — 30 days of
@@ -2727,8 +2816,15 @@ func (s *Server) sensors(c *gin.Context) {
 	c.JSON(200, v)
 }
 func (s *Server) sync(c *gin.Context) {
-	commands, _ := s.Repo.PopCommands(c, c.Param("id"))
+	sensorID := c.Param("id")
+	commands, _ := s.Repo.PopCommands(c, sensorID)
 	response := management.SyncResponse{Commands: commands}
+	if contexts, err := s.Repo.ListAssetContexts(c, sensorID); err == nil {
+		response.AssetContexts = make([]management.AssetPolicyContext, 0, len(contexts))
+		for _, x := range contexts {
+			response.AssetContexts = append(response.AssetContexts, management.AssetPolicyContext{AssetIP: x.AssetIP, AssetRole: x.AssetRole, Criticality: x.Criticality, Zone: x.Zone, PurdueOverride: x.PurdueOverride})
+		}
+	}
 	if snapshot, err := s.Repo.ThreatIntelSnapshot(c); err == nil {
 		response.ThreatIntelVersion = snapshot.Version
 		sensorVersion, _ := strconv.ParseInt(c.Query("threat_intel_version"), 10, 64)
@@ -2736,7 +2832,7 @@ func (s *Server) sync(c *gin.Context) {
 			response.ThreatIntel = &snapshot
 		}
 	}
-	if rs, err := s.Repo.AssignedRuleSet(c, c.Param("id")); err == nil {
+	if rs, err := s.Repo.AssignedRuleSet(c, sensorID); err == nil {
 		response.RulesVersion = rs.Version
 		response.RuleSet = rs
 	}

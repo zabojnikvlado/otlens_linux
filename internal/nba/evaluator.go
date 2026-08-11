@@ -3,6 +3,7 @@ package nba
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,28 +19,48 @@ type flowBase struct {
 type assetBase struct{ SensorID, AssetID string }
 
 type assetKnowledge struct {
-	buckets   map[uint16]struct{}
-	peers     map[string]behaviorbaseline.PeerStats
-	protocols map[string]behaviorbaseline.DirectionTotals
-	ports     map[uint16]behaviorbaseline.DirectionTotals
-	samples   uint64
+	contexts   map[string]struct{}
+	buckets    map[uint16]struct{}
+	dayClasses map[string]struct{}
+	shifts     map[string]struct{}
+	peers      map[string]behaviorbaseline.PeerStats
+	protocols  map[string]behaviorbaseline.DirectionTotals
+	ports      map[uint16]behaviorbaseline.DirectionTotals
+	samples    uint64
 }
 
 type Evaluator struct {
-	flows        map[behaviorbaseline.Key]behaviorbaseline.Profile
-	flowStats    map[flowBase]behaviorbaseline.Profile
-	assets       map[assetBase]*assetKnowledge
-	identityByIP map[string]string
+	flows          map[behaviorbaseline.Key]behaviorbaseline.Profile
+	flowStats      map[flowBase]behaviorbaseline.Profile
+	flowBases      map[flowBase]struct{}
+	assets         map[assetBase]*assetKnowledge
+	identityByIP   map[string]string
+	minStatSamples int
+	bucketsPerDay  int
 }
 
 func NewEvaluator(snapshot behaviorbaseline.Snapshot) *Evaluator {
-	e := &Evaluator{flows: make(map[behaviorbaseline.Key]behaviorbaseline.Profile, len(snapshot.Profiles)), flowStats: make(map[flowBase]behaviorbaseline.Profile), assets: make(map[assetBase]*assetKnowledge), identityByIP: make(map[string]string)}
+	minSamples := snapshot.MinStatSamples
+	if minSamples <= 0 {
+		minSamples = 30
+	}
+	bucketsPerDay := snapshot.BucketsPerDay
+	if bucketsPerDay <= 0 {
+		bucketsPerDay = 24
+	}
+	e := &Evaluator{
+		flows:     make(map[behaviorbaseline.Key]behaviorbaseline.Profile, len(snapshot.Profiles)),
+		flowStats: make(map[flowBase]behaviorbaseline.Profile), flowBases: make(map[flowBase]struct{}),
+		assets: make(map[assetBase]*assetKnowledge), identityByIP: make(map[string]string), minStatSamples: minSamples, bucketsPerDay: bucketsPerDay,
+	}
 	for _, profile := range snapshot.Profiles {
 		e.flows[profile.Key] = profile
 		base := baseFor(profile.Key)
+		e.flowBases[base] = struct{}{}
 		merged := e.flowStats[base]
 		merged.PacketBytes = mergeStats(merged.PacketBytes, profile.PacketBytes)
 		merged.RTTMillis = mergeStats(merged.RTTMillis, profile.RTTMillis)
+		merged.InterArrival = mergeStats(merged.InterArrival, profile.InterArrival)
 		merged.Packets += profile.Packets
 		e.flowStats[base] = merged
 	}
@@ -47,10 +68,20 @@ func NewEvaluator(snapshot behaviorbaseline.Snapshot) *Evaluator {
 		base := assetBase{profile.Key.SensorID, profile.Key.AssetID}
 		known := e.assets[base]
 		if known == nil {
-			known = &assetKnowledge{buckets: make(map[uint16]struct{}), peers: make(map[string]behaviorbaseline.PeerStats), protocols: make(map[string]behaviorbaseline.DirectionTotals), ports: make(map[uint16]behaviorbaseline.DirectionTotals)}
+			known = &assetKnowledge{
+				contexts: make(map[string]struct{}), buckets: make(map[uint16]struct{}), dayClasses: make(map[string]struct{}), shifts: make(map[string]struct{}),
+				peers: make(map[string]behaviorbaseline.PeerStats), protocols: make(map[string]behaviorbaseline.DirectionTotals), ports: make(map[uint16]behaviorbaseline.DirectionTotals),
+			}
 			e.assets[base] = known
 		}
+		known.contexts[timeContext(profile.Key.TimeBucket, profile.Key.DayClass, profile.Key.Shift, profile.Key.Context)] = struct{}{}
 		known.buckets[profile.Key.TimeBucket] = struct{}{}
+		if profile.Key.DayClass != "" {
+			known.dayClasses[profile.Key.DayClass] = struct{}{}
+		}
+		if profile.Key.Shift != "" {
+			known.shifts[profile.Key.Shift] = struct{}{}
+		}
 		known.samples += profile.Inbound.Events + profile.Outbound.Events
 		for key, value := range profile.Peers {
 			known.peers[key] = mergePeer(known.peers[key], value)
@@ -84,27 +115,47 @@ func (e *Evaluator) Evaluate(input Input) *Anomaly {
 	if input.At.IsZero() {
 		input.At = time.Now().UTC()
 	}
+	if input.Key.Context == "maintenance" {
+		// Approved maintenance is deliberately a separate context. Hard
+		// security detectors continue to run, but behavior deviations are not
+		// promoted into production-baseline anomalies.
+		return nil
+	}
 	if input.SrcAssetID == "" {
 		input.SrcAssetID = e.resolve(input.Key.SensorID, input.Key.SrcIP)
 	}
 	if input.DstAssetID == "" {
 		input.DstAssetID = e.resolve(input.Key.SensorID, input.Key.DstIP)
 	}
+
 	var reasons []Reason
 	add := func(kind Kind, weight float64, message string, observed, expected any) {
 		reasons = append(reasons, Reason{Kind: kind, Weight: weight, Message: message, Observed: observed, Expected: expected})
 	}
-	if _, ok := e.flows[input.Key]; !ok {
-		add(KindNewFlow, 35, "Flow was not present in this time bucket", input.Key, nil)
+
+	base := baseFor(input.Key)
+	if _, ok := e.flowBases[base]; !ok {
+		add(KindNewFlow, 35, "Flow/service was not present in the trusted baseline", input.Key, nil)
 	}
+
 	known := e.assets[assetBase{input.Key.SensorID, input.SrcAssetID}]
 	confidenceSamples := uint64(0)
 	if known == nil {
-		add(KindNewAsset, 40, "Asset has no learned behavior profile", input.SrcAssetID, nil)
+		add(KindNewAsset, 40, "Asset has no mature trusted behavior profile", input.SrcAssetID, nil)
 	} else {
 		confidenceSamples = known.samples
-		if _, ok := known.buckets[input.Key.TimeBucket]; !ok {
-			add(KindUnusualTime, 20, "Asset is not normally active in this time bucket", input.Key.TimeBucket, knownBucketList(known.buckets))
+		ctx := timeContext(input.Key.TimeBucket, input.Key.DayClass, input.Key.Shift, input.Key.Context)
+		if _, exact := known.contexts[ctx]; !exact && known.samples >= uint64(e.minStatSamples) {
+			_, hourKnown := known.buckets[input.Key.TimeBucket]
+			_, shiftKnown := known.shifts[input.Key.Shift]
+			switch {
+			case hourKnown:
+				add(KindUnusualTime, 8, "Time-of-day is known but this weekday/weekend context is new", input.Key.DayClass, sortedStrings(known.dayClasses))
+			case shiftKnown:
+				add(KindUnusualTime, 12, "Shift is known but this time bucket is unusual", input.Key.TimeBucket, knownBucketList(known.buckets))
+			case timeCoverage(known.buckets, e.bucketsPerDay) >= .5:
+				add(KindUnusualTime, 20, "Asset is not normally active at this time of day", input.Key.TimeBucket, knownBucketList(known.buckets))
+			}
 		}
 		peer, peerKnown := known.peers[input.DstAssetID]
 		if !peerKnown {
@@ -119,29 +170,34 @@ func (e *Evaluator) Evaluate(input Input) *Anomaly {
 			add(KindNewPort, 15, "Service port was not observed for this asset", input.Key.ServicePort, portKeys(known.ports))
 		}
 	}
-	stats := e.flowStats[baseFor(input.Key)]
+
+	stats := e.flowStats[base]
 	if input.PacketBytes > 0 {
-		if z, ok := deviation(float64(input.PacketBytes), stats.PacketBytes); ok {
-			add(KindPacketSize, math.Min(25, 8+z*3), "Packet size is outside the learned distribution", input.PacketBytes, stats.PacketBytes.Mean)
+		if distance, expected, ok := robustDeviation(float64(input.PacketBytes), stats.PacketBytes, e.minStatSamples); ok {
+			add(KindPacketSize, math.Min(25, 8+distance*3), "Packet size is outside the robust learned distribution", input.PacketBytes, expected)
 		}
 	}
 	if input.RTTMillis > 0 {
-		if z, ok := deviation(input.RTTMillis, stats.RTTMillis); ok {
-			add(KindRTT, math.Min(25, 8+z*3), "RTT is outside the learned distribution", input.RTTMillis, stats.RTTMillis.Mean)
+		if distance, expected, ok := robustDeviation(input.RTTMillis, stats.RTTMillis, e.minStatSamples); ok {
+			add(KindRTT, math.Min(25, 8+distance*3), "RTT is outside the robust learned distribution", input.RTTMillis, expected)
 		}
 	}
 	if len(reasons) == 0 {
 		return nil
 	}
+
 	score := 0.0
 	for _, reason := range reasons {
 		score += reason.Weight
 	}
 	score = math.Min(100, score)
-	confidence := math.Min(1, float64(confidenceSamples)/20)
+	confidence := math.Min(1, float64(confidenceSamples)/float64(maxInt(e.minStatSamples*2, 1)))
 	if confidence == 0 && stats.Packets > 0 {
-		confidence = math.Min(1, float64(stats.Packets)/20)
+		confidence = math.Min(1, float64(stats.Packets)/float64(maxInt(e.minStatSamples*2, 1)))
 	}
+	// Asset maturity is enforced by Engine before production evaluation. Keep
+	// the raw anomaly score explainable here; confidence is carried separately
+	// into risk/correlation and preview rendering.
 	return &Anomaly{ID: anomalyID(input, reasons), Timestamp: input.At, SensorID: input.Key.SensorID, AssetID: input.SrcAssetID, PeerID: input.DstAssetID, SrcIP: input.Key.SrcIP, DstIP: input.Key.DstIP, FlowID: flowID(input.Key), Protocol: input.Key.Protocol, Score: score, Confidence: confidence, Reasons: reasons}
 }
 
@@ -162,22 +218,46 @@ func anomalyID(input Input, reasons []Reason) string {
 	for i, r := range reasons {
 		kinds[i] = string(r.Kind)
 	}
-	return fmt.Sprintf("%s|%d|%s", flowID(input.Key), input.Key.TimeBucket, strings.Join(kinds, ","))
+	return fmt.Sprintf("%s|%d|%s|%s", flowID(input.Key), input.Key.TimeBucket, input.Key.DayClass, strings.Join(kinds, ","))
 }
-func deviation(value float64, stats behaviorbaseline.RunningStats) (float64, bool) {
-	if stats.Count < 5 {
-		return 0, false
+func timeContext(bucket uint16, dayClass, shift, context string) string {
+	return fmt.Sprintf("%d|%s|%s|%s", bucket, dayClass, shift, context)
+}
+
+func robustDeviation(value float64, stats behaviorbaseline.RunningStats, minSamples int) (float64, float64, bool) {
+	if minSamples <= 0 {
+		minSamples = 30
+	}
+	if stats.Count < uint64(minSamples) {
+		return 0, 0, false
+	}
+	median, mad, ok := stats.MedianMAD()
+	if ok && mad > 0 {
+		scaled := 1.4826 * mad
+		z := math.Abs(value-median) / scaled
+		return z, median, z >= 3.5
+	}
+	p05, ok05 := stats.Quantile(.05)
+	p95, ok95 := stats.Quantile(.95)
+	if ok05 && ok95 {
+		span := math.Max(p95-p05, math.Max(1, math.Abs(median)*.05))
+		deadband := span * .25
+		if value < p05-deadband {
+			return (p05-value)/span + 3, median, true
+		}
+		if value > p95+deadband {
+			return (value-p95)/span + 3, median, true
+		}
+		return 0, median, false
 	}
 	sd := math.Sqrt(stats.Variance())
 	if sd == 0 {
-		if value == stats.Mean {
-			return 0, false
-		}
-		return math.Abs(value-stats.Mean) / math.Max(1, math.Abs(stats.Mean)), math.Abs(value-stats.Mean) > math.Max(1, math.Abs(stats.Mean)*.25)
+		return 0, stats.Mean, false
 	}
 	z := math.Abs(value-stats.Mean) / sd
-	return z, z >= 3
+	return z, stats.Mean, z >= 4
 }
+
 func mergeStats(a, b behaviorbaseline.RunningStats) behaviorbaseline.RunningStats {
 	if a.Count == 0 {
 		return b
@@ -195,6 +275,16 @@ func mergeStats(a, b behaviorbaseline.RunningStats) behaviorbaseline.RunningStat
 	}
 	if b.Max > a.Max {
 		a.Max = b.Max
+	}
+	a.Samples = append(a.Samples, b.Samples...)
+	if len(a.Samples) > 128 {
+		// Evenly downsample merged reservoirs to preserve both histories.
+		values := make([]float64, 0, 128)
+		step := float64(len(a.Samples)) / 128
+		for i := 0; i < 128; i++ {
+			values = append(values, a.Samples[int(float64(i)*step)])
+		}
+		a.Samples = values
 	}
 	return a
 }
@@ -216,13 +306,29 @@ func knownBucketList(values map[uint16]struct{}) []uint16 {
 	for v := range values {
 		out = append(out, v)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+func sortedStrings(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for v := range values {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+func timeCoverage(values map[uint16]struct{}, bucketsPerDay int) float64 {
+	if bucketsPerDay <= 0 {
+		bucketsPerDay = 24
+	}
+	return math.Min(1, float64(len(values))/float64(bucketsPerDay))
 }
 func mapKeys[V any](values map[string]V) []string {
 	out := make([]string, 0, len(values))
 	for v := range values {
 		out = append(out, v)
 	}
+	sort.Strings(out)
 	return out
 }
 func portKeys[V any](values map[uint16]V) []uint16 {
@@ -230,5 +336,12 @@ func portKeys[V any](values map[uint16]V) []uint16 {
 	for v := range values {
 		out = append(out, v)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

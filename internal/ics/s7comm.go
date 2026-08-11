@@ -336,8 +336,19 @@ func parseS7Header(packet core.Packet, s7 []byte) (Message, bool) {
 	msg.FunctionCode = fc
 	msg.FunctionName = s7FunctionName(fc)
 
-	if s7CriticalFunctions[fc] {
-		msg.Details["security_relevant"] = true
+	switch fc {
+	case 0x05: // WriteVar
+		setOperation(&msg, "write", true, true, false)
+	case 0x1A, 0x1B, 0x1C: // program download lifecycle
+		setOperation(&msg, "program", true, true, true)
+	case 0x28, 0x29: // PLCControl / PLCStop
+		setOperation(&msg, "mode", true, true, true)
+	case 0x04:
+		setOperation(&msg, "read", false, false, false)
+	case 0x1D, 0x1E, 0x1F:
+		setOperation(&msg, "program_read", false, false, false)
+	case 0xF0:
+		setOperation(&msg, "session", false, false, false)
 	}
 
 	// Item-level address/value — only for ReadVar/WriteVar Job

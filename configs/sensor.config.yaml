@@ -118,12 +118,12 @@ baseline:
   # reason to wait out a learning window before real alerting starts.
   enabled: true
 
-  # How long to learn "normal" asset-to-asset communication before
-  # raising alerts for anything not seen during this window. Go
-  # duration syntax, e.g. "10m", "1h", "24h". Only used when enabled
-  # is true. Keep this short (e.g. 10m) while testing so you don't
-  # have to wait an hour to see /alerts populate with
-  # new_communication findings.
+  # Minimum time to learn "normal" asset-to-asset communication. After
+  # this window OTLens also checks baseline maturity/stability before
+  # entering monitoring (with a safety cap controlled below). Go duration
+  # syntax, e.g. "10m", "1h", "24h". Only used when enabled is true.
+  # Keep this short (e.g. 10m) while testing; production deployments can
+  # override it to 24h or longer.
   learningduration: 10m
 
   # Modular statistical baseline used by the future Network Behavior
@@ -133,6 +133,27 @@ baseline:
   bucketduration: 1h
   maxprofiles: 100000
   maxassetprofiles: 100000
+
+  # Learning quality gates. learningduration above is the minimum learning
+  # window; monitoring begins once the baseline is mature/stable enough (or
+  # the safety multiplier is reached). Keep learningduration at 10m here for
+  # development; production deployments can override it (for example 24h).
+  minassetsamples: 50
+  minassetage: 5m
+  readinessthreshold: 0.85
+  maxlearningmultiplier: 2.0
+
+  # Post-learning observations are kept in a shadow/candidate baseline. They
+  # require repeated observations across multiple days before the UI allows an
+  # analyst to promote them into the trusted baseline.
+  candidateminsamples: 20
+  candidatemindays: 3
+  minstatsamples: 30
+
+  # Optional behavior context windows, e.g. ["weekend@02:00-04:00",
+  # "mon,tue@22:00-23:00"]. Maintenance traffic stays outside the production
+  # behavior baseline; hard-security detectors continue to run.
+  maintenancewindows: []
 
 nba:
   enabled: true
@@ -169,12 +190,30 @@ deception:
 
 detect:
   # How many consecutive conflicting ARP claims for the same IP are
-  # required before treating the new MAC as the legitimate mapping
-  # (debounces against a single stray/retransmitted packet). Lower is
-  # more sensitive (faster alerts, more false positives from normal
-  # DHCP/NIC changes); higher is slower to alert but more tolerant of
-  # transient noise.
+  # required before escalating the conflict to duplicate-IP/gateway identity
+  # alerts. Repetition NEVER makes the claimant trusted automatically; a MAC
+  # identity transition requires analyst approval. Lower is more sensitive,
+  # higher is more tolerant of transient ARP noise.
   arpconfirmthreshold: 3
+
+  # Optional segmentation controls. The explicit zone matrix is evaluated
+  # before the legacy VLAN/Purdue max-level-jump fallback and can be used even
+  # without vlanlevels. Asset zones come from Central asset context.
+  segmentation:
+    enabled: false
+    vlanlevels: {}
+    maxleveljump: 1
+    # Keep [] for no explicit matrix. To enable the example, change this line
+    # from `policy: []` to `policy:` and then uncomment the list item.
+    policy: []
+      # Example deny rule (uncomment and use real Central asset-zone names):
+      # - sourcezone: "it"
+      #   destinationzone: "ot"
+      #   protocol: "any"
+      #   direction: "outbound"
+      #   allowed: false
+      # Explicit allow entries should appear before broader deny entries because
+      # the first matching policy row wins. Use "*" or "any" as a wildcard.
 
 store:
   # Safety caps on the value-change/control-event history kept in

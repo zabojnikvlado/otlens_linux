@@ -38,56 +38,13 @@ func (e *Engine) startAssetUnconfirmedWatch(bus *core.EventBus) {
 }
 
 func (e *Engine) handleAssetUnconfirmed(ua core.UnconfirmedAsset) {
-	if e.behaviorDetectionsSuppressed() {
+	if e.behaviorDetectionsSuppressed() || ua.MAC == "" {
 		return
 	}
-
-	if !e.isRuleEnabled(string(AlertNewAsset)) {
-		return
+	message := fmt.Sprintf("New device detected: %s", ua.MAC)
+	if ua.IP != "" {
+		message = fmt.Sprintf("New device detected: %s (%s)", ua.MAC, ua.IP)
 	}
-
-	if ua.MAC == "" {
-		return
-	}
-
-	key := fmt.Sprintf("newasset|%s", ua.MAC)
-
-	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && alert.Status == AlertStatusApproved {
-		return
-	}
-
-	if !exists {
-
-		message := fmt.Sprintf("New device detected: %s", ua.MAC)
-
-		if ua.IP != "" {
-			message = fmt.Sprintf("New device detected: %s (%s)", ua.MAC, ua.IP)
-		}
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     AlertNewAsset,
-			Severity: "medium",
-			Message:  message,
-
-			IP: ua.IP,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-	}
-
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
+	e.raiseBuiltinAlert(string(AlertNewAsset), AlertNewAsset, "medium", "newasset|"+ua.MAC, message, ua.IP,
+		map[string]interface{}{"mac": ua.MAC, "ip": ua.IP}, time.Now(), alertEpisodeGap)
 }

@@ -81,7 +81,8 @@ func (e *Engine) handleHoneypot(packet core.Packet) {
 	srcIsHoneypot := srcIsStation && srcScore >= e.honeypotThreshold
 	dstIsHoneypot := dstIsStation && dstScore >= e.honeypotThreshold
 
-	if srcIsHoneypot && isPrivateIP(packet.DstIP) && e.isRuleEnabled(string(AlertHoneypotLateralMovement)) {
+	if srcIsHoneypot && isPrivateIP(packet.DstIP) {
+		e.excludePacketFromLearning(packet, "honeypot lateral movement")
 		e.raiseHoneypotAlert(
 			AlertHoneypotLateralMovement,
 			"critical",
@@ -99,7 +100,8 @@ func (e *Engine) handleHoneypot(packet core.Packet) {
 	// alert above already captures; counting it as "probed" too
 	// would just be double-booking the same underlying event under
 	// a less severe label.
-	if dstIsHoneypot && !srcIsHoneypot && e.isRuleEnabled(string(AlertHoneypotProbed)) {
+	if dstIsHoneypot && !srcIsHoneypot {
+		e.excludePacketFromLearning(packet, "honeypot activity")
 		e.raiseHoneypotAlert(
 			AlertHoneypotProbed,
 			"medium",
@@ -185,37 +187,5 @@ func (e *Engine) clearHoneypotAlerts(ip string) {
 // same pair updates Count/LastSeen on the same alert rather than
 // creating a new one each time, same as every other alert type here.
 func (e *Engine) raiseHoneypotAlert(alertType AlertType, severity, key, message, ip string) {
-
-	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && alert.Status == AlertStatusApproved {
-		return
-	}
-
-	if !exists {
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     alertType,
-			Severity: severity,
-			Message:  message,
-
-			IP: ip,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-	}
-
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
+	e.raiseBuiltinAlert(string(alertType), alertType, severity, key, message, ip, nil, time.Now(), alertEpisodeGap)
 }

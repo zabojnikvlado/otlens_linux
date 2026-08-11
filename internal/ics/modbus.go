@@ -98,6 +98,13 @@ func parseModbus(packet core.Packet, modbusPort uint16) (Message, bool) {
 		decodeModbusData(baseFC, body, msg.Details)
 	}
 
+	switch baseFC {
+	case 5, 6, 15, 16, 22, 23:
+		setOperation(&msg, "write", true, true, false)
+	case 1, 2, 3, 4, 7, 17, 43:
+		setOperation(&msg, "read", false, false, false)
+	}
+
 	return msg, true
 }
 

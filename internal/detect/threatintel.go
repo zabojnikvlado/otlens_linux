@@ -40,6 +40,7 @@ func (e *Engine) handleThreatIP(p core.Packet) {
 		if !ok {
 			continue
 		}
+		e.excludePacketFromLearning(p, "threat-intelligence IP match")
 		e.raiseThreatAlert(AlertMaliciousIP, candidate.local, candidate.observed, indicator, "IP")
 	}
 }
@@ -61,9 +62,6 @@ func (e *Engine) handleThreatDomain(o passivedns.Observation) {
 }
 
 func (e *Engine) raiseThreatAlert(kind AlertType, local, matched string, indicator threatintel.Indicator, label string) {
-	if !e.isRuleEnabled(string(kind)) {
-		return
-	}
 	key := fmt.Sprintf("%s|%s|%s", kind, local, matched)
 	now := time.Now()
 	severity := "high"
@@ -72,16 +70,11 @@ func (e *Engine) raiseThreatAlert(kind AlertType, local, matched string, indicat
 	} else if indicator.Confidence < 60 {
 		severity = "medium"
 	}
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-	alert, exists := e.alerts[key]
-	if exists && alert.Status == AlertStatusApproved {
-		return
+	evidence := map[string]interface{}{
+		"indicator_type": indicator.Type, "indicator_value": indicator.Value, "provider": indicator.Provider,
+		"threat_type": indicator.ThreatType, "threat_intel_confidence": indicator.Confidence, "matched": matched,
 	}
-	if !exists {
-		alert = &Alert{ID: key, Type: kind, Severity: severity, Message: fmt.Sprintf("%s observed %s matching threat-intelligence indicator %s (%s, confidence %d%%)", local, label, matched, indicator.Provider, indicator.Confidence), IP: local, FirstSeen: now, Status: AlertStatusNew, Evidence: map[string]interface{}{"indicator_type": indicator.Type, "indicator_value": indicator.Value, "provider": indicator.Provider, "threat_type": indicator.ThreatType, "threat_intel_confidence": indicator.Confidence}}
-		e.alerts[key] = alert
-		e.logNewAlert(alert)
-	}
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
+	e.raiseBuiltinAlert(string(kind), kind, severity, key,
+		fmt.Sprintf("%s observed %s matching threat-intelligence indicator %s (%s, confidence %d%%)", local, label, matched, indicator.Provider, indicator.Confidence),
+		local, evidence, now, alertEpisodeGap)
 }

@@ -29,12 +29,12 @@ normalizovaný alert cez telemetry pipeline, takže nové pravidlo nepotrebuje
 |---|---|---|---|
 | `arpspoof.go` | `arp_spoof` — konflikt IP↔MAC | `core.EventPacketParsed` | IP + stará/nová MAC |
 | `baseline.go` | `new_communication` — komunikácia mimo naučeného vzoru | `core.EventPacketParsed` | protokol + dvojica zariadení |
-| `icscritical.go` | `ics_critical_operation` — kritická OT operácia (napr. S7 PLCStop) | `core.EventICSMessage` | protokol + funkcia + cieľové zariadenie |
+| `ics_policy.go` + protocol parsers | protocol-aware OT semantics: unauthorized command/write, program/mode/config/time changes, command burst, sequence violations, reporting loss, malformed bursts | `core.EventICSMessage` / `core.EventICSParseError` | source→target authority + protocol/function/context |
 | `asset_unconfirmed.go` | `new_asset` — nové zariadenie po baseline learningu | `core.EventAssetUnconfirmed` (z `asset` enginu) | MAC zariadenia |
 | `value_out_of_range.go` | `value_out_of_range` — hodnota mimo naučeného rozsahu | `core.EventValueOutOfRange` (zo `store` enginu) | konkrétny Tag |
 | `honeypot.go` | `honeypot_lateral_movement` (critical) — honeypot iniciuje odchádzajúcu komunikáciu **smerom na inú internú (private) adresu**; `honeypot_probed` (medium) — niekto sa pripojil na honeypot | `core.EventPacketParsed` | smer + src + dst |
-| `external_communication.go` | `external_communication` (medium) — private adresa komunikuje s verejnou (internetovou) adresou. Dedup podľa internej IP (nie podľa cieľa) — jedno zariadenie hovoriace s mnohými externými IP je jeden alert, nie záplava | `core.EventPacketParsed` | interná IP |
-| `segmentation.go` | `segmentation_violation` (high) — dve VLAN, ktorých nakonfigurované Purdue Model úrovne sú viac ako max-level-jump od seba, komunikujú priamo. Vypnuté defaultne v `config.yaml` (`detect.segmentation.enabled`/`vlanlevels`/`maxleveljump`), ale nastavenie VLAN levelu z Network Segmentation tabu v Central to živo zapne/aktualizuje bez potreby meniť config.yaml — pozri `DOCUMENTATION.md` | `core.EventPacketParsed` | src+dst IP |
+| `external_communication.go` | `external_communication` (medium) — private adresa komunikuje so skutočnou verejnou unicast internetovou adresou. Multicast (napr. `224.0.0.22`), broadcast, link-local, CGNAT a documentation/benchmark ranges sa ignorujú. Dedup podľa internej IP + smeru + verejného peer scope (/24 IPv4 alebo /64 IPv6), aby CDN nevytvorilo alert na každú IP, ale approval jedného cieľa nepotlačil celý internet | `core.EventPacketParsed` | interná IP |
+| `segmentation.go` | `segmentation_violation` (high) — explicitná source-zone → destination-zone/protocol policy je porušená; Purdue max-level-jump zostáva fallback. Vypnuté defaultne v `config.yaml` (`detect.segmentation.enabled`/`vlanlevels`/`maxleveljump`), ale nastavenie VLAN levelu z Network Segmentation tabu v Central to živo zapne/aktualizuje bez potreby meniť config.yaml — pozri `DOCUMENTATION.md` | `core.EventPacketParsed` | src+dst IP |
 | `reconnaissance.go` | `reconnaissance` (high) — zdrojová IP kontaktovala priveľa rôznych hostov (`detect.reconnaissance.hostscanthreshold`) alebo priveľa rôznych portov na jednom hoste (`portscanthreshold`) v rolling okne (`window`, default 60s). **Zapnuté defaultne** — legitímny host, čo má hovoriť s mnohými (monitoring server, DNS resolver), môže potrebovať vyšší threshold alebo suppression | `core.EventPacketParsed` | zdrojová IP |
 | `c2beacon.go` | `c2_beacon` (critical) — interná IP sa pripája na externú IP+port v podozrivo pravidelnom intervale (beacon pattern typický pre C2 malware). Meria sa cez TCP SYN pakety (nie SYN,ACK), potrebuje aspoň `minsamples` pokusov, meria koeficient variácie (stddev/mean) intervalov medzi nimi. **Behaviorálna heuristika, nie known-bad-IP match** — legitímna periodická externá služba (license check-in, monitoring agent) môže tiež spustiť tento alert, ak je jej časovanie dostatočne pravidelné | `core.EventPacketParsed` (TCP SYN) | src IP + dst IP + dst port |
 
@@ -56,10 +56,9 @@ Spoločné súbory (nie samostatné pravidlá):
 
 ---
 
-## 3. Anatómia jedného pravidla — `icscritical.go` ako referenčný vzor
+## 3. Anatómia pravidla
 
-Toto je najkratšie a najčistejšie z existujúcich pravidiel (68
-riadkov), dobré na kopírovanie:
+Nasledujúci blok je **legacy shape** pre jednoduchý deduplikovaný alert. Nové built-in rules nemajú kopírovať tento catch-all vzor; používajú `raiseBuiltinAlert()` a protokolové/policy helpery, aby sa jednotne aplikovali enabled/simulation/severity/suppression/schedule/threshold policy. Pre aktuálny katalóg pozri `docs/BUILTIN_RULE_CATALOG.md`.
 
 ```go
 package detect
@@ -311,9 +310,11 @@ Nové pravidlo sa **automaticky** objaví:
   `core.EventBaselineLearningComplete` a drž si vlastný `bool`
   príznak, nezavolávaj priamo metódy iného enginu.
 
-## Extended OT protocol operations
+## Protocol-aware OT operations (v14)
 
-The built-in **Critical ICS Operation** rule now also receives security-relevant events from EtherNet/IP, DNP3, OPC UA, BACnet/IP, IEC 60870-5-104 and PROFINET DCP parsers. Examples include DNP3 Operate/Direct Operate, BACnet WriteProperty and ReinitializeDevice, IEC-104 control commands and clock synchronization, PROFINET DCP Set and selected CIP write-like services.
+OT operations are normalized before detection into semantic classes such as `read`, `write`, `operate/command`, `program`, `mode`, `config`, `time` and `session`. The old blanket rule no longer turns every "security relevant" parser event into CRITICAL. OPC UA secure-channel lifecycle is session traffic; IEC-104/BACnet time synchronization is evaluated by a dedicated time-source policy; ordinary writes are evaluated by write/command authority. Program download/online edit, controller stop/restart/mode change and device configuration changes have dedicated built-ins.
+
+Read/access authority, command/write authority and time-setting authority are learned separately. A historian that reads a PLC during learning therefore cannot become a writer. Hard-security evidence quarantines the source→target relationship so it cannot be learned by another subscriber in the same event cycle. See `docs/BUILTIN_RULE_CATALOG.md` for the complete catalogue and tunable thresholds.
 
 
 ### Suppression cardinality
@@ -323,3 +324,17 @@ a high-cardinality mode: every matching event/packet gets a distinct alert key.
 Use it only when per-event alert records are required; otherwise prefer
 `aggregate` or `interval` to avoid packet-rate alert growth. The Central rule
 editor displays a warning whenever `Every occurrence` is selected.
+
+## Learning quality and trusted behavior baseline (v13)
+
+`baseline.learningduration` is a **minimum** learning window, not a blind deadline. After that minimum OTLens checks baseline maturity (per-asset age/sample count), time-of-day coverage, and whether new communication patterns are still arriving too quickly. Monitoring starts when the readiness gate is satisfied; `baseline.maxlearningmultiplier` is the safety cap for unusually sparse/noisy networks.
+
+The behavior time model no longer requires a full hour-of-week matrix. It learns intra-day buckets plus `weekday/weekend`, shift (`night/day/evening`) and `production/maintenance` context. Optional maintenance windows use UTC expressions such as `weekend@02:00-04:00` or `mon,tue@22:00-23:00`; maintenance behavior is learned separately and is not compared to production behavior.
+
+Hard-security/policy evidence is never allowed to poison the trusted behavior baseline. Threat-intelligence hits, segmentation violations, honeypot activity, critical ICS operations and live custom policy matches quarantine the corresponding learned/candidate flow. The exclusion state is persisted with the behavior snapshot. Public-Internet relationships are also never silently trusted: they are collected only in the shadow baseline and require explicit analyst promotion after sufficient evidence.
+
+After learning, unseen relationships enter a **shadow candidate baseline**. They do not silently modify trusted behavior. Candidates collect observation count and distinct-day evidence and become promotable only after `baseline.candidateminsamples` and `baseline.candidatemindays` are reached. An analyst can promote an eligible candidate from **Network Behavior → Candidate baseline**; candidates with actual hard-security/policy evidence remain quarantined and cannot be promoted.
+
+During learning NBA runs a non-alerting **preview** evaluator (“What would alert now?”). Central shows readiness, mature/learning assets, time coverage, new-pattern rate, excluded security flows, candidate counts and preview anomaly score/count so an operator can judge whether the baseline is actually ready before relying on it.
+
+Statistical behavior uses bounded robust samples (median/MAD and percentiles) with `baseline.minstatsamples` instead of treating a handful of samples as a mature Gaussian distribution. OT process-value learning similarly uses robust percentile/MAD bounds plus a learned value-rate envelope; the learned process model freezes when learning finishes rather than drifting toward later anomalies.

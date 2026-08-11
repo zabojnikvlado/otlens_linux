@@ -99,11 +99,56 @@ func (e *Engine) handle(event core.Event) {
 	if !ok {
 		return
 	}
-	msg, ok := e.decode(packet)
-	if !ok {
+	for _, parser := range e.parsers {
+		if !parser.CanParse(packet) {
+			continue
+		}
+		if msg, parsed := parser.Parse(packet); parsed {
+			e.EventBus.Publish(core.Event{Type: core.EventICSMessage, Data: msg})
+			return
+		}
+		if looksLikeICSFrame(parser.Name(), packet.AppPayload) {
+			e.EventBus.Publish(core.Event{Type: core.EventICSParseError, Timestamp: packet.Timestamp, Data: core.ICSParseError{Parser: parser.Name(), Packet: packet}})
+		}
 		return
 	}
-	e.EventBus.Publish(core.Event{Type: core.EventICSMessage, Data: msg})
+}
+
+func looksLikeICSFrame(parserName string, b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	switch parserName {
+	case "Modbus":
+		// MBAP protocol identifier must be zero. A short but recognizable MBAP
+		// prefix is still a useful malformed-frame signal.
+		return len(b) >= 4 && b[2] == 0 && b[3] == 0
+	case "S7comm":
+		return len(b) >= 2 && b[0] == 0x03 && b[1] == 0x00
+	case "DNP3":
+		return len(b) >= 2 && b[0] == 0x05 && b[1] == 0x64
+	case "IEC 60870-5-104":
+		return b[0] == 0x68
+	case "BACnet/IP":
+		return b[0] == 0x81
+	case "OPC UA":
+		if len(b) < 3 {
+			return false
+		}
+		_, ok := opcTypes[string(b[:3])]
+		return ok
+	case "EtherNet/IP":
+		if len(b) < 2 {
+			return false
+		}
+		cmd := uint16(b[0]) | uint16(b[1])<<8
+		_, ok := enipCommands[cmd]
+		return ok
+	case "PROFINET DCP":
+		return len(b) >= 3
+	default:
+		return false
+	}
 }
 func (e *Engine) decode(packet core.Packet) (Message, bool) {
 	for _, parser := range e.parsers {

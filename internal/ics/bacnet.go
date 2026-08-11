@@ -45,8 +45,15 @@ func parseBACnet(p core.Packet) (Message, bool) {
 	if m.FunctionName == "" {
 		m.FunctionName = "BVLC/NPDU"
 	}
-	if m.FunctionName == "WriteProperty" || m.FunctionName == "WritePropertyMultiple" || m.FunctionName == "DeviceCommunicationControl" || m.FunctionName == "ReinitializeDevice" {
-		m.Details["security_relevant"] = true
+	switch m.FunctionName {
+	case "WriteProperty", "WritePropertyMultiple":
+		setOperation(&m, "write", true, true, false)
+	case "DeviceCommunicationControl", "ReinitializeDevice":
+		setOperation(&m, "mode", true, true, true)
+	case "TimeSynchronization":
+		setOperation(&m, "time", true, true, false)
+	case "ReadProperty", "ReadPropertyMultiple", "ReadRange":
+		setOperation(&m, "read", false, false, false)
 	}
 	return m, true
 }

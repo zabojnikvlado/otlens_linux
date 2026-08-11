@@ -11,7 +11,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/zabojnikvlado/otlens_linux/internal/ipfix"
 	"github.com/zabojnikvlado/otlens_linux/internal/logger"
 	"github.com/zabojnikvlado/otlens_linux/internal/nba"
+	"github.com/zabojnikvlado/otlens_linux/internal/netutil"
 	"github.com/zabojnikvlado/otlens_linux/internal/parser"
 	"github.com/zabojnikvlado/otlens_linux/internal/persist"
 	"github.com/zabojnikvlado/otlens_linux/internal/protocolobs"
@@ -171,12 +171,20 @@ func New(cfg *config.Config) (*Application, error) {
 		MaxPending:  cfg.Capture.UDPConversations.MaxPendingRequests,
 	})
 	behaviorBaseline := behaviorbaseline.New(eventBus, behaviorbaseline.Config{
-		Enabled:          cfg.Baseline.BehaviorEnabled,
-		SensorID:         cfg.Central.SensorID,
-		LearningDuration: cfg.Baseline.LearningDuration,
-		BucketDuration:   cfg.Baseline.BucketDuration,
-		MaxProfiles:      cfg.Baseline.MaxProfiles,
-		MaxAssetProfiles: cfg.Baseline.MaxAssetProfiles,
+		Enabled:               cfg.Baseline.BehaviorEnabled,
+		SensorID:              cfg.Central.SensorID,
+		LearningDuration:      cfg.Baseline.LearningDuration,
+		BucketDuration:        cfg.Baseline.BucketDuration,
+		MaxProfiles:           cfg.Baseline.MaxProfiles,
+		MaxAssetProfiles:      cfg.Baseline.MaxAssetProfiles,
+		MinAssetSamples:       cfg.Baseline.MinAssetSamples,
+		MinAssetAge:           cfg.Baseline.MinAssetAge,
+		ReadinessThreshold:    cfg.Baseline.ReadinessThreshold,
+		MaxLearningMultiplier: cfg.Baseline.MaxLearningMultiplier,
+		CandidateMinSamples:   cfg.Baseline.CandidateMinSamples,
+		CandidateMinDays:      cfg.Baseline.CandidateMinDays,
+		MinStatSamples:        cfg.Baseline.MinStatSamples,
+		MaintenanceWindows:    cfg.Baseline.MaintenanceWindows,
 	})
 	anomalyEngine := nba.New(eventBus, behaviorBaseline, nba.Config{
 		Enabled:      cfg.NBA.Enabled,
@@ -197,13 +205,9 @@ func New(cfg *config.Config) (*Application, error) {
 		if destination != nil {
 			context.Honeypot = context.Honeypot || destination.Score >= cfg.Deception.HoneypotThreshold
 			context.InterVLAN = source != nil && source.VLANID != 0 && destination.VLANID != 0 && source.VLANID != destination.VLANID
-			if ip := net.ParseIP(destination.IP); ip != nil {
-				context.ExternalDestination = !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
-			}
+			context.ExternalDestination = netutil.IsPublicInternetUnicast(destination.IP)
 		} else if strings.HasPrefix(anomaly.PeerID, "ip:") {
-			if ip := net.ParseIP(strings.TrimPrefix(anomaly.PeerID, "ip:")); ip != nil {
-				context.ExternalDestination = !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
-			}
+			context.ExternalDestination = netutil.IsPublicInternetUnicast(strings.TrimPrefix(anomaly.PeerID, "ip:"))
 		}
 		return context
 	}, nba.RiskConfig{Enabled: cfg.NBA.RiskEnabled, MaxAssessments: cfg.NBA.MaxAssessments})
@@ -243,6 +247,11 @@ func New(cfg *config.Config) (*Application, error) {
 		cfg.Detect.C2Beacon.MaxInterval,
 		cfg.Detect.C2Beacon.MaxTrackedDestinations,
 	)
+	segmentationPolicy := make([]detect.SegmentationPolicyRule, 0, len(cfg.Detect.Segmentation.Policy))
+	for _, r := range cfg.Detect.Segmentation.Policy {
+		segmentationPolicy = append(segmentationPolicy, detect.SegmentationPolicyRule{SourceZone: r.SourceZone, DestinationZone: r.DestinationZone, Protocol: r.Protocol, Direction: r.Direction, Allowed: r.Allowed})
+	}
+	detectEngine.ConfigureSegmentationPolicy(segmentationPolicy)
 	detectEngine.SetThreatIntel(tiStore)
 	detectEngine.ConfigureOTValueAnomaly(detect.OTValueAnomalyConfig{Enabled: cfg.Detect.OTValueAnomaly.Enabled, MinSamples: cfg.Detect.OTValueAnomaly.MinSamples, ZScoreThreshold: cfg.Detect.OTValueAnomaly.ZScoreThreshold, RateMultiplier: cfg.Detect.OTValueAnomaly.RateMultiplier, StuckAfter: cfg.Detect.OTValueAnomaly.StuckAfter, MissingAfter: cfg.Detect.OTValueAnomaly.MissingAfter, ToggleWindow: cfg.Detect.OTValueAnomaly.ToggleWindow, ToggleThreshold: cfg.Detect.OTValueAnomaly.ToggleThreshold, UnexpectedWrites: cfg.Detect.OTValueAnomaly.UnexpectedWrites, CheckInterval: cfg.Detect.OTValueAnomaly.CheckInterval})
 	detectEngine.ConfigureLateralMovement(detect.LateralMovementConfig{Enabled: cfg.Detect.LateralMovement.Enabled, Window: cfg.Detect.LateralMovement.Window, FanOutThreshold: cfg.Detect.LateralMovement.FanOutThreshold, LargeTransferBytes: cfg.Detect.LateralMovement.LargeTransferBytes, PivotWindow: cfg.Detect.LateralMovement.PivotWindow, AdminPorts: cfg.Detect.LateralMovement.AdminPorts})

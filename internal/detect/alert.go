@@ -84,6 +84,39 @@ const (
 	AlertC2Correlated     AlertType = "c2_correlated"
 	AlertBehaviorFinding  AlertType = "behavior_finding"
 	AlertBehaviorIncident AlertType = "behavior_incident_candidate"
+
+	// Protocol-aware product detections introduced in the hardened built-in
+	// catalogue.  These have stable alert types so Central can correlate and
+	// search them across product upgrades even when the human-readable rule
+	// name/description evolves.
+	AlertGatewayMACChanged         AlertType = "gateway_mac_changed"
+	AlertDuplicateIP               AlertType = "duplicate_ip"
+	AlertGratuitousARPStorm        AlertType = "gratuitous_arp_storm"
+	AlertUnauthorizedOTCommand     AlertType = "unauthorized_ot_command"
+	AlertControllerProgramChange   AlertType = "controller_program_change"
+	AlertControllerModeChange      AlertType = "controller_mode_change"
+	AlertControllerConfigChange    AlertType = "controller_configuration_change"
+	AlertUnauthorizedOTWrite       AlertType = "unauthorized_ot_write"
+	AlertNewEngineeringWorkstation AlertType = "new_engineering_workstation"
+	AlertRemoteAdminIntoOT         AlertType = "remote_admin_into_ot"
+	AlertSMBToolTransfer           AlertType = "smb_tool_transfer"
+	AlertBruteForceIO              AlertType = "brute_force_io"
+	AlertAssetIdentityDrift        AlertType = "asset_identity_drift"
+	AlertDNSTunneling              AlertType = "dns_tunneling"
+	AlertUnexpectedOTProtocol      AlertType = "unexpected_ot_protocol"
+	AlertFirmwareChange            AlertType = "firmware_change"
+	AlertUnauthorizedTimeChange    AlertType = "unauthorized_time_change"
+	AlertProcessSequenceViolation  AlertType = "process_sequence_violation"
+	AlertOTReportingLoss           AlertType = "ot_reporting_loss"
+	AlertMalformedOTBurst          AlertType = "malformed_ot_burst"
+
+	// Stable IDs advertised by docs/BUILTIN_RULE_CATALOG.md.  These are packet
+	// and context policy detections rather than user-created packet rules.
+	AlertFirstSeenRemoteManagement   AlertType = "first_seen_remote_management"
+	AlertDirectOTProtocolAccess      AlertType = "direct_ot_protocol_access"
+	AlertSMBIntoOT                   AlertType = "smb_into_ot"
+	AlertUnexpectedEngineeringAccess AlertType = "unexpected_engineering_access"
+	AlertLargeControllerTransfer     AlertType = "large_controller_transfer"
 )
 
 // AlertStatus is an operator's review verdict on an Alert.

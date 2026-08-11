@@ -3,6 +3,7 @@ package detect
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
@@ -49,6 +50,7 @@ func (e *Engine) handleOTValueAnomaly(m ics.Message) {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	learning := e.behaviorDetectionsSuppressed()
 
 	e.otMutex.Lock()
 	st := e.otValues[key]
@@ -58,19 +60,17 @@ func (e *Engine) handleOTValueAnomaly(m ics.Message) {
 	}
 	previous := st.LastValue
 	changed := st.Samples > 0 && previous != value
-	z := 0.0
-	if st.Samples >= uint64(e.otAnomaly.MinSamples) && st.Samples > 1 {
-		sd := math.Sqrt(st.M2 / float64(st.Samples-1))
-		if sd > 0 {
-			z = math.Abs(value-st.Mean) / sd
-		}
+	robustDistance := 0.0
+	median := st.Mean
+	if !learning && len(st.BaselineSamples) >= e.otAnomaly.MinSamples {
+		robustDistance, median = robustValueDistance(value, st.BaselineSamples)
 	}
 	delta := math.Abs(value - previous)
 	rateLimit := st.TypicalDelta * e.otAnomaly.RateMultiplier
 	if changed {
 		st.LastChange = now
 		st.ToggleTimes = append(st.ToggleTimes, now)
-		if st.Samples > 0 {
+		if learning && st.Samples > 0 {
 			if st.TypicalDelta == 0 {
 				st.TypicalDelta = delta
 			} else {
@@ -87,10 +87,18 @@ func (e *Engine) handleOTValueAnomaly(m ics.Message) {
 		}
 	}
 	st.ToggleTimes = st.ToggleTimes[:j]
-	st.Samples++
-	d := value - st.Mean
-	st.Mean += d / float64(st.Samples)
-	st.M2 += d * (value - st.Mean)
+	if learning {
+		st.Samples++
+		d := value - st.Mean
+		st.Mean += d / float64(st.Samples)
+		st.M2 += d * (value - st.Mean)
+		if len(st.BaselineSamples) < 128 {
+			st.BaselineSamples = append(st.BaselineSamples, value)
+		} else {
+			idx := int((st.Samples * 11400714819323198485) % 128)
+			st.BaselineSamples[idx] = value
+		}
+	}
 	st.LastValue = value
 	st.LastSeen = now
 	sampleCount := st.Samples
@@ -98,17 +106,14 @@ func (e *Engine) handleOTValueAnomaly(m ics.Message) {
 	lastChange := st.LastChange
 	e.otMutex.Unlock()
 
-	if sampleCount > uint64(e.otAnomaly.MinSamples) && z >= e.otAnomaly.ZScoreThreshold {
-		e.raiseOTAnomaly("statistical", key, deviceIP, value, 75, fmt.Sprintf("value %.3f deviates %.1f standard deviations from learned behavior", value, z), map[string]interface{}{"anomaly_score": minInt(100, int(z*15)), "anomaly_confidence": 75, "z_score": z})
+	if !learning && sampleCount >= uint64(e.otAnomaly.MinSamples) && robustDistance >= e.otAnomaly.ZScoreThreshold {
+		e.raiseOTAnomaly("statistical", key, deviceIP, value, 75, fmt.Sprintf("value %.3f deviates %.1f robust MAD units from learned median %.3f", value, robustDistance, median), map[string]interface{}{"anomaly_score": minInt(100, int(robustDistance*15)), "anomaly_confidence": 80, "robust_distance": robustDistance, "median": median})
 	}
-	if changed && rateLimit > 0 && delta > rateLimit {
+	if !learning && changed && rateLimit > 0 && delta > rateLimit {
 		e.raiseOTAnomaly("rate_of_change", key, deviceIP, value, 80, fmt.Sprintf("value changed by %.3f; learned typical change is %.3f", delta, st.TypicalDelta), map[string]interface{}{"anomaly_score": minInt(100, int(delta/rateLimit*70)), "anomaly_confidence": 80, "delta": delta, "rate_limit": rateLimit})
 	}
-	if toggles >= e.otAnomaly.ToggleThreshold {
+	if !learning && toggles >= e.otAnomaly.ToggleThreshold {
 		e.raiseOTAnomaly("excessive_toggle", key, deviceIP, value, 75, fmt.Sprintf("tag changed %d times within %s", toggles, e.otAnomaly.ToggleWindow), map[string]interface{}{"anomaly_score": 80, "anomaly_confidence": 75, "toggle_count": toggles})
-	}
-	if e.otAnomaly.UnexpectedWrites && isOTWrite(m) {
-		e.raiseOTAnomaly("unexpected_write", key, deviceIP, value, 85, fmt.Sprintf("write operation %s observed for OT tag", m.FunctionName), map[string]interface{}{"anomaly_score": 85, "anomaly_confidence": 85, "source_ip": m.SrcIP, "function": m.FunctionName})
 	}
 	_ = lastChange
 }
@@ -133,30 +138,42 @@ func (e *Engine) raiseOTAnomaly(kind, key, ip string, value float64, confidence 
 	if e.behaviorDetectionsSuppressed() {
 		return
 	}
-	if !e.isRuleEnabled(string(AlertOTValueAnomaly)) {
-		return
-	}
 	id := "ot_anomaly|" + kind + "|" + key
 	now := time.Now()
 	evidence["anomaly_type"] = kind
 	evidence["value"] = value
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-	a, exists := e.alerts[id]
-	if exists && a.Status == AlertStatusApproved {
-		return
+	sev := "medium"
+	if confidence >= 85 {
+		sev = "high"
 	}
-	if !exists {
-		sev := "medium"
-		if confidence >= 85 {
-			sev = "high"
-		}
-		a = &Alert{ID: id, Type: AlertOTValueAnomaly, Severity: sev, Message: fmt.Sprintf("OT value anomaly on %s: %s", ip, reason), IP: ip, FirstSeen: now, Status: AlertStatusNew, Evidence: evidence}
-		e.alerts[id] = a
-		e.logNewAlert(a)
-	}
-	e.recordEpisodeAlertLocked(a, now, alertEpisodeGap)
+	e.raiseBuiltinAlert(string(AlertOTValueAnomaly), AlertOTValueAnomaly, sev, id, fmt.Sprintf("OT value anomaly on %s: %s", ip, reason), ip, evidence, now, alertEpisodeGap)
 }
+func robustValueDistance(value float64, samples []float64) (float64, float64) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	values := append([]float64(nil), samples...)
+	sort.Float64s(values)
+	median := values[len(values)/2]
+	if len(values)%2 == 0 {
+		median = (values[len(values)/2-1] + values[len(values)/2]) / 2
+	}
+	dev := make([]float64, len(values))
+	for i, v := range values {
+		dev[i] = math.Abs(v - median)
+	}
+	sort.Float64s(dev)
+	mad := dev[len(dev)/2]
+	if len(dev)%2 == 0 {
+		mad = (dev[len(dev)/2-1] + dev[len(dev)/2]) / 2
+	}
+	if mad > 0 {
+		return math.Abs(value-median) / (1.4826 * mad), median
+	}
+	span := math.Max(1, math.Abs(median)*.02)
+	return math.Abs(value-median) / span, median
+}
+
 func numericValue(v any) (float64, bool) {
 	switch x := v.(type) {
 	case int:

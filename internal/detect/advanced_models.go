@@ -42,6 +42,7 @@ type otValueState struct {
 	LastValue            float64
 	LastSeen, LastChange time.Time
 	TypicalDelta         float64
+	BaselineSamples      []float64
 	ToggleTimes          []time.Time
 	DeviceIP             string
 	DevicePort           uint16

@@ -1,6 +1,12 @@
 package detect
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"github.com/zabojnikvlado/otlens_linux/internal/core"
+	"github.com/zabojnikvlado/otlens_linux/internal/ics"
+)
 
 const (
 	alertEpisodeGap            = 5 * time.Minute
@@ -97,4 +103,63 @@ func (e *Engine) ResetLearningState() {
 	e.c2DNSMutex.Unlock()
 
 	e.ResetOTAnomalyState()
+	e.resetPolicyLearningState()
+}
+
+// excludePacketFromLearning tells the statistical behavior learner that a hard
+// security/policy detector has identified this flow. During learning the
+// learner removes/quarantines the matching profile so commissioning-time attack
+// traffic cannot become trusted normal behavior. In monitoring the event only
+// prevents candidate promotion.
+func (e *Engine) excludePacketFromLearning(packet core.Packet, reason string) {
+	if packet.SrcIP == "" || packet.DstIP == "" {
+		return
+	}
+	e.quarantinePolicyLearning(packet.SrcIP, packet.DstIP, time.Now().Add(24*time.Hour))
+	// The statistical baseline receives the exclusion event below. Remove the
+	// same flow from the legacy communication baseline as well so a hard
+	// security hit observed during learning can never become trusted merely
+	// because packet learning ran before the detector.
+	e.mutex.Lock()
+	if e.baselineMode == BaselineModeLearning {
+		delete(e.learnedPatterns, baselineKeyForPacket(packet))
+	}
+	e.mutex.Unlock()
+	if e.eventBus == nil {
+		return
+	}
+	service := packet.SrcPort
+	flags := strings.ToUpper(packet.TCPFlags)
+	if strings.EqualFold(packet.L4Protocol, "tcp") && strings.Contains(flags, "SYN") {
+		if strings.Contains(flags, "ACK") && packet.SrcPort != 0 {
+			service = packet.SrcPort
+		} else if !strings.Contains(flags, "ACK") && packet.DstPort != 0 {
+			service = packet.DstPort
+		}
+	}
+	if service == 0 || (packet.DstPort != 0 && packet.DstPort < service && !strings.Contains(flags, "SYN")) {
+		service = packet.DstPort
+	}
+	e.eventBus.Publish(core.Event{Type: core.EventLearningExclusion, Timestamp: time.Now().UTC(), Data: core.LearningExclusion{SrcIP: packet.SrcIP, DstIP: packet.DstIP, Protocol: packet.L4Protocol, ServicePort: service, Reason: reason, Until: time.Now().UTC().Add(24 * time.Hour)}})
+}
+
+func (e *Engine) excludeICSFromLearning(msg ics.Message, reason string) {
+	if msg.SrcIP == "" || msg.DstIP == "" {
+		return
+	}
+	// Use the request direction for policy authority regardless of whether the
+	// exclusion originated from a request or response observation.
+	src, dst := msg.SrcIP, msg.DstIP
+	if msg.IsResponse {
+		src, dst = msg.DstIP, msg.SrcIP
+	}
+	e.quarantinePolicyLearning(src, dst, time.Now().Add(24*time.Hour))
+	if e.eventBus == nil {
+		return
+	}
+	service := msg.DstPort
+	if msg.IsResponse {
+		service = msg.SrcPort
+	}
+	e.eventBus.Publish(core.Event{Type: core.EventLearningExclusion, Timestamp: time.Now().UTC(), Data: core.LearningExclusion{SrcIP: msg.SrcIP, DstIP: msg.DstIP, Protocol: msg.Protocol, ServicePort: service, Reason: reason, Until: time.Now().UTC().Add(24 * time.Hour)}})
 }

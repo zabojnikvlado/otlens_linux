@@ -1,15 +1,14 @@
-# Rule scopes and recommended catalogue
+# Rule catalogue and operator policy
 
-Detection rules now carry a `scope` field with one of `IT`, `OT`, `IT/OT`, or `Universal`.
-The Rules UI provides scope/status/severity/category filters, counters, protocol metadata, and ATT&CK mappings.
+The executable catalogue is defined by the sensor in `internal/detect/rules.go`; `docs/BUILTIN_RULE_CATALOG.md` documents the current product rules.
 
-Built-in detectors are classified by scope. Custom rule import/export and sensor synchronization preserve scope,
-protocols, mappings, grouped conditions, suppression, simulation mode, and priority.
+OTLens does **not** treat a coarse `IT`/`OT` scope label as proof that a rule is appropriate for a packet. Typed detectors use actual context instead: decoded OT protocol semantics, Central asset role/zone/Purdue metadata, learned source→target relationships, remote-management services, deception configuration, DNS/SMB observations and behavior maturity.
 
-The Recommended rules catalogue installs conservative packet-level templates in simulation mode. Templates that
-contain `CHANGE_ME_OT_VLAN` must be edited before activation. Simulation mode records matches without creating alerts,
-allowing operators to tune IP/VLAN constraints and suppress expected management stations.
+Built-in rules have two layers:
 
-Deep protocol-semantic detections (for example confirmed PLC program download or a decoded write operation) remain
-served by typed protocol detectors such as Critical ICS Operation rather than pretending that a port-only rule proves
-the operation.
+- **Product definition (immutable by operators):** stable ID, detector, description, protocol metadata, prerequisites and ATT&CK mapping.
+- **Operator policy:** enabled state, explicit severity override or `auto`, simulation, suppression, schedule and detector parameters.
+
+Custom packet rules retain grouped conditions and can still be imported/exported. Built-in rules cannot be deleted or replaced by a custom/rule-set payload.
+
+The old "Recommended rules installer" is not used. The formerly documented packet templates are now executable stable built-ins, including first-seen remote management, remote management into OT, direct OT access, SMB into OT, unexpected engineering access and large controller transfer. Those relationship-heavy rules start in simulation to avoid an upgrade-time alert storm before site roles/zones are curated.

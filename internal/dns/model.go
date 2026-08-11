@@ -18,6 +18,7 @@ type Observation struct {
 	Answers        []string  `json:"answers,omitempty"`
 	CNAMEs         []string  `json:"cnames,omitempty"`
 	TTL            uint32    `json:"ttl,omitempty"`
+	PayloadBytes   int       `json:"payload_bytes,omitempty"`
 }
 
 type DNSExchange struct {

@@ -45,6 +45,12 @@ const (
 	// application-layer message produced by internal/ics.
 	EventICSMessage EventType = "ics.message"
 
+	// EventICSParseError carries an ICSParseError when traffic on a configured
+	// OT service port has a recognizable protocol frame signature but fails
+	// semantic decoding. Generic TCP fragments without a protocol signature are
+	// deliberately not emitted as parse errors.
+	EventICSParseError EventType = "ics.parse_error"
+
 	// EventHostnameSeen carries a hostname.Observation — a MAC-to-
 	// hostname mapping learned from mDNS or DHCP traffic, produced by
 	// internal/hostname and consumed by internal/asset to enrich an
@@ -137,6 +143,12 @@ const (
 	// no longer holds. Alerts an operator already reviewed are left
 	// alone — see detect's clearHoneypotAlerts.
 	EventHoneypotCleared EventType = "honeypot.cleared"
+
+	// EventLearningExclusion quarantines traffic that a hard-security detector
+	// identified while baseline learning is active. Behavior learning consumes
+	// this event and removes/ignores the matching flow so an attack observed
+	// during commissioning cannot become trusted normal behavior.
+	EventLearningExclusion EventType = "baseline.learning_exclusion"
 )
 
 // BaselineComplete is the payload for EventBaselineLearningComplete.
@@ -172,9 +184,20 @@ type OutOfRangeValue struct {
 	AddressSpace string
 	Address      uint32
 
-	MinValue any
-	MaxValue any
-	Value    any
+	MinValue  any
+	MaxValue  any
+	Value     any
+	Reason    string
+	Delta     float64
+	Rate      float64
+	RateLimit float64
+}
+
+// ICSParseError describes a protocol-looking OT frame that failed decoding.
+// Packet is a core type, keeping core independent of the ICS package.
+type ICSParseError struct {
+	Parser string
+	Packet Packet
 }
 
 // Event is the envelope published through the in-process EventBus.
@@ -189,4 +212,17 @@ type Event struct {
 // event's doc comment.
 type HoneypotCleared struct {
 	IP string
+}
+
+// LearningExclusion identifies a flow that must not be folded into the trusted
+// behavior baseline. The event is intentionally detector-agnostic so core does
+// not import the security packages that publish it.
+type LearningExclusion struct {
+	SensorID    string
+	SrcIP       string
+	DstIP       string
+	Protocol    string
+	ServicePort uint16
+	Reason      string
+	Until       time.Time
 }

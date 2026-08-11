@@ -132,6 +132,16 @@ func (w *Worker) sync(ctx context.Context) {
 		}
 		w.ThreatIntel.ApplySnapshot(items)
 		return nil
+	}, func(contexts []management.AssetPolicyContext) error {
+		if w.Detect == nil {
+			return nil
+		}
+		converted := make([]detect.AssetPolicyContext, 0, len(contexts))
+		for _, x := range contexts {
+			converted = append(converted, detect.AssetPolicyContext{IP: x.AssetIP, Role: x.AssetRole, Criticality: x.Criticality, Zone: x.Zone, PurdueLevel: x.PurdueOverride})
+		}
+		w.Detect.SetAssetPolicyContexts(converted)
+		return nil
 	})
 	if err != nil {
 		if IsSensorAuthError(err) {

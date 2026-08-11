@@ -154,3 +154,105 @@ func BenchmarkObserveExistingProfile(b *testing.B) {
 		engine.observe(value)
 	}
 }
+
+func TestCandidateBaselineRequiresEvidenceAndManualPromotion(t *testing.T) {
+	engine := New(nil, Config{Enabled: true, SensorID: "s", LearningDuration: time.Second, MaxLearningMultiplier: 2, MinAssetSamples: 1, MinAssetAge: time.Millisecond, CandidateMinSamples: 2, CandidateMinDays: 1, MaxProfiles: 100})
+	at := time.Now().UTC()
+	trusted := sample{key: Key{SensorID: "s", Scope: ScopeNetwork, SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Transport: "udp", Protocol: "udp", ServicePort: 53}, srcAsset: "mac:a", dstAsset: "mac:b", at: at, packet: true}
+	engine.observe(trusted)
+	candidate := sample{key: Key{SensorID: "s", Scope: ScopeNetwork, SrcIP: "10.0.0.1", DstIP: "10.0.0.3", Transport: "tcp", Protocol: "tcp", ServicePort: 443}, srcAsset: "mac:a", dstAsset: "mac:c", at: at.Add(3 * time.Second), packet: true}
+	engine.observe(candidate)
+	rows := engine.Candidates(0)
+	if len(rows) != 1 || rows[0].ReadyForPromotion {
+		t.Fatalf("candidate should exist but need more evidence: %#v", rows)
+	}
+	if err := engine.PromoteCandidate(rows[0].ID); err == nil {
+		t.Fatal("candidate promoted before minimum evidence")
+	}
+	candidate.at = candidate.at.Add(time.Second)
+	engine.observe(candidate)
+	rows = engine.Candidates(0)
+	if len(rows) != 1 || !rows[0].ReadyForPromotion {
+		t.Fatalf("candidate should be ready for review: %#v", rows)
+	}
+	if err := engine.PromoteCandidate(rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.Candidates(0)) != 0 || !engine.hasTrustedKey(candidate.key) {
+		t.Fatal("manual promotion did not move candidate into trusted baseline")
+	}
+}
+
+func TestSecurityExclusionQuarantinesCandidateAndTrustedPeer(t *testing.T) {
+	engine := New(nil, Config{Enabled: true, SensorID: "s", LearningDuration: time.Hour, MinAssetSamples: 1, MinAssetAge: time.Millisecond, CandidateMinSamples: 1, CandidateMinDays: 1, MaxProfiles: 100})
+	at := time.Now().UTC()
+	value := sample{key: Key{SensorID: "s", Scope: ScopeNetwork, SrcIP: "10.0.0.1", DstIP: "10.0.0.2", Transport: "tcp", Protocol: "tcp", ServicePort: 502, Context: "production"}, srcAsset: "ip:10.0.0.1", dstAsset: "ip:10.0.0.2", at: at, packet: true}
+	engine.observe(value)
+	if !engine.hasTrustedKey(value.key) {
+		t.Fatal("precondition: trusted flow was not learned")
+	}
+	engine.ApplyLearningExclusion(core.LearningExclusion{SrcIP: value.key.SrcIP, DstIP: value.key.DstIP, Protocol: value.key.Protocol, ServicePort: value.key.ServicePort, Reason: "critical ICS operation", Until: at.Add(time.Hour)})
+	if engine.hasTrustedKey(value.key) {
+		t.Fatal("security violating flow remained in trusted baseline")
+	}
+	for _, profile := range engine.Snapshot(at).AssetProfiles {
+		if profile.Key.AssetID == "ip:10.0.0.1" {
+			if _, ok := profile.Peers["ip:10.0.0.2"]; ok {
+				t.Fatal("security violating peer relationship remained in asset baseline")
+			}
+		}
+	}
+}
+
+func TestTimeModelUsesIntraDayBucketAcrossWeekdays(t *testing.T) {
+	engine := New(nil, Config{Enabled: true, BucketDuration: time.Hour})
+	monday := time.Date(2026, 8, 10, 9, 15, 0, 0, time.UTC)
+	tuesday := monday.Add(24 * time.Hour)
+	mondayKey := engine.keyWithService(monday, ScopeNetwork, "10.0.0.1", "10.0.0.2", "tcp", "tcp", 502)
+	tuesdayKey := engine.keyWithService(tuesday, ScopeNetwork, "10.0.0.1", "10.0.0.2", "tcp", "tcp", 502)
+	if mondayKey.TimeBucket != tuesdayKey.TimeBucket {
+		t.Fatalf("same hour on adjacent weekdays must use the same intra-day bucket: monday=%d tuesday=%d", mondayKey.TimeBucket, tuesdayKey.TimeBucket)
+	}
+	if mondayKey.DayClass != "weekday" || tuesdayKey.DayClass != "weekday" || mondayKey.Shift != "day" || tuesdayKey.Shift != "day" {
+		t.Fatalf("unexpected hierarchical time context: monday=%#v tuesday=%#v", mondayKey, tuesdayKey)
+	}
+}
+
+func TestMaintenanceWindowIsSeparateFromProductionBaseline(t *testing.T) {
+	engine := New(nil, Config{Enabled: true, BucketDuration: time.Hour, MaintenanceWindows: []string{"weekday@02:00-04:00"}})
+	maintenance := engine.keyWithService(time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC), ScopeNetwork, "10.0.0.1", "10.0.0.2", "tcp", "tcp", 502)
+	production := engine.keyWithService(time.Date(2026, 8, 10, 5, 0, 0, 0, time.UTC), ScopeNetwork, "10.0.0.1", "10.0.0.2", "tcp", "tcp", 502)
+	if maintenance.Context != "maintenance" {
+		t.Fatalf("maintenance observation got context %q", maintenance.Context)
+	}
+	if production.Context != "production" {
+		t.Fatalf("production observation got context %q", production.Context)
+	}
+}
+
+func TestPublicInternetRelationshipIsShadowCandidateUntilManualPromotion(t *testing.T) {
+	engine := New(nil, Config{Enabled: true, SensorID: "s", LearningDuration: time.Hour, CandidateMinSamples: 2, CandidateMinDays: 1, MaxProfiles: 100})
+	at := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	value := sample{key: engine.keyWithService(at, ScopeNetwork, "10.0.0.1", "8.8.8.8", "udp", "udp", 53), srcAsset: "ip:10.0.0.1", dstAsset: "ip:8.8.8.8", at: at, packet: true}
+	engine.observe(value)
+	if engine.hasTrustedKey(value.key) {
+		t.Fatal("public Internet relationship was silently trusted during learning")
+	}
+	rows := engine.Candidates(0)
+	if len(rows) != 1 || !rows[0].Eligible || rows[0].Reason != publicInternetReviewReason || rows[0].ReadyForPromotion {
+		t.Fatalf("expected review-only shadow candidate, got %#v", rows)
+	}
+	value.at = value.at.Add(time.Second)
+	value.key = engine.keyWithService(value.at, ScopeNetwork, "10.0.0.1", "8.8.8.8", "udp", "udp", 53)
+	engine.observe(value)
+	rows = engine.Candidates(0)
+	if len(rows) != 1 || !rows[0].ReadyForPromotion {
+		t.Fatalf("review-only candidate did not accumulate promotion evidence: %#v", rows)
+	}
+	if err := engine.PromoteCandidate(rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if !engine.hasTrustedKey(value.key) {
+		t.Fatal("explicitly promoted Internet relationship is not in trusted baseline")
+	}
+}

@@ -27,7 +27,9 @@ func (profinetParser) Parse(p core.Packet) (Message, bool) {
 	m.Details["frame_id"] = frameID
 	m.Details["service_type"] = b[3]
 	if b[2] == 4 {
-		m.Details["security_relevant"] = true
+		setOperation(&m, "config", true, true, false)
+	} else if b[2] == 3 || b[2] == 5 {
+		setOperation(&m, "discovery", false, false, false)
 	}
 	return m, true
 }

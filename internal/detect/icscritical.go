@@ -2,76 +2,34 @@ package detect
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/ics"
 )
 
-// handleICS promotes ics parser findings already flagged
-// security-relevant (S7 PLCStop/PLCControl, block download — see
-// internal/ics/s7comm.go) into a proper deduplicated Alert. The ics
-// engine and store engine both log these via logger.Log.Warn as they
-// happen; this is what makes them queryable/counted over time rather
-// than just scrolling past in the log.
+// handleICS first executes the protocol-aware built-in policy layer for every
+// decoded ICS message, then preserves the historical ics_critical_operation
+// alert only for operations the parser classified as intrinsically high-impact.
+// Routine writes, ClockSync and OPC UA secure-channel lifecycle are no longer
+// collapsed into a blanket CRITICAL finding.
 func (e *Engine) handleICS(msg ics.Message) {
-
-	if !e.isRuleEnabled(string(AlertICSCriticalOperation)) {
-		return
-	}
+	e.handleICSPolicy(msg)
 
 	relevant, _ := msg.Details["security_relevant"].(bool)
-
-	if !relevant {
+	if !relevant || msg.IsResponse {
 		return
 	}
-
-	// Deduplicated per (protocol, function, target device): repeated
-	// PLCStop attempts against the same PLC update one alert's
-	// Count/LastSeen rather than creating a new one each time, but a
-	// PLCStop against a *different* PLC is its own finding.
-	key := fmt.Sprintf(
-		"ics|%s|%s|%s:%d",
-		msg.Protocol,
-		msg.FunctionName,
-		msg.DstIP,
-		msg.DstPort,
-	)
-
-	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && !e.allowAlertOccurrenceLocked(alert) {
+	// Programming, mode and configuration changes now have dedicated
+	// semantic built-ins. Do not emit the legacy generic critical alert for
+	// the same operation as well; this path remains only as a safety net for
+	// future parser operations marked intrinsically security-relevant without
+	// a dedicated semantic detector.
+	if detailBool(msg, "is_programming") || detailBool(msg, "is_mode_change") || detailBool(msg, "is_config_change") {
 		return
 	}
-
-	if !exists {
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     AlertICSCriticalOperation,
-			Severity: "critical",
-			Message: fmt.Sprintf(
-				"%s %s directed at %s:%d",
-				msg.Protocol, msg.FunctionName, msg.DstIP, msg.DstPort,
-			),
-
-			IP: msg.DstIP,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-	}
-
-	alert.LastSeen = now
-	alert.Count++
-	alert.Synced = false
+	e.excludeICSFromLearning(msg, "intrinsically critical ICS operation")
+	_, target, _ := icsEndpoints(msg)
+	key := fmt.Sprintf("ics|%s|%s|%s", msg.Protocol, msg.FunctionName, target)
+	e.raiseBuiltinAlert(string(AlertICSCriticalOperation), AlertICSCriticalOperation, "critical", key,
+		fmt.Sprintf("%s %s directed at %s", msg.Protocol, msg.FunctionName, target), target,
+		map[string]interface{}{"source_ip": msg.SrcIP, "target_ip": target, "protocol": msg.Protocol, "function": msg.FunctionName, "operation_class": msg.Details["operation_class"]}, msg.Timestamp, alertEpisodeGap)
 }

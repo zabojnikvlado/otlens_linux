@@ -40,13 +40,18 @@ type Anomaly struct {
 }
 
 type Telemetry struct {
-	EvaluatedTotal       uint64  `json:"evaluated_total"`
-	LearningSkippedTotal uint64  `json:"learning_skipped_total"`
-	BelowThresholdTotal  uint64  `json:"below_threshold_total"`
-	DeduplicatedTotal    uint64  `json:"deduplicated_total"`
-	AnomaliesTotal       uint64  `json:"anomalies_total"`
-	ActiveAnomalies      int     `json:"active_anomalies"`
-	AverageAnomalyScore  float64 `json:"average_anomaly_score"`
+	EvaluatedTotal        uint64  `json:"evaluated_total"`
+	LearningSkippedTotal  uint64  `json:"learning_skipped_total"`
+	BelowThresholdTotal   uint64  `json:"below_threshold_total"`
+	DeduplicatedTotal     uint64  `json:"deduplicated_total"`
+	AnomaliesTotal        uint64  `json:"anomalies_total"`
+	ActiveAnomalies       int     `json:"active_anomalies"`
+	AverageAnomalyScore   float64 `json:"average_anomaly_score"`
+	PreviewEvaluatedTotal uint64  `json:"preview_evaluated_total"`
+	PreviewAnomaliesTotal uint64  `json:"preview_anomalies_total"`
+	PreviewTopScore       float64 `json:"preview_top_score"`
+	PreviewTopReason      string  `json:"preview_top_reason,omitempty"`
+	CandidateGraceSkipped uint64  `json:"candidate_grace_skipped_total"`
 }
 
 type Snapshot struct {

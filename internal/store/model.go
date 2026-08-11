@@ -101,6 +101,21 @@ type Tag struct {
 	MinValue any
 	MaxValue any
 
+	// Robust baseline statistics are bounded and survive restarts. They make
+	// process-value learning resistant to one commissioning-time outlier and
+	// provide a learned deadband/rate-of-change envelope in monitoring.
+	BaselineSamples       []float64
+	BaselineSampleCount   uint64
+	BaselineMedian        float64
+	BaselineMAD           float64
+	BaselineP05           float64
+	BaselineP95           float64
+	BaselineTypicalDelta  float64
+	BaselineTypicalRate   float64
+	BaselineLastNumeric   float64
+	BaselineLastNumericAt time.Time
+	BaselineHasNumeric    bool
+
 	FirstSeen time.Time
 	LastSeen  time.Time
 

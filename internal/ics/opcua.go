@@ -26,8 +26,8 @@ func parseOPCUA(p core.Packet) (Message, bool) {
 	if sz, ok := u32le(b, 4); ok {
 		m.Details["message_size"] = sz
 	}
-	if typ == "OPN" || typ == "CLO" {
-		m.Details["security_relevant"] = true
+	if typ == "OPN" || typ == "CLO" || typ == "HEL" || typ == "ACK" {
+		setOperation(&m, "session", false, false, false)
 	}
 	return m, true
 }

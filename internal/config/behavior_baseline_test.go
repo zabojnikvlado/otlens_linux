@@ -19,6 +19,9 @@ func TestBehaviorBaselineConfigDefaults(t *testing.T) {
 	if !config.Baseline.BehaviorEnabled || config.Baseline.BucketDuration != time.Hour || config.Baseline.MaxProfiles != 100_000 || config.Baseline.MaxAssetProfiles != 100_000 {
 		t.Fatalf("unexpected behavior baseline defaults: %#v", config.Baseline)
 	}
+	if config.Baseline.MinAssetSamples != 50 || config.Baseline.MinAssetAge != 5*time.Minute || config.Baseline.ReadinessThreshold != .85 || config.Baseline.MaxLearningMultiplier != 2 || config.Baseline.CandidateMinSamples != 20 || config.Baseline.CandidateMinDays != 3 || config.Baseline.MinStatSamples != 30 {
+		t.Fatalf("unexpected learning-quality defaults: %#v", config.Baseline)
+	}
 	if !config.NBA.Enabled || config.NBA.MinScore != 40 || config.NBA.MaxAnomalies != 10_000 || config.NBA.Cooldown != 5*time.Minute || !config.NBA.RiskEnabled || config.NBA.MaxAssessments != 10_000 {
 		t.Fatalf("unexpected NBA defaults: %#v", config.NBA)
 	}

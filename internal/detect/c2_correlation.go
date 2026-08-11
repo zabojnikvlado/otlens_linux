@@ -108,28 +108,12 @@ func registrableApprox(name string) string {
 	return p[len(p)-2] + "." + p[len(p)-1]
 }
 func (e *Engine) raiseC2Correlated(ip, target string, score, confidence int, signals []string, extra map[string]interface{}) {
-	if !e.isRuleEnabled(string(AlertC2Correlated)) {
-		return
-	}
-	id := "c2_correlated|" + ip + "|" + target
 	now := time.Now()
-	extra["c2_score"] = score
-	extra["c2_confidence"] = confidence
-	extra["c2_signals"] = signals
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-	a, exists := e.alerts[id]
-	if exists && a.Status == AlertStatusApproved {
-		return
+	extra["c2_score"], extra["c2_confidence"], extra["c2_signals"] = score, confidence, signals
+	sev := "high"
+	if score >= 85 {
+		sev = "critical"
 	}
-	if !exists {
-		sev := "high"
-		if score >= 85 {
-			sev = "critical"
-		}
-		a = &Alert{ID: id, Type: AlertC2Correlated, Severity: sev, Message: fmt.Sprintf("possible C2 activity from %s via %s (score %d): %s", ip, target, score, strings.Join(signals, ", ")), IP: ip, FirstSeen: now, Status: AlertStatusNew, Evidence: extra}
-		e.alerts[id] = a
-		e.logNewAlert(a)
-	}
-	e.recordEpisodeAlertLocked(a, now, e.c2Correlation.DNSWindow)
+	e.raiseBuiltinAlert(string(AlertC2Correlated), AlertC2Correlated, sev, "c2_correlated|"+ip+"|"+target,
+		fmt.Sprintf("possible C2 activity from %s via %s (score %d): %s", ip, target, score, strings.Join(signals, ", ")), ip, extra, now, e.c2Correlation.DNSWindow)
 }

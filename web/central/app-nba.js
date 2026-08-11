@@ -11,7 +11,7 @@ function renderNetworkBehavior(){
   const overview=behaviorOverview||{},health=Math.max(0,Math.min(100,Number(overview.network_health||0))),state=overview.state||'learning',hero=document.getElementById('network-behavior-hero');if(!hero)return;
   hero.className=`network-behavior-hero behavior-${state}`;hero.dataset.dashboardTab=canView('alerts')?'nba':'assets';document.getElementById('network-health-score').textContent=state==='learning'?'Learning':`${Math.round(health)}%`;document.getElementById('network-health-bar').style.width=`${health}%`;
   document.getElementById('network-health-state').textContent=state==='healthy'?'Healthy network behavior':state==='degraded'?'Behavior degradation detected':state==='critical'?'Major behavior anomaly':'Building reliable baselines';
-  document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':'In progress';document.getElementById('network-coverage').textContent=`${Math.round(Number(overview.coverage||0))}% coverage`;
+  document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':`${Math.round(Number(overview.learning_readiness||0))}% ready`;document.getElementById('network-coverage').textContent=`${Math.round(Number(overview.coverage||0))}% mature-asset coverage`;
   document.getElementById('network-active-baselines').textContent=Number(overview.active_baselines||0).toLocaleString();document.getElementById('network-behavior-alerts').textContent=Number(overview.behavior_alerts||0).toLocaleString();document.getElementById('network-affected-assets').textContent=`${Number(overview.affected_assets||0)} affected assets`;
   const top=overview.top_anomaly;document.getElementById('network-top-anomaly').textContent=top?.asset_ip||'—';document.getElementById('network-top-anomaly-score').textContent=top?`Anomaly ${Number(top.anomaly_score||0).toFixed(1)} · ${nbaPercent(top.confidence)}`:'No active finding';
 }
@@ -86,3 +86,51 @@ renderAssetPanel=async function(panel){
 document.querySelector('#topology-colour-mode')?.insertAdjacentHTML('beforeend','<option value="behavior">Behavior health</option>');
 const originalTopologyNode=node;
 node=function(value){const result=originalTopologyNode(value);if(topologyColourMode!=='behavior'||value.IsHoneypot===true||value.Confirmed===false)return result;const profile=behaviorProfile(value.SensorID,value.IP),state=behaviorState(profile),colors={healthy:{background:'#16a34a',border:'#4ade80'},anomalous:{background:'#d97706',border:'#fbbf24'},critical:{background:'#dc2626',border:'#fb7185'},learning:{background:'#64748b',border:'#94a3b8'}};result.color=colors[state]||colors.learning;result.title+=`\nBehavior: ${state}${profile?` · health ${Number(profile.health_score).toFixed(1)} · anomaly ${Number(profile.anomaly_score).toFixed(1)}`:' · insufficient baseline data'}`;return result};
+
+function learningPercent(value){const n=Number(value||0);return `${Math.round(n*10)/10}%`}
+function learningCandidateRows(){
+  const rows=[];
+  (baselines||[]).forEach(b=>{
+    const sensor=b.SensorID||b.sensor_id||'—',behavior=b.behavior||{};
+    (behavior.candidates||[]).forEach(c=>rows.push({sensor,c}));
+  });
+  return rows.sort((a,b)=>Number(b.c.observations||0)-Number(a.c.observations||0));
+}
+function renderLearningQuality(){
+  const o=behaviorOverview||{},set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value};
+  const readiness=Number(o.learning_readiness||0),coverage=Number(o.time_coverage||0),rate=Number(o.new_pattern_rate||0);
+  set('learning-readiness',learningPercent(readiness));
+  set('learning-readiness-detail',o.learning_complete?'Trusted baseline is monitoring':'Minimum duration + maturity/stability gate');
+  set('learning-mature-assets',Number(o.mature_assets||0).toLocaleString());
+  set('learning-assets-detail',`${Number(o.learning_assets||0).toLocaleString()} still learning`);
+  set('learning-time-coverage',learningPercent(coverage));
+  set('learning-pattern-rate',learningPercent(rate*100));
+  set('learning-candidate-count',Number(o.candidate_patterns||0).toLocaleString());
+  set('learning-candidate-assets',`${Number(o.candidate_assets||0).toLocaleString()} candidate-only assets`);
+  set('learning-excluded',Number(o.excluded_learning||0).toLocaleString());
+  set('learning-preview-anomalies',Number(o.preview_anomalies||0).toLocaleString());
+  set('learning-preview-detail',`${Number(o.preview_evaluated||0).toLocaleString()} preview evaluations`);
+  set('learning-preview-score',Number(o.preview_top_score||0)>0?Number(o.preview_top_score).toFixed(1):'—');
+  set('learning-preview-reason',o.preview_top_reason||'No preview anomaly');
+  set('learning-quality-state',o.learning_complete?'Monitoring with mature trusted baseline':`${learningPercent(readiness)} ready`);
+
+  const rows=learningCandidateRows(),body=document.querySelector('#table-learning-candidates tbody');
+  set('learning-candidate-note',`${rows.length.toLocaleString()} candidate${rows.length===1?'':'s'} shown from current sensor telemetry`);
+  if(!body)return;
+  body.innerHTML=rows.map(({sensor,c})=>{
+    const k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false;
+    const baseStatus=!eligible?(c.reason||'security/policy excluded'):ready?'ready for review':'collecting evidence';
+    const status=eligible&&c.reason?`${baseStatus} · ${c.reason}`:baseStatus;
+    const service=[k.protocol||k.transport||'unknown',k.service_port||''].filter(Boolean).join('/');
+    const disabled=!ready||!can('alert_confirm_approve');
+    return `<tr><td>${esc(sensor)}</td><td>${esc(k.src_ip||'—')} → ${esc(k.dst_ip||'—')}</td><td>${esc(service||'—')}</td><td>${esc([k.day_class,k.shift,k.context].filter(Boolean).join(' · ')||'—')}</td><td>${Number(c.observations||0).toLocaleString()}</td><td>${Number(c.distinct_days||0)}</td><td>${esc(status)}</td><td><button class="secondary-btn learning-promote" data-sensor="${esc(sensor)}" data-id="${esc(c.id||'')}" ${disabled?'disabled':''}>Promote</button></td></tr>`;
+  }).join('')||'<tr><td colspan="8">No shadow-baseline candidates.</td></tr>';
+  body.querySelectorAll('.learning-promote').forEach(button=>button.onclick=async()=>{
+    if(!confirm('Promote this reviewed relationship into the trusted behavior baseline?'))return;
+    button.disabled=true;
+    try{await api(`/sensors/${encodeURIComponent(button.dataset.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:button.dataset.id})});button.textContent='Queued';setTimeout(()=>refreshView('nba',true),1500)}catch(error){alert(error.parsed?.error||error.message);button.disabled=false}
+  });
+}
+
+const originalRenderBehaviorFindings=renderBehaviorFindings;
+renderBehaviorFindings=function(...args){const result=originalRenderBehaviorFindings.apply(this,args);renderLearningQuality();return result};

@@ -40,37 +40,7 @@ func (e *Engine) handleBehaviorFinding(finding nba.Finding) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	key := "nba|" + finding.ID
-	evidence := map[string]interface{}{
-		"finding_id": finding.ID, "risk_score": finding.Score, "confidence": finding.Confidence,
-		"reasons": finding.Reasons, "peer_id": peer, "alert_candidate": finding.AlertCandidate,
-		"incident_candidate": finding.IncidentCandidate, "assessment_count": finding.AssessmentCount,
-	}
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-	alert := e.alerts[key]
-	if alert != nil && alert.Status == AlertStatusApproved {
-		return
-	}
-	created := false
-	if alert == nil {
-		alert = &Alert{ID: key, Type: alertType, FirstSeen: finding.FirstSeen, Status: AlertStatusNew}
-		if alert.FirstSeen.IsZero() {
-			alert.FirstSeen = now
-		}
-		e.alerts[key] = alert
-		created = true
-	}
-	alert.Type = alertType
-	alert.Severity = finding.Severity
-	alert.Message = fmt.Sprintf("Network behavior finding on %s: score %.1f, %d correlated assessment(s)", finding.AssetID, finding.Score, finding.AssessmentCount)
-	alert.IP = ip
-	alert.Evidence = evidence
-	// Count represents finding episodes, not the number of packet/risk
-	// assessments folded into this finding. The latter remains available in
-	// Evidence["assessment_count"].
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
-	if created {
-		e.logNewAlert(alert)
-	}
+	evidence := map[string]interface{}{"finding_id": finding.ID, "risk_score": finding.Score, "confidence": finding.Confidence, "reasons": finding.Reasons, "peer_id": peer, "alert_candidate": finding.AlertCandidate, "incident_candidate": finding.IncidentCandidate, "assessment_count": finding.AssessmentCount}
+	e.raiseBuiltinAlert(string(alertType), alertType, finding.Severity, "nba|"+finding.ID,
+		fmt.Sprintf("Network behavior finding on %s: score %.1f, %d correlated assessment(s)", finding.AssetID, finding.Score, finding.AssessmentCount), ip, evidence, now, alertEpisodeGap)
 }

@@ -42,6 +42,7 @@ const (
 	blobKeyNBARisk          = "nba_risk"
 	blobKeyNBACorrelation   = "nba_correlation"
 	blobKeyKnownMAC         = "arp_known_mac"
+	blobKeyPolicyLearning   = "policy_learning"
 )
 
 var allBuckets = []string{bucketAssets, bucketFlows, bucketTags, bucketAlerts, bucketRules, bucketMeta}
@@ -244,6 +245,12 @@ func (s *Snapshotter) Restore() error {
 		s.detectEngine.RestoreKnownMAC(knownMAC)
 	}
 
+	var policyLearning detect.PolicyLearningSnapshot
+	if err := loadBlob(s.db, bucketMeta, blobKeyPolicyLearning, &policyLearning); err != nil {
+		return err
+	}
+	s.detectEngine.RestorePolicyLearning(policyLearning)
+
 	logger.Log.Info(
 		"Restored persisted state from disk",
 		zap.Int("assets", len(assets)),
@@ -351,6 +358,9 @@ func (s *Snapshotter) flushLocked() error {
 	}
 
 	if err := saveBlob(s.db, bucketMeta, blobKeyKnownMAC, s.detectEngine.KnownMACSnapshot()); err != nil {
+		return err
+	}
+	if err := saveBlob(s.db, bucketMeta, blobKeyPolicyLearning, s.detectEngine.PolicyLearningSnapshot()); err != nil {
 		return err
 	}
 

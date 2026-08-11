@@ -29,8 +29,23 @@ func parseDNP3(p core.Packet) (Message, bool) {
 	if src, ok := u16le(b, 6); ok {
 		m.Details["source"] = src
 	}
-	if fc == 2 || (fc >= 3 && fc <= 6) || (fc >= 7 && fc <= 10) || (fc >= 13 && fc <= 19) {
-		m.Details["security_relevant"] = true
+	switch fc {
+	case 2:
+		setOperation(&m, "write", true, true, false)
+	case 3:
+		setOperation(&m, "select", false, true, false)
+	case 4, 5, 6:
+		setOperation(&m, "operate", true, true, false)
+	case 7, 8, 9, 10:
+		setOperation(&m, "process_control", true, true, false)
+	case 13, 14, 18:
+		setOperation(&m, "mode", true, true, true)
+	case 19:
+		setOperation(&m, "config", true, true, false)
+	case 24:
+		setOperation(&m, "time", true, true, false)
+	case 1:
+		setOperation(&m, "read", false, false, false)
 	}
 	return m, true
 }

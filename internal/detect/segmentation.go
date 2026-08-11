@@ -2,185 +2,146 @@ package detect
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
 )
 
-// startSegmentationWatch consumes core.EventPacketParsed to track which
-// VLAN each IP was last seen on, and to flag direct communication
-// between VLANs whose configured Purdue Model levels are more than
-// MaxLevelJump apart — see handleSegmentation's doc comment.
-//
-// Always subscribes, even if segmentation starts disabled — enabled/
-// vlanLevels/maxLevelJump can all change later at runtime (see
-// UpdateSegmentationConfig, pushed from Central when an admin edits
-// the Network Segmentation tab), and if this early-returned instead of
-// subscribing, a later live-enable would have nothing listening to
-// turn on.
-func (e *Engine) startSegmentationWatch(bus *core.EventBus) {
-
-	ch := bus.Subscribe(
-		core.EventPacketParsed,
-	)
-
-	go func() {
-
-		for event := range ch {
-
-			packet, ok := event.Data.(core.Packet)
-
-			if !ok {
-				continue
-			}
-
-			e.handleSegmentation(packet)
-
-		}
-
-	}()
-
+// SegmentationPolicyRule is an explicit source-zone -> destination-zone matrix
+// entry. Wildcards are "*" or "any". The first matching entry wins. An empty
+// policy retains the historical Purdue/VLAN max-level-jump fallback.
+type SegmentationPolicyRule struct {
+	SourceZone      string `json:"source_zone"`
+	DestinationZone string `json:"destination_zone"`
+	Protocol        string `json:"protocol"`
+	Direction       string `json:"direction"`
+	Allowed         bool   `json:"allowed"`
 }
 
-// handleSegmentation flags traffic that crosses more Purdue Model
-// levels directly than config.SensorConfig.Detect.Segmentation.
-// MaxLevelJump allows — e.g. a Level 1 field device (PLC/RTU) talking
-// straight to a Level 4/5 business system, skipping the Level 3/3.5
-// DMZ a properly segmented network would route it through.
-//
-// A single 802.1Q-tagged packet only ever carries *one* VLAN — its
-// own — never both endpoints' VLANs at once, so there's no way to
-// evaluate "does this flow cross levels" from one packet alone. This
-// works around that by remembering the last VLAN each IP was itself
-// seen tagged with (ipVLAN, updated on every packet, independent of
-// whether segmentation checking is what's using a given packet for)
-// and comparing the *source* packet's own VLAN against the
-// *destination* IP's last-known VLAN. Approximate — VLAN tags can be
-// stripped by routing before an inter-VLAN packet reaches the sensor,
-// and a device that changes VLANs takes one packet to catch up — but
-// good enough for the common case of a directly-observed cross-VLAN
-// conversation.
-// UpdateSegmentationConfig replaces the VLAN-level mapping and
-// max-jump threshold used by handleSegmentation, and enables the rule
-// if vlanLevels is non-empty (there's no point receiving a real
-// mapping from Central and having it silently ignored because the
-// sensor's own local config file still says segmentation.enabled:
-// false — configuring VLAN levels via the Network Segmentation tab is
-// itself the "yes, use this" signal). An empty/nil vlanLevels disables
-// the rule again (nothing to check against) without needing a
-// separate "disable" command.
-//
-// Called from cmd/otlens's command handler for the "segmentation.config"
-// command, which Central queues whenever an admin edits a sensor's VLAN
-// configuration — see internal/central's setVLANConfig. Thread-safe:
-// e.vlanLevels is *replaced* wholesale (never mutated in place), so a
-// concurrent handleSegmentation call already holding a reference to the
-// old map is never affected by this update mid-flight.
-func (e *Engine) UpdateSegmentationConfig(vlanLevels map[uint16]float64, maxLevelJump float64) {
+func (e *Engine) startSegmentationWatch(bus *core.EventBus) {
+	ch := bus.Subscribe(core.EventPacketParsed)
+	go func() {
+		for event := range ch {
+			if p, ok := event.Data.(core.Packet); ok {
+				e.handleSegmentation(p)
+			}
+		}
+	}()
+}
 
+func (e *Engine) ConfigureSegmentationPolicy(policy []SegmentationPolicyRule) {
+	e.ipVLANMutex.Lock()
+	e.segmentationPolicy = append([]SegmentationPolicyRule(nil), policy...)
+	// An explicit zone matrix is independently useful even when the legacy
+	// VLAN/Purdue fallback is disabled or no VLAN-level map is configured.
+	e.segmentationEnabled = e.segmentationEnabled || len(policy) > 0
+	e.ipVLANMutex.Unlock()
+}
+
+func (e *Engine) UpdateSegmentationConfig(vlanLevels map[uint16]float64, maxLevelJump float64) {
 	if maxLevelJump <= 0 {
 		maxLevelJump = 1
 	}
-
 	e.ipVLANMutex.Lock()
 	defer e.ipVLANMutex.Unlock()
+	e.vlanLevels, e.maxLevelJump = vlanLevels, maxLevelJump
+	// Explicit asset-zone policy may work even without VLAN levels.
+	e.segmentationEnabled = len(vlanLevels) > 0 || len(e.segmentationPolicy) > 0
+}
 
-	e.vlanLevels = vlanLevels
-	e.maxLevelJump = maxLevelJump
-	e.segmentationEnabled = len(vlanLevels) > 0
+func wildcardMatch(want, got string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	got = strings.ToLower(strings.TrimSpace(got))
+	return want == "" || want == "*" || want == "any" || want == got
+}
 
+func packetPolicyProtocol(p core.Packet) string {
+	if x, ok := otServicePorts[p.DstPort]; ok {
+		return x
+	}
+	if x, ok := remoteManagementPorts[p.DstPort]; ok {
+		return x
+	}
+	if p.L4Protocol != "" {
+		return strings.ToLower(p.L4Protocol)
+	}
+	return strings.ToLower(p.IPProtocol)
+}
+
+func (e *Engine) explicitSegmentationDecision(p core.Packet) (matched, allowed bool, srcZone, dstZone string) {
+	src, sok := e.assetContext(p.SrcIP)
+	dst, dok := e.assetContext(p.DstIP)
+	if !sok || !dok || src.Zone == "" || dst.Zone == "" {
+		return false, false, src.Zone, dst.Zone
+	}
+	proto := packetPolicyProtocol(p)
+	e.ipVLANMutex.RLock()
+	policy := append([]SegmentationPolicyRule(nil), e.segmentationPolicy...)
+	e.ipVLANMutex.RUnlock()
+	for _, r := range policy {
+		if wildcardMatch(r.SourceZone, src.Zone) && wildcardMatch(r.DestinationZone, dst.Zone) && wildcardMatch(r.Protocol, proto) && wildcardMatch(r.Direction, "outbound") {
+			return true, r.Allowed, src.Zone, dst.Zone
+		}
+	}
+	return false, false, src.Zone, dst.Zone
 }
 
 func (e *Engine) handleSegmentation(packet core.Packet) {
-
 	if packet.SrcIP == "" || packet.DstIP == "" {
 		return
 	}
 
-	// segmentationEnabled/vlanLevels/maxLevelJump can all change live —
-	// see UpdateSegmentationConfig — so, unlike most of this engine's
-	// config fields, they're no longer safe to read without a lock.
-	// Reusing ipVLANMutex for this (rather than a separate lock) since
-	// it's already held for every packet here anyway, and these fields
-	// are read together with ipVLAN in the same critical section.
+	if matched, allowed, srcZone, dstZone := e.explicitSegmentationDecision(packet); matched {
+		if allowed {
+			return
+		}
+		e.excludePacketFromLearning(packet, "explicit segmentation policy violation")
+		now := packet.Timestamp
+		if now.IsZero() {
+			now = time.Now()
+		}
+		evidence := map[string]interface{}{"source_ip": packet.SrcIP, "destination_ip": packet.DstIP, "source_zone": srcZone, "destination_zone": dstZone, "protocol": packetPolicyProtocol(packet), "policy": "explicit_zone_matrix"}
+		e.raiseBuiltinAlert(string(AlertSegmentationViolation), AlertSegmentationViolation, "high",
+			fmt.Sprintf("segmentation-zone|%s|%s|%s", packet.SrcIP, packet.DstIP, packetPolicyProtocol(packet)),
+			fmt.Sprintf("Segmentation policy denied %s -> %s (%s -> %s, %s)", packet.SrcIP, packet.DstIP, srcZone, dstZone, packetPolicyProtocol(packet)), packet.SrcIP, evidence, now, alertEpisodeGap)
+		return
+	}
+
 	e.ipVLANMutex.Lock()
-	if !e.segmentationEnabled {
+	if !e.segmentationEnabled || len(e.vlanLevels) == 0 {
 		e.ipVLANMutex.Unlock()
 		return
 	}
 	if e.ipVLAN == nil {
-		e.ipVLAN = make(map[string]uint16)
+		e.ipVLAN = map[string]uint16{}
 	}
 	dstVLAN, dstKnown := e.ipVLAN[packet.DstIP]
 	e.ipVLAN[packet.SrcIP] = packet.VLANID
-	vlanLevels := e.vlanLevels
-	maxLevelJump := e.maxLevelJump
+	vlanLevels, maxJump := e.vlanLevels, e.maxLevelJump
 	e.ipVLANMutex.Unlock()
-
 	if !dstKnown {
 		return
 	}
-
-	srcLevel, srcKnown := vlanLevels[packet.VLANID]
-	dstLevel, dstLevelKnown := vlanLevels[dstVLAN]
-
-	// Both sides need a configured level for this to mean anything —
-	// an unclassified VLAN never participates in a violation check,
-	// rather than being treated as level 0 by default (which would
-	// flag it against everything).
-	if !srcKnown || !dstLevelKnown || packet.VLANID == dstVLAN {
+	srcLevel, sok := vlanLevels[packet.VLANID]
+	dstLevel, dok := vlanLevels[dstVLAN]
+	if !sok || !dok || packet.VLANID == dstVLAN {
 		return
 	}
-
 	jump := srcLevel - dstLevel
 	if jump < 0 {
 		jump = -jump
 	}
-	if jump <= maxLevelJump {
+	if jump <= maxJump {
 		return
 	}
-
-	if !e.isRuleEnabled(string(AlertSegmentationViolation)) {
-		return
+	e.excludePacketFromLearning(packet, "Purdue segmentation policy violation")
+	now := packet.Timestamp
+	if now.IsZero() {
+		now = time.Now()
 	}
-
-	key := fmt.Sprintf("segmentation|%s|%s", packet.SrcIP, packet.DstIP)
-
-	now := time.Now()
-
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	alert, exists := e.alerts[key]
-
-	if exists && alert.Status == AlertStatusApproved {
-		return
-	}
-
-	if !exists {
-
-		alert = &Alert{
-			ID: key,
-
-			Type:     AlertSegmentationViolation,
-			Severity: "high",
-			Message: fmt.Sprintf(
-				"%s (level %.1f) communicated directly with %s (level %.1f), skipping %.1f level(s)",
-				packet.SrcIP, srcLevel, packet.DstIP, dstLevel, jump,
-			),
-
-			IP: packet.SrcIP,
-
-			FirstSeen: now,
-			Status:    AlertStatusNew,
-		}
-
-		e.alerts[key] = alert
-
-		e.logNewAlert(alert)
-
-	}
-
-	e.recordEpisodeAlertLocked(alert, now, alertEpisodeGap)
-
+	evidence := map[string]interface{}{"source_ip": packet.SrcIP, "destination_ip": packet.DstIP, "source_vlan": packet.VLANID, "destination_vlan": dstVLAN, "source_level": srcLevel, "destination_level": dstLevel, "level_jump": jump, "policy": "purdue_fallback"}
+	e.raiseBuiltinAlert(string(AlertSegmentationViolation), AlertSegmentationViolation, "high",
+		fmt.Sprintf("segmentation|%s|%s", packet.SrcIP, packet.DstIP),
+		fmt.Sprintf("%s (level %.1f) communicated directly with %s (level %.1f), jump %.1f exceeds %.1f", packet.SrcIP, srcLevel, packet.DstIP, dstLevel, jump, maxJump), packet.SrcIP, evidence, now, alertEpisodeGap)
 }
