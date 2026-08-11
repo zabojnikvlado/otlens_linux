@@ -154,7 +154,13 @@ function dashboardStatus(sensor){
 function dashboardBars(target,items,total,severity=false){
   const el=document.getElementById(target);if(!el)return;
   if(!items.length||!total){el.innerHTML='<div class="empty-dashboard">No data available</div>';return}
-  el.innerHTML=items.map(([name,count])=>`<div class="bar-row" ${severity?`data-severity="${esc(String(name).toLowerCase())}"`:''}><span class="bar-label" title="${esc(name)}">${esc(name)}</span><span class="bar-track"><span class="bar-fill" style="width:${Math.max(2,Math.round(count/total*100))}%"></span></span><span class="bar-value">${count}</span></div>`).join('');
+  el.innerHTML=items.map(([name,count])=>{
+    const numericCount=Number(count)||0;
+    const percent=Math.max(0,Math.min(100,numericCount/total*100));
+    const value=severity?`${numericCount.toLocaleString()} / ${Number(total).toLocaleString()}`:numericCount.toLocaleString();
+    const title=severity?`${numericCount.toLocaleString()} of ${Number(total).toLocaleString()} open alerts (${percent.toFixed(percent>=10?0:1)}%)`:`${numericCount.toLocaleString()} of ${Number(total).toLocaleString()}`;
+    return `<div class="bar-row" ${severity?`data-severity="${esc(String(name).toLowerCase())}"`:''}><span class="bar-label" title="${esc(name)}">${esc(name)}</span><span class="bar-track" title="${esc(title)}" aria-label="${esc(title)}"><span class="bar-fill" style="width:${numericCount>0?percent:0}%"></span></span><span class="bar-value">${esc(value)}</span></div>`;
+  }).join('');
 }
 function renderDashboard(){
   const sensorCounts={running:0,stopped:0,offline:0};
@@ -232,8 +238,9 @@ function renderDashboard(){
   const severityCounts=new Map(severityOrder.map(x=>[x,hasAuthoritativeSeverity?Number(alertStats['open_'+x]):0]));
   if(!hasAuthoritativeSeverity)openAlerts.forEach(a=>{const key=String(a.Severity??a.severity??'info').toLowerCase();severityCounts.set(key,(severityCounts.get(key)||0)+1)});
   const severityItems=severityOrder.map(x=>[x[0].toUpperCase()+x.slice(1),severityCounts.get(x)||0]).filter(([,n])=>n>0);
-  const severityMax=severityItems.reduce((m,[,n])=>Math.max(m,n),0);
-  dashboardBars('dashboard-severity',severityItems,severityMax,true);
+  const severityTotal=severityItems.reduce((sum,[,n])=>sum+n,0);
+  const severityGrandTotal=Math.max(authoritativeOpen,severityTotal);
+  dashboardBars('dashboard-severity',severityItems,severityGrandTotal,true);
 
   const protocolCounts=new Map();
   (assets||[]).forEach(a=>(a.Protocols??a.protocols??[]).forEach(proto=>{const key=String(proto||'Unknown');protocolCounts.set(key,(protocolCounts.get(key)||0)+1)}));

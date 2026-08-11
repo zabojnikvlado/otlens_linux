@@ -20,6 +20,11 @@
   --crit: #e85d4c;
   --ok: #4caf7d;
 
+  /* Shared vertical rhythm. Keep stacked panels and table regions visually
+     separated across every Central view instead of solving spacing per tab. */
+  --ui-section-gap: 18px;
+  --ui-table-gap: 12px;
+
   --font-display: 'Space Grotesk', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
 }
@@ -356,7 +361,7 @@ main {
 .secondary-btn:hover { background: var(--panel); border-color: var(--ot-dim); }
 .secondary-btn:disabled { opacity: .5; cursor: default; }
 .settings-panel{padding:20px 24px}
-.settings-panel+.settings-panel{margin-top:18px}
+.settings-panel+.settings-panel{margin-top:var(--ui-section-gap)}
 
 .row-acked { opacity: 0.45; }
 
@@ -912,7 +917,7 @@ main {
   }
   .rule-actions { min-width: 0; flex-wrap: wrap; }
 }
-.analysis-form{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin:16px 18px 20px}.analysis-form label{display:flex;flex-direction:column;gap:6px;min-width:220px}.analysis-form fieldset{display:flex;gap:14px;border:1px solid #26364d;border-radius:8px;padding:8px 12px}.analysis-form fieldset .check-label{min-width:auto;flex-direction:row;align-items:center}.analysis-form input[type=file],.analysis-form select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px}.analysis-status-running{color:#fbbf24}.analysis-status-completed{color:#34d399}.analysis-status-failed{color:#fb7185}#view-analysis .scrollable{margin:0 18px 18px;width:auto}
+.analysis-form{display:flex;align-items:end;gap:14px;flex-wrap:wrap;margin:16px 18px 20px}.analysis-form label{display:flex;flex-direction:column;gap:6px;min-width:220px}.analysis-form fieldset{display:flex;gap:14px;border:1px solid #26364d;border-radius:8px;padding:8px 12px}.analysis-form fieldset .check-label{min-width:auto;flex-direction:row;align-items:center}.analysis-form input[type=file],.analysis-form select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px}.analysis-status-running{color:#fbbf24}.analysis-status-completed{color:#34d399}.analysis-status-failed{color:#fb7185}#view-analysis .scrollable{margin:var(--ui-table-gap) 18px 18px;width:auto}
 
 .sensor-state{display:inline-flex;align-items:center;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;background:#253247;color:#cbd5e1}.sensor-state-running{background:rgba(52,211,153,.14);color:#34d399;border:1px solid rgba(52,211,153,.35)}.sensor-state-stopped{background:rgba(251,113,133,.12);color:#fb7185;border:1px solid rgba(251,113,133,.35)}.sensor-state-offline{background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.28)}
 
@@ -962,7 +967,7 @@ main {
 .health-banner{display:flex;align-items:center;gap:11px;min-width:280px;padding:12px 15px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}.health-banner strong,.health-banner small{display:block}.health-banner strong{font-family:var(--font-display);font-size:14px}.health-banner small{color:var(--text-dim);margin-top:2px}.health-indicator{width:12px;height:12px;border-radius:50%;background:var(--text-dim);box-shadow:0 0 0 5px rgba(131,147,171,.12)}.health-healthy .health-indicator{background:var(--ok);box-shadow:0 0 0 5px rgba(76,175,125,.13)}.health-warning .health-indicator{background:var(--warn);box-shadow:0 0 0 5px rgba(232,163,61,.13)}.health-critical .health-indicator{background:var(--crit);box-shadow:0 0 0 5px rgba(232,93,76,.13)}
 .dashboard-kpis{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:12px;margin-bottom:16px}.kpi-card{text-align:left;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;min-height:122px;cursor:pointer;font-family:var(--font-mono);transition:transform .14s,border-color .14s,background .14s}.kpi-card:hover{transform:translateY(-2px);border-color:var(--ot-dim);background:var(--panel-raised)}.kpi-card span,.kpi-card small{display:block}.kpi-card span{text-transform:uppercase;letter-spacing:.06em;font-size:10px;color:var(--text-dim)}.kpi-card strong{display:block;font-family:var(--font-display);font-size:31px;line-height:1.2;margin:10px 0 7px}.kpi-card small{color:var(--text-dim)}.kpi-running strong{color:var(--ok)}.kpi-stopped strong{color:var(--warn)}.kpi-offline strong,.kpi-alerts strong{color:var(--crit)}
 .dashboard-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.dashboard-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;min-height:270px}.dashboard-panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}.dashboard-panel-title h2{font-family:var(--font-display);font-size:15px;margin:0}.dashboard-panel-title button{border:0;background:none;color:var(--ot);font:inherit;cursor:pointer}.dashboard-panel-title button:hover{text-decoration:underline}
-.bar-list{display:grid;gap:13px}.bar-row{display:grid;grid-template-columns:110px 1fr 52px;align-items:center;gap:10px}.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}.bar-track{height:8px;border-radius:99px;background:#0b1220;overflow:hidden}.bar-fill{height:100%;min-width:2px;border-radius:99px;background:var(--ot)}.bar-row[data-severity="critical"] .bar-fill{background:var(--crit)}.bar-row[data-severity="high"] .bar-fill{background:#ef8354}.bar-row[data-severity="medium"] .bar-fill{background:var(--warn)}.bar-row[data-severity="low"] .bar-fill{background:#6b9bd2}.bar-value{text-align:right;color:var(--text)}.empty-dashboard{display:flex;align-items:center;justify-content:center;min-height:165px;color:var(--text-dim);text-align:center}
+.bar-list{display:grid;gap:13px}.bar-row{display:grid;grid-template-columns:110px 1fr 104px;align-items:center;gap:10px}.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}.bar-track{height:8px;border-radius:99px;background:#0b1220;overflow:hidden}.bar-fill{display:block;height:100%;min-width:2px;border-radius:99px;background:var(--ot)}.bar-row[data-severity="critical"] .bar-fill{background:var(--crit)}.bar-row[data-severity="high"] .bar-fill{background:#ef8354}.bar-row[data-severity="medium"] .bar-fill{background:var(--warn)}.bar-row[data-severity="low"] .bar-fill{background:#6b9bd2}.bar-value{text-align:right;color:var(--text)}.empty-dashboard{display:flex;align-items:center;justify-content:center;min-height:165px;color:var(--text-dim);text-align:center}
 .activity-list{display:grid}.activity-item{display:grid;grid-template-columns:76px 90px 1fr;gap:10px;padding:10px 0;border-top:1px solid var(--line)}.activity-item:first-child{border-top:0}.activity-time,.activity-sensor{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-message{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-message .severity{margin-right:7px}.status-list{margin:0}.status-list>div{display:flex;justify-content:space-between;gap:16px;padding:15px 0;border-top:1px solid var(--line)}.status-list>div:first-child{border-top:0}.status-list dt{color:var(--text-dim)}.status-list dd{margin:0;text-align:right}
 @media(max-width:1050px){.dashboard-kpis{grid-template-columns:repeat(2,minmax(180px,1fr))}}@media(max-width:760px){.dashboard-heading{display:grid}.health-banner{min-width:0}.dashboard-kpis,.dashboard-grid{grid-template-columns:1fr}.activity-item{grid-template-columns:66px 1fr}.activity-sensor{display:none}}
 .itot-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.itot-toolbar input{width:150px}.itot-toolbar label input{width:65px}.purdue-overlay{display:grid;gap:6px;margin:10px 0}.purdue-level{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--panel)}.purdue-level h4{margin:0 0 5px}.purdue-assets{display:flex;gap:6px;flex-wrap:wrap}.purdue-asset{border:1px solid var(--line);border-radius:999px;padding:3px 8px;cursor:pointer;background:var(--panel-raised)}.itot-results{display:grid;gap:8px;margin:10px 0}.itot-path{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel)}.itot-path-chain{font-family:monospace;overflow:auto;white-space:nowrap}.itot-path-meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;color:var(--text-dim)}
@@ -1109,15 +1114,15 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 #data-backup-name::placeholder { color: var(--text-dim); opacity: .85; }
 #table-backups td:nth-child(2),
 #table-backups th:nth-child(2) { color: var(--text); background: transparent; }
-#view-threatintel > .flows-toolbar { margin: 16px 0 12px; }
+#view-threatintel > .flows-toolbar { margin: var(--ui-section-gap) 0 12px; }
 #view-threatintel .ti-table-panel {
   box-sizing: border-box;
   width: 100%;
   margin: 0;
   padding-top: 0;
 }
-#view-threatintel .ti-table-panel + .ti-table-panel { margin-top: 18px; }
-#view-threatintel .ti-table-panel:last-child { margin-bottom: 18px; }
+#view-threatintel .ti-table-panel + .ti-table-panel { margin-top: var(--ui-section-gap); }
+#view-threatintel .ti-table-panel:last-child { margin-bottom: var(--ui-section-gap); }
 #view-threatintel .ti-table-panel h2 { margin: 0; padding: 16px 18px 12px; }
 #view-threatintel .ti-table-panel .data-table { width: 100%; }
 
@@ -1143,7 +1148,7 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 
 .risk-history-chart{height:150px;display:flex;align-items:flex-end;gap:3px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--panel-raised);margin-bottom:18px}.risk-history-chart i{display:block;flex:1;min-width:3px;background:var(--ot);border-radius:3px 3px 0 0;opacity:.8}.risk-remediation{display:grid;gap:8px;padding-left:22px}.risk-remediation li{padding:8px;border-bottom:1px solid var(--line)}.risk-exception-form{display:grid;gap:10px}.risk-exception-form label{display:grid;gap:5px;color:var(--text-dim);font-size:12px}.risk-exception-form input,.risk-exception-form select,.risk-exception-form textarea{width:100%;box-sizing:border-box}.risk-exception-form textarea{min-height:80px}
 .live-notification-center{position:fixed;top:64px;right:18px;z-index:1300;width:min(430px,calc(100vw - 28px));max-height:70vh;overflow:auto;background:rgba(10,18,32,.98);border:1px solid var(--border,#334155);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.45);padding:12px}.notification-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.notification-row{width:100%;display:grid;grid-template-columns:auto 1fr;gap:4px 9px;text-align:left;padding:10px;border:0;border-top:1px solid rgba(148,163,184,.15);background:transparent;color:inherit;cursor:pointer}.notification-row strong{font-size:.84rem}.notification-row small{grid-column:2;color:#94a3b8}.notification-row.acknowledged{opacity:.55}.incident-presence{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;margin-bottom:10px;border:1px solid rgba(56,189,248,.28);border-radius:9px;background:rgba(14,116,144,.09);font-size:.78rem}.incident-presence span:not(:first-child){padding:3px 7px;border-radius:999px;background:rgba(56,189,248,.15)}
-.contact-graph{display:flex;gap:.6rem;align-items:center;overflow:auto;padding:1rem;margin:.75rem 0;border:1px solid var(--border);border-radius:10px;min-height:92px}.contact-node{min-width:120px;padding:.65rem;border:1px solid var(--border);border-radius:9px;background:var(--panel);text-align:center}.contact-arrow{opacity:.55;font-size:1.3rem}.ruleset-rule-list{max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:.75rem}.ruleset-panel{margin-bottom:1rem}
+.contact-graph{display:flex;gap:.6rem;align-items:center;overflow:auto;padding:1rem;margin:.75rem 0;border:1px solid var(--border);border-radius:10px;min-height:92px}.contact-node{min-width:120px;padding:.65rem;border:1px solid var(--border);border-radius:9px;background:var(--panel);text-align:center}.contact-arrow{opacity:.55;font-size:1.3rem}.ruleset-rule-list{max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:.75rem}.ruleset-panel{margin-bottom:0}
 #table-reports tr.is-deleting{opacity:.48;pointer-events:none;transition:opacity .16s ease}
 #table-reports .report-actions{white-space:nowrap}
 
@@ -1166,3 +1171,71 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 
 @media(max-width:1050px){.rules-table th:nth-child(3),.rules-table td:nth-child(3),.rules-table th:nth-child(6),.rules-table td:nth-child(6){display:none}.rules-table th:nth-child(1),.rules-table td:nth-child(1){width:36%}.rules-table th:nth-child(2),.rules-table td:nth-child(2){width:14%}.rules-table th:nth-child(4),.rules-table td:nth-child(4){width:12%}.rules-table th:nth-child(5),.rules-table td:nth-child(5){width:12%}.rules-table th:nth-child(7),.rules-table td:nth-child(7){width:17%}.rules-table th:nth-child(8),.rules-table td:nth-child(8){width:9%}}
 @media(max-width:760px){.rules-main-toolbar .rules-toolbar-actions{width:100%;justify-content:flex-start}.rules-table th:nth-child(2),.rules-table td:nth-child(2),.rules-table th:nth-child(7),.rules-table td:nth-child(7){display:none}.rules-table th:nth-child(1),.rules-table td:nth-child(1){width:48%}.rules-table th:nth-child(4),.rules-table td:nth-child(4){width:17%}.rules-table th:nth-child(5),.rules-table td:nth-child(5){width:18%}.rules-table th:nth-child(8),.rules-table td:nth-child(8){width:17%}.rule-primary strong{white-space:normal}.rule-detail-layout,.ruleset-form-grid{grid-template-columns:1fr}.rule-detail-header{display:grid;gap:12px}.rule-detail-header-badges{justify-content:flex-start}.rule-detail-wide{grid-column:auto}.ruleset-rule-list{grid-template-columns:1fr}}
+
+
+/* v18 — shared vertical rhythm for tables and stacked content.
+   Table-heavy screens accumulated one-off margins over time, which left some
+   sections touching while others had different spacing. These rules establish
+   one Central-wide rhythm without adding horizontal scrolling or changing table
+   semantics. Toolbars stay visually attached to the table they control. */
+.view > .panel + .panel {
+  margin-top: var(--ui-section-gap);
+}
+
+/* A toolbar following a finished panel belongs to the next section, so create
+   the section break before the toolbar rather than between toolbar and table. */
+.view > .panel + .flows-toolbar,
+.view > .panel + .analysis-form {
+  margin-top: var(--ui-section-gap);
+}
+
+/* Explanatory copy that introduces a following table should have a compact,
+   consistent separation from the table region. */
+.view > .rules-help + .panel,
+.view > .rules-help + .scrollable {
+  margin-top: var(--ui-table-gap);
+}
+
+/* Tables nested in panels/modals get breathing room from their local heading,
+   form or toolbar. The pager remains attached to the table itself. */
+.panel > .scrollable:has(> .data-table),
+.panel > .rules-table-wrap:has(> .data-table),
+.modal-card > .scrollable:has(> .data-table),
+.modal-card > .rules-table-wrap:has(> .data-table) {
+  margin-top: var(--ui-table-gap);
+}
+
+/* A table-only panel directly after its controlling toolbar should remain one
+   visual unit; don't introduce a second section gap there. */
+.view > .flows-toolbar + .panel:has(> .data-table),
+.view > .flows-toolbar + .panel:has(> .scrollable > .data-table),
+.view > .analysis-form + .panel:has(.data-table) {
+  margin-top: 0;
+}
+
+/* Nested feature areas use the same rhythm as top-level views. */
+.recon-panel > .panel + .panel,
+.modal-card > .panel + .panel {
+  margin-top: var(--ui-section-gap);
+}
+
+
+/* v20 — generated pagers are siblings of table panels. Keep the pager attached
+   to its table, then restore the shared section gap before whatever follows.
+   This closes the spacing hole that appeared on Threat Intelligence and any
+   other view where DataTables inserts a pager between two originally adjacent
+   panels. */
+.view > .table-pager + .panel,
+.view > .table-pager + .scrollable,
+.view > .table-pager + .flows-toolbar,
+.view > .table-pager + .analysis-form,
+.view > .table-pager + .rules-help {
+  margin-top: var(--ui-section-gap);
+}
+
+/* Severity bars show the share of all open alerts. The fill must be a block so
+   percentage widths actually render; inline spans ignored the width and left
+   the track looking completely black. */
+#dashboard-severity .bar-value {
+  white-space: nowrap;
+}
