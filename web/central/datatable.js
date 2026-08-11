@@ -81,7 +81,13 @@
     pager.className='table-pager';
     pager.dataset.table=table.id;
     pager.innerHTML=`<label class="table-page-size">Rows per page <select aria-label="Rows per page"><option value="10">10</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select></label><span class="table-page-info"></span><div class="table-page-actions"><button type="button" class="secondary-btn table-page-prev">Previous</button><span class="table-page-number"></span><button type="button" class="secondary-btn table-page-next">Next</button></div>`;
-    table.closest('.scrollable').insertAdjacentElement('afterend',pager);
+    // Most tables live inside .scrollable, but compact/responsive tables
+    // (notably Detection Rules) intentionally do not. A missing scroll
+    // wrapper must never abort all UI bootstrap — in v15 that exception
+    // happened before the login submit handler was registered, making the
+    // login form appear completely inert.
+    const anchor=table.closest('.scrollable,.rules-table-wrap')||table;
+    anchor.insertAdjacentElement('afterend',pager);
     const select=pager.querySelector('select');
     select.value=state.pageSize;
     select.addEventListener('change',()=>{
@@ -170,7 +176,12 @@
     saveState(id,state);
   }
 
-  function init(){document.querySelectorAll('table.data-table[id]').forEach(initializeTable)}
+  function init(){
+    document.querySelectorAll('table.data-table[id]').forEach(table=>{
+      try{initializeTable(table)}
+      catch(error){console.error(`Failed to initialize data table ${table.id}:`,error)}
+    });
+  }
 
   window.OTDataTables={init,refresh};
 })();

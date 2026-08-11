@@ -85,14 +85,17 @@ async function refreshDomains(domains,force=false){
   if(due.includes('users')&&can('users_roles_manage'))try{await refreshUsersAndRoles()}catch(e){console.error('refresh users/roles',e)}
   due.forEach(d=>domainLoadedAt.set(d,Date.now()));
   const rejected=paths.map(path=>results[path]?.status==='rejected'?{path,reason:results[path].reason}:null).filter(Boolean);if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
-  if(!rejected.length)setAPIConnection(true);else{console.error('Central API refresh failures:',rejected);const unauthorized=rejected.every(x=>x.reason?.status===401);setAPIConnection(false,unauthorized?'authentication required':`partial: ${rejected.map(x=>x.path).join(', ')}`);if(unauthorized)showLogin()}
+  if(!rejected.length)setAPIConnection(true);else{console.error('Central API refresh failures:',rejected);const unauthorized=rejected.every(x=>x.reason?.status===401);setAPIConnection(false,unauthorized?'authentication required':`partial: ${rejected.map(x=>x.path).join(', ')}`);if(unauthorized){showLogin();const el=document.getElementById('login-error');if(el)el.textContent='Your session expired. Please sign in again.'}}
 }
 async function refreshView(tab=activeTab(),force=false){return refreshDomains([tab],force)}
 async function refreshActiveView(force=false){return refreshView(activeTab(),force)}
 // Compatibility entry point for older handlers: now refreshes only the active view.
 async function refreshAll(){return refreshActiveView(true)}
 
-OTDataTables.init();
+// Non-authenticated UI must remain usable even if an optional table widget
+// regresses. Authentication handlers are registered below regardless of a
+// single table failing to initialise.
+try{OTDataTables.init()}catch(error){console.error('Data table bootstrap failed:',error)}
 const tableRenderBindings=[
   ['renderAssets','table-assets'],
   ['renderTags','table-tags'],
@@ -198,16 +201,32 @@ async function boot(){
 
 document.getElementById('login-form').addEventListener('submit',async e=>{
   e.preventDefault();
-  const errEl=document.getElementById('login-error');errEl.textContent='';
+  const form=e.currentTarget;
+  const errEl=document.getElementById('login-error');
+  const submit=form.querySelector('button[type="submit"]');
+  errEl.textContent='';
   const username=document.getElementById('login-username').value,password=document.getElementById('login-password').value;
+  if(submit){submit.disabled=true;submit.dataset.originalText=submit.textContent;submit.textContent='Signing in…'}
   try{
-    const res=await api('/login',{method:'POST',body:JSON.stringify({username,password})});
-    applyIdentity(res);
-    document.getElementById('login-form').reset();
+    await api('/login',{method:'POST',body:JSON.stringify({username,password})});
+    // Verify that the browser accepted the session cookie before hiding the
+    // login screen. Without this check a valid password + rejected Secure
+    // cookie looked exactly like a silent login failure.
+    const me=await api('/me');
+    applyIdentity(me);
+    form.reset();
     showApp();
     startPolling();
   }catch(err){
-    errEl.textContent=err.parsed?.error||'Login failed';
+    if(err.status===401&&err.parsed?.error==='unauthorized'){
+      errEl.textContent=location.protocol==='https:'
+        ?'Login succeeded but the session was not accepted. Clear the OTLens site cookies and try again.'
+        :'Login session could not be established. Open Central over HTTPS or disable web TLS only for isolated development.';
+    }else{
+      errEl.textContent=err.parsed?.error||err.message||'Login failed';
+    }
+  }finally{
+    if(submit){submit.disabled=false;submit.textContent=submit.dataset.originalText||'Sign in';delete submit.dataset.originalText}
   }
 });
 document.getElementById('logout-btn').onclick=async()=>{
