@@ -387,19 +387,20 @@ func baselineKey(
 // BaselineStatus reports the current learning/monitoring state, so
 // it's visible over the API rather than only in the startup logs.
 type BaselineStatus struct {
-	Enabled         bool          `json:"enabled"`
-	Mode            BaselineMode  `json:"mode"`
-	LearningStarted time.Time     `json:"learning_started"`
-	LearningEndsAt  time.Time     `json:"learning_ends_at"`
-	MinimumDuration time.Duration `json:"minimum_duration"`
-	Readiness       float64       `json:"readiness"`
-	Ready           bool          `json:"ready"`
-	ReadinessReason string        `json:"readiness_reason,omitempty"`
-	LearnedPatterns int           `json:"learned_patterns"`
-	LearnedAssets   int           `json:"learned_assets"`
-	MatureAssets    int           `json:"mature_assets"`
-	LearningAssets  int           `json:"learning_assets"`
-	NewPatternRate  float64       `json:"new_pattern_rate"`
+	Enabled                   bool          `json:"enabled"`
+	ManualCompletionSupported bool          `json:"manual_completion_supported"`
+	Mode                      BaselineMode  `json:"mode"`
+	LearningStarted           time.Time     `json:"learning_started"`
+	LearningEndsAt            time.Time     `json:"learning_ends_at"`
+	MinimumDuration           time.Duration `json:"minimum_duration"`
+	Readiness                 float64       `json:"readiness"`
+	Ready                     bool          `json:"ready"`
+	ReadinessReason           string        `json:"readiness_reason,omitempty"`
+	LearnedPatterns           int           `json:"learned_patterns"`
+	LearnedAssets             int           `json:"learned_assets"`
+	MatureAssets              int           `json:"mature_assets"`
+	LearningAssets            int           `json:"learning_assets"`
+	NewPatternRate            float64       `json:"new_pattern_rate"`
 }
 
 func (e *Engine) BaselineStatus() BaselineStatus {
@@ -448,5 +449,5 @@ func (e *Engine) BaselineStatus() BaselineStatus {
 	if len(e.learnedPatterns) > 0 {
 		novelty = float64(recent) / float64(len(e.learnedPatterns))
 	}
-	return BaselineStatus{Enabled: e.baselineEnabled, Mode: mode, LearningStarted: e.learningStarted, LearningEndsAt: e.learningStarted.Add(e.learningDuration), MinimumDuration: e.learningDuration, Readiness: readiness, Ready: ready, ReadinessReason: reason, LearnedPatterns: len(e.learnedPatterns), LearnedAssets: len(e.learnedAssets), MatureAssets: mature, LearningAssets: len(e.learnedAssets) - mature, NewPatternRate: novelty}
+	return BaselineStatus{Enabled: e.baselineEnabled, ManualCompletionSupported: true, Mode: mode, LearningStarted: e.learningStarted, LearningEndsAt: e.learningStarted.Add(e.learningDuration), MinimumDuration: e.learningDuration, Readiness: readiness, Ready: ready, ReadinessReason: reason, LearnedPatterns: len(e.learnedPatterns), LearnedAssets: len(e.learnedAssets), MatureAssets: mature, LearningAssets: len(e.learnedAssets) - mature, NewPatternRate: novelty}
 }

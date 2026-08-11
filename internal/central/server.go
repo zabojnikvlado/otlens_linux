@@ -2164,6 +2164,11 @@ func (s *Server) baseline(c *gin.Context) {
 		respondInternalError(c, e)
 		return
 	}
+	pendingLearning, e := s.Repo.PendingCommandSensors(c.Request.Context(), "sensor.learning.complete")
+	if e != nil {
+		respondInternalError(c, e)
+		return
+	}
 	out := make([]map[string]interface{}, 0, len(registered))
 	seen := make(map[string]struct{}, len(registered))
 	for _, x := range v {
@@ -2171,6 +2176,7 @@ func (s *Server) baseline(c *gin.Context) {
 		if json.Unmarshal(x.Baseline, &row) == nil {
 			row["SensorID"] = x.SensorID
 			row["telemetry_available"] = true
+			row["learning_completion_pending"] = pendingLearning[x.SensorID]
 			out = append(out, row)
 			seen[x.SensorID] = struct{}{}
 		}
@@ -2183,9 +2189,10 @@ func (s *Server) baseline(c *gin.Context) {
 			continue
 		}
 		out = append(out, map[string]interface{}{
-			"SensorID":            sensor.ID,
-			"sensor_name":         sensor.Name,
-			"telemetry_available": false,
+			"SensorID":                    sensor.ID,
+			"sensor_name":                 sensor.Name,
+			"telemetry_available":         false,
+			"learning_completion_pending": pendingLearning[sensor.ID],
 		})
 	}
 	c.JSON(200, out)
@@ -2228,15 +2235,17 @@ func (s *Server) completeSensorLearning(c *gin.Context) {
 		return
 	}
 	type learningStatus struct {
-		Enabled         bool      `json:"enabled"`
-		Mode            string    `json:"mode"`
-		LearningStarted time.Time `json:"learning_started"`
-		LearningEndsAt  time.Time `json:"learning_ends_at"`
-		Behavior        struct {
-			Enabled         bool      `json:"enabled"`
-			Mode            string    `json:"mode"`
-			LearningStarted time.Time `json:"learning_started"`
-			LearningEndsAt  time.Time `json:"learning_ends_at"`
+		Enabled                   bool      `json:"enabled"`
+		ManualCompletionSupported bool      `json:"manual_completion_supported"`
+		Mode                      string    `json:"mode"`
+		LearningStarted           time.Time `json:"learning_started"`
+		LearningEndsAt            time.Time `json:"learning_ends_at"`
+		Behavior                  struct {
+			Enabled                   bool      `json:"enabled"`
+			ManualCompletionSupported bool      `json:"manual_completion_supported"`
+			Mode                      string    `json:"mode"`
+			LearningStarted           time.Time `json:"learning_started"`
+			LearningEndsAt            time.Time `json:"learning_ends_at"`
 		} `json:"behavior"`
 	}
 
@@ -2255,6 +2264,13 @@ func (s *Server) completeSensorLearning(c *gin.Context) {
 	}
 	if !found {
 		c.JSON(http.StatusNotFound, gin.H{"error": "sensor telemetry not found"})
+		return
+	}
+	if pending, err := s.Repo.HasPendingCommand(c.Request.Context(), sensorID, "sensor.learning.complete"); err != nil {
+		respondInternalError(c, err)
+		return
+	} else if pending {
+		c.JSON(http.StatusAccepted, gin.H{"status": "pending", "sensor_id": sensorID, "force": req.Force, "command": "sensor.learning.complete", "capability_verified": status.ManualCompletionSupported || status.Behavior.ManualCompletionSupported})
 		return
 	}
 
@@ -2302,7 +2318,7 @@ func (s *Server) completeSensorLearning(c *gin.Context) {
 		action = "sensor learning force-completion queued"
 	}
 	s.logAudit(c, identityFromContext(c).Username, action, sensorID)
-	c.JSON(http.StatusAccepted, gin.H{"status": "queued", "sensor_id": sensorID, "force": req.Force, "command": "sensor.learning.complete"})
+	c.JSON(http.StatusAccepted, gin.H{"status": "queued", "sensor_id": sensorID, "force": req.Force, "command": "sensor.learning.complete", "capability_verified": status.ManualCompletionSupported || status.Behavior.ManualCompletionSupported})
 }
 
 // dashboardTrends backs the Dashboard tab's trend charts — 30 days of
@@ -3472,7 +3488,7 @@ func (s *Server) dnsObservations(c *gin.Context) {
 			limit = n
 		}
 	}
-	rows, err := s.Repo.ListDNSObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("query")), strings.TrimSpace(c.Query("client_ip")), limit)
+	rows, err := s.Repo.ListDNSObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("query")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("search")), limit)
 	if err != nil {
 		respondInternalError(c, err)
 		return
@@ -3487,7 +3503,7 @@ func (s *Server) smbObservations(c *gin.Context) {
 			limit = n
 		}
 	}
-	rows, err := s.Repo.ListSMBObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), limit)
+	rows, err := s.Repo.ListSMBObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), strings.TrimSpace(c.Query("search")), limit)
 	if err != nil {
 		respondInternalError(c, err)
 		return

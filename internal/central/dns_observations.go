@@ -51,11 +51,17 @@ type DNSObservationRow struct {
 	TTL          int64           `json:"ttl"`
 }
 
-func (r *Repository) ListDNSObservations(ctx context.Context, sensorID, queryName, clientIP string, limit int) ([]DNSObservationRow, error) {
+func (r *Repository) ListDNSObservations(ctx context.Context, sensorID, queryName, clientIP, search string, limit int) ([]DNSObservationRow, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,observed_at,client_ip,server_ip,query_name,query_type,response_code,is_response,answers,cnames,ttl FROM dns_observations WHERE ($1='' OR sensor_id=$1) AND ($2='' OR query_name ILIKE '%'||$2||'%') AND ($3='' OR client_ip=$3) ORDER BY observed_at DESC LIMIT $4`, sensorID, queryName, clientIP, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,observed_at,client_ip,server_ip,query_name,query_type,response_code,is_response,answers,cnames,ttl
+FROM dns_observations
+WHERE ($1='' OR sensor_id=$1)
+  AND ($2='' OR query_name ILIKE '%'||$2||'%')
+  AND ($3='' OR client_ip=$3)
+  AND ($4='' OR query_name ILIKE '%'||$4||'%' OR client_ip ILIKE '%'||$4||'%' OR server_ip ILIKE '%'||$4||'%' OR answers::text ILIKE '%'||$4||'%')
+ORDER BY observed_at DESC LIMIT $5`, sensorID, queryName, clientIP, search, limit)
 	if err != nil {
 		return nil, err
 	}

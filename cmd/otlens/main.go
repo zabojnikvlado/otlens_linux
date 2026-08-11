@@ -300,10 +300,13 @@ func main() {
 					}
 				case "sensor.learning.complete":
 					force := strings.EqualFold(strings.TrimSpace(command.Target), "force")
+					log.Printf("OTLens sensor learning completion command received (id=%d forced=%t)", command.ID, force)
 					if err := application.CompleteLearning(force); err != nil {
-						log.Printf("OTLens sensor learning completion failed: %v", err)
+						log.Printf("OTLens sensor learning completion failed (id=%d): %v", command.ID, err)
 					} else {
-						log.Printf("OTLens sensor learning completed (forced=%t)", force)
+						legacy := application.DetectEngine.BaselineStatus()
+						behavior := application.BehaviorBaseline.Status(time.Now().UTC())
+						log.Printf("OTLens sensor learning completed (id=%d forced=%t legacy=%s behavior=%s)", command.ID, force, legacy.Mode, behavior.Mode)
 					}
 				case "sensor.backup.create":
 					name := strings.TrimSpace(command.Target)

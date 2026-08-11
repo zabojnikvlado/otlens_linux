@@ -20,7 +20,7 @@ const DOMAIN_PATHS={
   nba:['/behavior-findings','/baseline','/behavior-overview','/sensors'],
   incidents:['/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],users:[],settings:['/settings'],audit:['/audit'],
-  topology:['/udp-conversations?active=true','/behavior-overview'],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],udp:[],smb:['/smb-observations?limit=1000'],threatintel:[]
+  topology:['/udp-conversations?active=true','/behavior-overview'],purdue:['/assets'],segmentation:['/sensors'],dns:[],udp:[],smb:[],threatintel:[]
 };
 function activeTab(){return document.querySelector('.tab.active')?.dataset.tab||'dashboard'}
 function loadPath(path){if(pendingLoads.has(path))return pendingLoads.get(path);const q=api(path).finally(()=>pendingLoads.delete(path));pendingLoads.set(path,q);return q}

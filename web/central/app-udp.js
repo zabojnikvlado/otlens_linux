@@ -57,7 +57,8 @@ function filteredUDPConversations(){
 function renderUDPConversations(){
   const rows=filteredUDPConversations(),count=document.getElementById('udp-count'),body=document.querySelector('#table-udp tbody');if(!body)return;
   count.textContent=`${rows.length} conversation(s)`;
-  body.innerHTML=rows.map(x=>{const key=x.Key||{},index=udpConversations.indexOf(x);return `<tr data-udp-index="${index}"><td>${time(x.StartedAt)}</td><td>${time(x.LastSeenAt)}</td><td>${udpDuration(x.duration_millis)}</td><td>${esc(x.SensorID)}</td><td>${udpProtocolBadge(x.Protocol)}</td><td>${esc(key.EndpointAIP)}:${esc(key.EndpointAPort)}</td><td>${esc(key.EndpointBIP)}:${esc(key.EndpointBPort)}</td><td>${Number(x.Packets||0).toLocaleString()}</td><td>${humanBytes(Number(x.Bytes||0))}</td><td>${udpStatusBadge(x.status)}</td></tr>`}).join('')||'<tr><td colspan="10">No matching UDP conversations</td></tr>';
+  body.innerHTML=rows.map(x=>{const key=x.Key||{},index=udpConversations.indexOf(x);return `<tr data-udp-index="${index}"><td>${time(x.StartedAt)}</td><td>${time(x.LastSeenAt)}</td><td>${udpDuration(x.duration_millis)}</td><td>${esc(x.SensorID)}</td><td>${udpProtocolBadge(x.Protocol)}</td><td>${esc(key.EndpointAIP)}:${esc(key.EndpointAPort)}</td><td>${esc(key.EndpointBIP)}:${esc(key.EndpointBPort)}</td><td>${Number(x.Packets||0).toLocaleString()}</td><td>${humanBytes(Number(x.Bytes||0))}</td><td>${udpStatusBadge(x.status)}</td></tr>`}).join('');
+  window.OTDataTables?.refresh('table-udp');
 }
 async function openUDPConversation(index){
   const item=udpConversations[index];if(!item)return;let detail=item;

@@ -1329,3 +1329,27 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 #table-nba .behavior-details{padding:6px 9px}
 .candidate-detail-list dd{max-width:min(720px,65vw);white-space:normal;overflow-wrap:anywhere}
 @media(max-width:800px){.candidate-detail-list dd{max-width:56vw}.behavior-row-actions{gap:5px}}
+
+/* Network Behavior learning quality: keep each metric self-contained instead
+   of letting inline span/strong/small text run into neighbouring columns. */
+.learning-quality-actions .rules-help{padding:0;margin:0 4px 0 0}
+.learning-quality-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:8px 18px 18px;background:var(--line);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.learning-quality-grid>div{min-width:0;background:var(--panel-raised);padding:14px 16px;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+.learning-quality-grid span,.learning-quality-grid strong,.learning-quality-grid small{display:block;max-width:100%;overflow-wrap:anywhere}
+.learning-quality-grid span{text-transform:uppercase;letter-spacing:.06em;font-size:10px;color:var(--text-dim)}
+.learning-quality-grid strong{font-family:var(--font-display);font-size:21px;line-height:1.15;color:var(--text)}
+.learning-quality-grid small{font-size:10px;line-height:1.35;color:var(--text-dim)}
+.behavior-findings-table{table-layout:fixed;width:100%}
+.behavior-findings-table th,.behavior-findings-table td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle}
+.behavior-findings-table th:nth-child(1),.behavior-findings-table td:nth-child(1){width:14%}
+.behavior-findings-table th:nth-child(2),.behavior-findings-table td:nth-child(2){width:11%}
+.behavior-findings-table th:nth-child(3),.behavior-findings-table td:nth-child(3){width:12%}
+.behavior-findings-table th:nth-child(4),.behavior-findings-table td:nth-child(4){width:20%}
+.behavior-findings-table th:nth-child(5),.behavior-findings-table td:nth-child(5){width:9%}
+.behavior-findings-table th:nth-child(6),.behavior-findings-table td:nth-child(6){width:8%}
+.behavior-findings-table th:nth-child(7),.behavior-findings-table td:nth-child(7){width:12%}
+.behavior-findings-table th:nth-child(8),.behavior-findings-table td:nth-child(8){width:14%}
+.behavior-type-badge{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:rgba(63,191,176,.08);color:var(--ot);font-size:10px;line-height:1.35}
+.behavior-type-badge small{color:var(--text-dim);font-size:9px}
+@media(max-width:1050px){.learning-quality-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.behavior-findings-table th:nth-child(1),.behavior-findings-table td:nth-child(1){display:none}.behavior-findings-table th:nth-child(4),.behavior-findings-table td:nth-child(4){width:26%}}
+@media(max-width:680px){.learning-quality-grid{grid-template-columns:1fr;margin-left:12px;margin-right:12px}.learning-quality-actions{justify-content:flex-start}.learning-quality-actions select{max-width:100%;width:100%}.behavior-findings-table th:nth-child(2),.behavior-findings-table td:nth-child(2),.behavior-findings-table th:nth-child(7),.behavior-findings-table td:nth-child(7){display:none}.behavior-findings-table th:nth-child(3),.behavior-findings-table td:nth-child(3){width:25%}.behavior-findings-table th:nth-child(4),.behavior-findings-table td:nth-child(4){width:35%}.behavior-findings-table th:nth-child(5),.behavior-findings-table td:nth-child(5){width:16%}.behavior-findings-table th:nth-child(6),.behavior-findings-table td:nth-child(6){width:10%}.behavior-findings-table th:nth-child(8),.behavior-findings-table td:nth-child(8){width:14%}}

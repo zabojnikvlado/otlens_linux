@@ -3,7 +3,29 @@ function nbaValue(item,name,fallback=''){const value=item[name]??item[name[0].to
 function nbaID(item){return nbaValue(item,'AlertKey',nbaValue(item,'ID',''))}
 function nbaPercent(value){const n=Number(value||0);return `${Math.round((n<=1?n*100:n)*10)/10}%`}
 function nbaScore(value){const n=Number(value||0);return Number.isFinite(n)?n.toFixed(1):'—'}
-function nbaReasons(value){return Array.isArray(value)?value.join(', '):String(value||'—')}
+function nbaReasons(value){return Array.isArray(value)?value.map(v=>typeof v==='string'?v:(v?.kind||v?.message||JSON.stringify(v))).join(', '):String(value||'—')}
+const behaviorFindingTypeLabels={
+  'correlation:new_external_peer':'New external peer','correlation:new_peer_and_protocol':'New peer + protocol','correlation:unusual_time_and_port':'Unusual time + service','correlation:risky_direction_change':'Risky direction change',
+  new_flow:'New communication',new_asset_behavior:'New asset behavior',new_peer:'New peer',new_protocol:'New protocol',new_port:'New service / port',unusual_time:'Unusual time',new_direction:'Direction change',packet_size_deviation:'Packet-size deviation',rtt_deviation:'RTT deviation',
+  external_destination:'External destination',asset_criticality:'Critical asset context',purdue_level:'Purdue risk context',honeypot:'Honeypot interaction',inter_vlan:'Inter-VLAN behavior',low_baseline_confidence:'Low baseline confidence',
+  maintenance_window:'Maintenance window',approved_peer:'Approved peer context'
+};
+const behaviorFindingTypePriority=['correlation:new_external_peer','correlation:new_peer_and_protocol','correlation:unusual_time_and_port','correlation:risky_direction_change','new_asset_behavior','new_flow','new_peer','new_protocol','new_port','unusual_time','new_direction','packet_size_deviation','rtt_deviation','external_destination','honeypot','inter_vlan','asset_criticality','purdue_level','low_baseline_confidence','maintenance_window','approved_peer'];
+function behaviorFindingSignals(item){
+  const evidence=nbaEvidence(item),raw=Array.isArray(evidence.reasons)?evidence.reasons:[];
+  return [...new Set(raw.map(v=>{
+    const value=String(typeof v==='string'?v:(v?.kind||v?.message||'')).trim();
+    const normalized=value.toLowerCase().replace(/[\s-]+/g,'_');
+    return behaviorFindingTypeLabels[normalized]?normalized:value;
+  }).filter(Boolean))];
+}
+function behaviorFindingType(item){
+  const signals=behaviorFindingSignals(item),primary=behaviorFindingTypePriority.find(kind=>signals.includes(kind))||signals[0]||'';
+  let label=behaviorFindingTypeLabels[primary]||primary.replace(/^correlation:/,'').replaceAll('_',' ')||'Behavior anomaly';
+  if(String(nbaValue(item,'Type','')).toLowerCase()==='behavior_incident_candidate')label=`Incident · ${label}`;
+  const secondary=signals.filter(kind=>kind!==primary&&behaviorFindingTypeLabels[kind]);
+  return {label,signals,secondaryCount:secondary.length};
+}
 function behaviorProfile(sensor,ip){return (behaviorOverview.profiles||[]).find(x=>x.sensor_id===sensor&&x.asset_ip===ip)}
 function behaviorState(profile){return profile?.state||((behaviorOverview.learning_complete&&Number(behaviorOverview.coverage)>=99.5)?'healthy':'learning')}
 function behaviorBadge(profile){const state=behaviorState(profile),score=profile?Math.round(Number(profile.health_score||0)):'—';return `<span class="behavior-badge behavior-${esc(state)}" title="${esc(profile?.top_reason||state)}">${esc(score)}${score==='—'?'':' health'}</span>`}
@@ -21,31 +43,33 @@ function renderBehaviorFindings(){
   const needle=(document.getElementById('nba-filter')?.value||'').trim().toLowerCase();
   const severity=(document.getElementById('nba-severity')?.value||'').toLowerCase();
   const rows=behaviorFindings.filter(item=>{
-    const evidence=nbaEvidence(item);
-    const hay=[nbaID(item),nbaValue(item,'SensorID'),nbaValue(item,'IP'),nbaValue(item,'Message'),nbaReasons(evidence.reasons)].join(' ').toLowerCase();
+    const evidence=nbaEvidence(item),type=behaviorFindingType(item);
+    const hay=[nbaID(item),nbaValue(item,'SensorID'),nbaValue(item,'IP'),nbaValue(item,'Message'),type.label,type.signals.join(' '),nbaReasons(evidence.reasons)].join(' ').toLowerCase();
     return(!needle||hay.includes(needle))&&(!severity||String(nbaValue(item,'Severity')).toLowerCase()===severity);
   });
   const body=document.querySelector('#table-nba tbody');
   if(!body)return;
   body.innerHTML=rows.map(item=>{
     const evidence=nbaEvidence(item);
-    const id=nbaID(item);
-    return `<tr class="clickable-row nba-row" data-id="${esc(id)}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td><button class="secondary-btn behavior-details" type="button">Details</button></td></tr>`;
+    const id=nbaID(item),type=behaviorFindingType(item),typeSuffix=type.secondaryCount?` <small>+${type.secondaryCount}</small>`:'';
+    return `<tr class="clickable-row nba-row" data-id="${esc(id)}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="behavior-type-badge" title="${esc(type.signals.map(x=>behaviorFindingTypeLabels[x]||x).join(' · '))}">${esc(type.label)}${typeSuffix}</span></td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td><button class="secondary-btn behavior-details" type="button">Details</button></td></tr>`;
   }).join('');
   document.getElementById('nba-count').textContent=`${rows.length} finding${rows.length===1?'':'s'}`;
   body.querySelectorAll('.nba-row').forEach(row=>row.onclick=e=>{if(e.target.closest('button'))return;showBehaviorFinding(row.dataset.id)});
   body.querySelectorAll('.behavior-details').forEach(button=>button.onclick=e=>{e.stopPropagation();const row=button.closest('.nba-row');if(row)showBehaviorFinding(row.dataset.id)});
+  window.OTDataTables?.refresh('table-nba');
 }
 
 async function showBehaviorFinding(id){
   let item=behaviorFindings.find(value=>String(nbaID(value))===String(id));
   try{item=await api(`/behavior-findings/${encodeURIComponent(id)}`)}catch(error){if(!item){alert(error.message);return}}
-  const evidence=nbaEvidence(item);
+  const evidence=nbaEvidence(item),findingType=behaviorFindingType(item);
   document.getElementById('nba-detail-body').innerHTML=`
     <div class="detail-grid">
       <div><strong>Finding ID</strong><span>${esc(evidence.finding_id||nbaID(item)||'—')}</span></div>
       <div><strong>Sensor</strong><span>${esc(nbaValue(item,'SensorID','—'))}</span></div>
       <div><strong>Asset</strong><span>${esc(nbaValue(item,'IP','—'))}</span></div>
+      <div><strong>Finding type</strong><span>${esc(findingType.label)}</span></div>
       <div><strong>Severity</strong><span>${esc(nbaValue(item,'Severity','—'))}</span></div>
       <div><strong>State</strong><span>${esc(nbaValue(item,'Status','—'))}</span></div>
       <div><strong>Risk score</strong><span>${nbaScore(evidence.risk_score)}</span></div>
@@ -57,7 +81,7 @@ async function showBehaviorFinding(id){
       <div><strong>First seen</strong><span>${time(nbaValue(item,'FirstSeen'))}</span></div>
       <div><strong>Last seen</strong><span>${time(nbaValue(item,'LastSeen'))}</span></div>
     </div>
-    <h3>Reasons</h3><p>${esc(nbaReasons(evidence.reasons))}</p>
+    <h3>Detection signals</h3><p>${esc(findingType.signals.map(x=>behaviorFindingTypeLabels[x]?`${behaviorFindingTypeLabels[x]} (${x})`:x).join(', ')||'—')}</p>
     <h3>Detection message</h3><p>${esc(nbaValue(item,'Message','—'))}</p>`;
   document.getElementById('nba-detail-modal').hidden=false;
 }
@@ -114,6 +138,10 @@ function learningSensorRows(){
   const ids=new Set([...registered.keys(),...baselineBySensor.keys()]);
   return [...ids].map(sensor=>{
     const b=baselineBySensor.get(sensor)||{},identity=registered.get(sensor)||{},behavior=b.behavior||{},legacyMode=String(b.mode||'').toLowerCase(),behaviorMode=String(behavior.mode||'').toLowerCase();
+    const telemetryAvailable=b.telemetry_available!==false&&Boolean(b.mode||behavior.mode||b.manual_completion_supported||behavior.manual_completion_supported);
+    const capabilityKnown=b.manual_completion_supported!==undefined||behavior.manual_completion_supported!==undefined;
+    const capability=b.manual_completion_supported!==false&&behavior.manual_completion_supported!==false;
+    const pending=b.learning_completion_pending===true;
     const legacyEnabled=b.enabled!==false,behaviorEnabled=behavior.enabled!==false;
     const legacyLearning=legacyEnabled&&legacyMode==='learning',behaviorLearning=behaviorEnabled&&behaviorMode==='learning';
     const legacyMonitoring=legacyEnabled&&legacyMode==='monitoring',behaviorMonitoring=behaviorEnabled&&behaviorMode==='monitoring';
@@ -124,24 +152,53 @@ function learningSensorRows(){
     const state=active?'learning':(legacyMonitoring||behaviorMonitoring?'monitoring':'unavailable');
     const fallbackName=String(b.sensor_name||'').trim(),name=identity.name||fallbackName;
     const displayName=name&&name!==sensor?`${name} (${sensor})`:sensor;
-    return {sensor,name,displayName,site:identity.site||'',hostname:identity.hostname||'',state,active,started,deadline,minElapsed:active&&deadline>0&&Date.now()>=deadline,readiness:Number(behavior.readiness??b.readiness??0),mature:Number(behavior.mature_assets??b.mature_assets??0),learning:Number(behavior.learning_assets??b.learning_assets??0),rate:Number(behavior.new_pattern_rate??b.new_pattern_rate??0)};
+    return {sensor,name,displayName,site:identity.site||'',hostname:identity.hostname||'',state,active,started,deadline,minElapsed:active&&deadline>0&&Date.now()>=deadline,readiness:Number(behavior.readiness??b.readiness??0),mature:Number(behavior.mature_assets??b.mature_assets??0),learning:Number(behavior.learning_assets??b.learning_assets??0),rate:Number(behavior.new_pattern_rate??b.new_pattern_rate??0),capability,capabilityKnown,pending,telemetryAvailable};
   }).filter(x=>x.sensor).sort((a,b)=>a.displayName.localeCompare(b.displayName));
 }
+
+async function waitForLearningCompletion(sensorID,timeoutMs=90000){
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,2000));
+    try{
+      const latest=await api('/baseline');
+      if(Array.isArray(latest))baselines=latest;
+      const row=learningSensorRows().find(x=>x.sensor===sensorID);
+      if(row&&row.state==='monitoring'&&!row.pending)return true;
+      if(row&&row.telemetryAvailable&&row.capabilityKnown&&!row.capability){
+        const error=new Error('The sensor reports that manual learning completion is unsupported. Rebuild and deploy the patched sensor binary.');
+        error.code='learning_completion_unsupported';
+        throw error;
+      }
+    }catch(error){
+      if(error?.code==='learning_completion_unsupported')throw error;
+      console.warn('learning completion status poll failed',error);
+    }
+  }
+  return false;
+}
+
 function renderLearningControls(){
   const select=document.getElementById('learning-finish-sensor'),finish=document.getElementById('learning-finish'),force=document.getElementById('learning-force-finish');
   if(!select||!finish||!force)return;
   const rows=learningSensorRows(),previous=select.value;
-  select.innerHTML=rows.length?rows.map(x=>`<option value="${esc(x.sensor)}">${esc(x.displayName)} · ${esc(x.state)}</option>`).join(''):'<option value="">No registered sensors</option>';
+  const optionLabel=x=>`${x.displayName} · ${x.state}${x.pending?' · finishing…':''}`;
+  select.innerHTML=rows.length?rows.map(x=>`<option value="${esc(x.sensor)}">${esc(optionLabel(x))}</option>`).join(''):'<option value="">No registered sensors</option>';
   if(rows.some(x=>x.sensor===previous))select.value=previous;
   else if(rows.some(x=>x.active))select.value=rows.find(x=>x.active).sensor;
   select.disabled=!rows.length;
   const current=()=>rows.find(x=>x.sensor===select.value)||null;
   const sync=()=>{
     const row=current(),allowed=can('data_management'),forceAllowed=allowed&&can('users_roles_manage');
-    finish.disabled=!allowed||!row||!row.active||!row.started||!row.minElapsed;
+    finish.disabled=!allowed||!row||!row.active||!row.started||!row.minElapsed||!row.capability||row.pending;
     force.hidden=!forceAllowed||!row||!row.active||row.minElapsed;
-    force.disabled=!forceAllowed||!row||!row.active||!row.started||row.minElapsed;
+    force.disabled=!forceAllowed||!row||!row.active||!row.started||row.minElapsed||!row.capability||row.pending;
+    finish.textContent=row?.pending?'Finishing…':'Finish learning now';
+    force.textContent=row?.pending?'Finishing…':'Force finish';
     if(!row)finish.title='No registered sensor is available';
+    else if(row.pending)finish.title=force.title='Command is pending until this sensor reports monitoring telemetry';
+    else if(row.telemetryAvailable&&row.capabilityKnown&&!row.capability)finish.title=force.title='This sensor reports that manual learning completion is unsupported; rebuild and deploy the patched sensor';
+    else if(row.telemetryAvailable&&!row.capabilityKnown)finish.title=force.title='Sensor capability is not advertised by this build; if completion does not confirm, deploy the updated sensor binary';
     else if(!row.active)finish.title=row.state==='monitoring'?'This sensor is already monitoring':'Learning state is not available for this sensor';
     else if(!row.started)finish.title=force.title='Learning starts after the first eligible traffic observation';
     else if(!row.minElapsed)finish.title='Available after the minimum learning duration';
@@ -153,17 +210,30 @@ function renderLearningControls(){
     const total=row.mature+row.learning,minimum=row.minElapsed?'elapsed':'NOT elapsed';
     return `Readiness: ${Math.round(row.readiness*1000)/10}%\nMature assets: ${row.mature}/${total}\nNew-pattern rate: ${Math.round(row.rate*1000)/10}%\nMinimum learning duration: ${minimum}`;
   };
+  const run=async(row,forceMode)=>{
+    const button=forceMode?force:finish;
+    finish.disabled=true;force.disabled=true;button.textContent='Waiting for sensor…';
+    try{
+      await api(`/sensors/${encodeURIComponent(row.sensor)}/learning/complete`,{method:'POST',body:JSON.stringify({force:forceMode})});
+      const completed=await waitForLearningCompletion(row.sensor);
+      await refreshView('nba',true);
+      if(!completed){
+        alert(`Central queued the command, but ${row.displayName} did not report monitoring within 90 seconds.\n\nVerify that the patched sensor binary is deployed and running, then check the sensor log for "OTLens sensor learning completed". The command remains pending and will be retried automatically.`);
+      }
+    }catch(error){
+      alert(error.parsed?.error||error.message);
+      await refreshView('nba',true);
+    }
+  };
   finish.onclick=async()=>{
     const row=current();if(!row||finish.disabled)return;
     if(!confirm(`Finish learning for ${row.displayName}?\n\n${details(row)}\n\nThe current trusted baseline will be frozen and behavioral detection will become active.`))return;
-    finish.disabled=true;force.disabled=true;
-    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/learning/complete`,{method:'POST',body:JSON.stringify({force:false})});finish.textContent='Queued';setTimeout(()=>{finish.textContent='Finish learning now';refreshView('nba',true)},1200)}catch(error){alert(error.parsed?.error||error.message);finish.textContent='Finish learning now';sync()}
+    await run(row,false);
   };
   force.onclick=async()=>{
     const row=current();if(!row||force.disabled)return;
     if(!confirm(`FORCE finish learning for ${row.displayName}?\n\n${details(row)}\n\nWarning: the minimum learning duration has not elapsed. This can freeze an incomplete trusted baseline and increase false positives.`))return;
-    finish.disabled=true;force.disabled=true;
-    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/learning/complete`,{method:'POST',body:JSON.stringify({force:true})});force.textContent='Queued';setTimeout(()=>{force.textContent='Force finish';refreshView('nba',true)},1200)}catch(error){alert(error.parsed?.error||error.message);force.textContent='Force finish';sync()}
+    await run(row,true);
   };
 }
 function renderLearningQuality(){
@@ -205,6 +275,7 @@ function renderLearningQuality(){
     button.disabled=true;
     try{await api(`/sensors/${encodeURIComponent(row.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:row.c.id})});button.textContent='Queued';setTimeout(()=>refreshView('nba',true),1500)}catch(error){alert(error.parsed?.error||error.message);button.disabled=false}
   });
+  window.OTDataTables?.refresh('table-learning-candidates');
 }
 
 

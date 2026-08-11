@@ -35,11 +35,18 @@ type SMBObservationRow struct {
 	smb.Observation
 }
 
-func (r *Repository) ListSMBObservations(ctx context.Context, sensorID, clientIP, serverIP, artifact string, limit int) ([]SMBObservationRow, error) {
+func (r *Repository) ListSMBObservations(ctx context.Context, sensorID, clientIP, serverIP, artifact, search string, limit int) ([]SMBObservationRow, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,observed_at,client_ip,server_ip,client_port,server_port,command,message_id,session_id,tree_id,share_name,file_name,named_pipe,direction,bytes,status,is_response,is_admin_share,is_executable,is_script,is_encrypted FROM smb_observations WHERE ($1='' OR sensor_id=$1) AND ($2='' OR client_ip=$2) AND ($3='' OR server_ip=$3) AND ($4='' OR share_name ILIKE '%'||$4||'%' OR file_name ILIKE '%'||$4||'%' OR named_pipe ILIKE '%'||$4||'%') ORDER BY observed_at DESC LIMIT $5`, sensorID, clientIP, serverIP, artifact, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,sensor_id,observed_at,client_ip,server_ip,client_port,server_port,command,message_id,session_id,tree_id,share_name,file_name,named_pipe,direction,bytes,status,is_response,is_admin_share,is_executable,is_script,is_encrypted
+FROM smb_observations
+WHERE ($1='' OR sensor_id=$1)
+  AND ($2='' OR client_ip=$2)
+  AND ($3='' OR server_ip=$3)
+  AND ($4='' OR share_name ILIKE '%'||$4||'%' OR file_name ILIKE '%'||$4||'%' OR named_pipe ILIKE '%'||$4||'%')
+  AND ($5='' OR client_ip ILIKE '%'||$5||'%' OR server_ip ILIKE '%'||$5||'%' OR command ILIKE '%'||$5||'%' OR share_name ILIKE '%'||$5||'%' OR file_name ILIKE '%'||$5||'%' OR named_pipe ILIKE '%'||$5||'%' OR status ILIKE '%'||$5||'%')
+ORDER BY observed_at DESC LIMIT $6`, sensorID, clientIP, serverIP, artifact, search, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -1058,7 +1058,7 @@ func (e *Engine) Status(now time.Time) Status {
 	candidateCount := len(e.candidates)
 	e.candidateMu.RUnlock()
 	return Status{
-		Enabled: e.config.Enabled, Mode: mode, LearningStarted: started,
+		Enabled: e.config.Enabled, ManualCompletionSupported: true, Mode: mode, LearningStarted: started,
 		LearningEndsAt: started.Add(e.config.LearningDuration), MinimumDuration: e.config.LearningDuration,
 		Readiness: readiness, Ready: ready, ReadinessReason: reason,
 		Profiles: e.profiles.Load(), AssetProfiles: e.assetProfiles.Load(), MatureAssets: mature, LearningAssets: learning,

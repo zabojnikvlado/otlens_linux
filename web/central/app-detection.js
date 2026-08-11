@@ -61,14 +61,76 @@ document.getElementById('incident-modal-close').onclick=()=>{document.getElement
 function jsonList(v){if(Array.isArray(v))return v;try{return JSON.parse(v||'[]')}catch(_){return[]}}
 function threatForDNS(d){const q=String(d.query_name||'').toLowerCase();return alerts.some(a=>['malicious_domain','c2_correlated'].includes(String(a.Type))&&(String(a.Message||'').toLowerCase().includes(q)||a.IP===d.client_ip))}
 function smbRisk(x){return !!(x.IsAdminShare||x.IsExecutable||x.IsScript||x.NamedPipe||x.is_admin_share||x.is_executable||x.is_script||x.named_pipe)}
-async function loadDNS(){try{dnsObservations=await api('/dns-observations?limit=1000');renderDNS()}catch(e){console.error('dns observations',e)}}
+const EXPLORER_QUERY_LIMIT=5000;
+let dnsExplorerObservations=[],smbExplorerObservations=[];
+let dnsQueryTimer=null,smbQueryTimer=null,dnsLoadSequence=0,smbLoadSequence=0;
+const dnsKnownSensors=new Set();
+async function loadDNS(){
+  const sequence=++dnsLoadSequence,params=new URLSearchParams({limit:String(EXPLORER_QUERY_LIMIT)});
+  const search=(document.getElementById('dns-filter')?.value||'').trim(),sensor=document.getElementById('dns-sensor')?.value||'';
+  if(search)params.set('search',search);if(sensor)params.set('sensor_id',sensor);
+  const count=document.getElementById('dns-count');if(count)count.textContent='Loading DNS observations…';
+  try{
+    const rows=await api('/dns-observations?'+params.toString());
+    if(sequence!==dnsLoadSequence)return;
+    dnsExplorerObservations=Array.isArray(rows)?rows:[];
+    dnsExplorerObservations.forEach(d=>{if(d?.sensor_id)dnsKnownSensors.add(d.sensor_id)});
+    renderDNS();
+  }catch(e){if(sequence===dnsLoadSequence){console.error('dns observations',e);if(count)count.textContent='DNS load failed'}}
+}
+function scheduleDNSLoad(){
+  clearTimeout(dnsQueryTimer);
+  renderDNS();
+  dnsQueryTimer=setTimeout(loadDNS,250);
+}
 const DNS_TYPES={1:'A',2:'NS',5:'CNAME',6:'SOA',12:'PTR',15:'MX',16:'TXT',28:'AAAA',33:'SRV',41:'OPT',64:'SVCB',65:'HTTPS'},DNS_RCODES={0:'NOERROR',1:'FORMERR',2:'SERVFAIL',3:'NXDOMAIN',4:'NOTIMP',5:'REFUSED'};
 function dnsType(v){return DNS_TYPES[Number(v)]||String(v||'—')}function dnsRcode(v){return DNS_RCODES[Number(v)]||String(v??'—')}
-function renderDNS(){const sel=document.getElementById('dns-sensor');if(sel){const current=sel.value,ids=[...new Set(dnsObservations.map(d=>d.sensor_id).filter(Boolean))].sort();sel.innerHTML='<option value="">All sensors</option>'+ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`).join('');sel.value=ids.includes(current)?current:''}const q=(document.getElementById('dns-filter')?.value||'').toLowerCase(),sensor=sel?.value||'';const rows=dnsObservations.filter(d=>(!sensor||d.sensor_id===sensor)&&(!q||JSON.stringify(d).toLowerCase().includes(q)));document.getElementById('dns-count').textContent=`${rows.length} observations`;document.querySelector('#table-dns tbody').innerHTML=rows.map(d=>`<tr class="dns-row ${threatForDNS(d)?'row-threat':''}" data-id="${esc(d.id)}"><td>${time(d.observed_at)}</td><td>${esc(d.sensor_id)}</td><td>${esc(d.client_ip)}</td><td>${esc(d.server_ip)}</td><td>${esc(d.query_name)}</td><td>${esc(dnsType(d.query_type))}</td><td>${esc(dnsRcode(d.response_code))}</td><td>${esc(jsonList(d.answers).join(', ')||'—')}</td><td>${esc(d.ttl)}</td><td>${threatForDNS(d)?'<span class="pill severity-high">MATCH</span>':'—'}</td></tr>`).join('')}
-function openDNSDetail(id){const d=dnsObservations.find(x=>String(x.id)===String(id));if(!d)return;const answers=jsonList(d.answers),cnames=jsonList(d.cnames),related=alerts.filter(a=>String(a.SensorID)===String(d.sensor_id)&&(String(a.IP||'')===String(d.client_ip)||String(a.Message||'').toLowerCase().includes(String(d.query_name||'').toLowerCase())));document.getElementById('dns-detail-title').textContent=`DNS · ${d.query_name}`;document.getElementById('dns-detail-body').innerHTML=`<dl class="status-list detail-status-list"><div><dt>Observed</dt><dd>${time(d.observed_at)}</dd></div><div><dt>Sensor</dt><dd>${esc(d.sensor_id)}</dd></div><div><dt>Direction</dt><dd>${d.is_response?'Response':'Query'}</dd></div><div><dt>Client</dt><dd>${esc(d.client_ip)}</dd></div><div><dt>Resolver</dt><dd>${esc(d.server_ip)}</dd></div><div><dt>Query</dt><dd class="wrap-anywhere">${esc(d.query_name)}</dd></div><div><dt>Record type</dt><dd>${esc(dnsType(d.query_type))} (${esc(d.query_type)})</dd></div><div><dt>Response code</dt><dd>${esc(dnsRcode(d.response_code))} (${esc(d.response_code)})</dd></div><div><dt>TTL</dt><dd>${esc(d.ttl)} seconds${Number(d.ttl)>0?` · expires approximately ${time(new Date(new Date(d.observed_at).getTime()+Number(d.ttl)*1000))}`:''}</dd></div><div><dt>Threat correlation</dt><dd>${threatForDNS(d)?'<span class="pill severity-high">MATCH</span>':'None'}</dd></div></dl><div class="detail-grid"><section><h3>Answers (${answers.length})</h3><div class="detail-list">${answers.map(esc).join('<br>')||'—'}</div></section><section><h3>CNAME chain (${cnames.length})</h3><div class="detail-list">${cnames.map(esc).join('<br>')||'—'}</div></section></div><h3>Related alerts (${related.length})</h3><div class="detail-list">${related.slice(0,20).map(a=>`${time(a.LastSeen)} · ${esc(a.Type)} · ${esc(a.Message)}`).join('<br>')||'No related alerts.'}</div>`;document.getElementById('dns-detail-modal').hidden=false}
+function renderDNS(){
+  const sel=document.getElementById('dns-sensor');
+  if(sel){
+    const current=sel.value;
+    dnsExplorerObservations.forEach(d=>{if(d?.sensor_id)dnsKnownSensors.add(d.sensor_id)});
+    const ids=[...dnsKnownSensors].sort();
+    sel.innerHTML='<option value="">All sensors</option>'+ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    sel.value=current&&ids.includes(current)?current:'';
+  }
+  const q=(document.getElementById('dns-filter')?.value||'').trim().toLowerCase(),sensor=sel?.value||'';
+  const rows=dnsExplorerObservations.filter(d=>(!sensor||d.sensor_id===sensor)&&(!q||JSON.stringify(d).toLowerCase().includes(q)));
+  const limited=dnsExplorerObservations.length>=EXPLORER_QUERY_LIMIT;
+  document.getElementById('dns-count').textContent=`${rows.length.toLocaleString()} observations${limited?' · view capped at 5,000 matches; refine search for older retained data':''}`;
+  const body=document.querySelector('#table-dns tbody');if(!body)return;
+  body.innerHTML=rows.map(d=>`<tr class="dns-row ${threatForDNS(d)?'row-threat':''}" data-id="${esc(d.id)}"><td>${time(d.observed_at)}</td><td>${esc(d.sensor_id)}</td><td>${esc(d.client_ip)}</td><td>${esc(d.server_ip)}</td><td>${esc(d.query_name)}</td><td>${esc(dnsType(d.query_type))}</td><td>${esc(dnsRcode(d.response_code))}</td><td>${esc(jsonList(d.answers).join(', ')||'—')}</td><td>${esc(d.ttl)}</td><td>${threatForDNS(d)?'<span class="pill severity-high">MATCH</span>':'—'}</td></tr>`).join('');
+  window.OTDataTables?.refresh('table-dns');
+}
+function openDNSDetail(id){const d=dnsExplorerObservations.find(x=>String(x.id)===String(id));if(!d)return;const answers=jsonList(d.answers),cnames=jsonList(d.cnames),related=alerts.filter(a=>String(a.SensorID)===String(d.sensor_id)&&(String(a.IP||'')===String(d.client_ip)||String(a.Message||'').toLowerCase().includes(String(d.query_name||'').toLowerCase())));document.getElementById('dns-detail-title').textContent=`DNS · ${d.query_name}`;document.getElementById('dns-detail-body').innerHTML=`<dl class="status-list detail-status-list"><div><dt>Observed</dt><dd>${time(d.observed_at)}</dd></div><div><dt>Sensor</dt><dd>${esc(d.sensor_id)}</dd></div><div><dt>Direction</dt><dd>${d.is_response?'Response':'Query'}</dd></div><div><dt>Client</dt><dd>${esc(d.client_ip)}</dd></div><div><dt>Resolver</dt><dd>${esc(d.server_ip)}</dd></div><div><dt>Query</dt><dd class="wrap-anywhere">${esc(d.query_name)}</dd></div><div><dt>Record type</dt><dd>${esc(dnsType(d.query_type))} (${esc(d.query_type)})</dd></div><div><dt>Response code</dt><dd>${esc(dnsRcode(d.response_code))} (${esc(d.response_code)})</dd></div><div><dt>TTL</dt><dd>${esc(d.ttl)} seconds${Number(d.ttl)>0?` · expires approximately ${time(new Date(new Date(d.observed_at).getTime()+Number(d.ttl)*1000))}`:''}</dd></div><div><dt>Threat correlation</dt><dd>${threatForDNS(d)?'<span class="pill severity-high">MATCH</span>':'None'}</dd></div></dl><div class="detail-grid"><section><h3>Answers (${answers.length})</h3><div class="detail-list">${answers.map(esc).join('<br>')||'—'}</div></section><section><h3>CNAME chain (${cnames.length})</h3><div class="detail-list">${cnames.map(esc).join('<br>')||'—'}</div></section></div><h3>Related alerts (${related.length})</h3><div class="detail-list">${related.slice(0,20).map(a=>`${time(a.LastSeen)} · ${esc(a.Type)} · ${esc(a.Message)}`).join('<br>')||'No related alerts.'}</div>`;document.getElementById('dns-detail-modal').hidden=false}
 document.querySelector('#table-dns tbody').addEventListener('click',e=>{const row=e.target.closest('.dns-row');if(row)openDNSDetail(row.dataset.id)});document.getElementById('dns-detail-close').onclick=()=>document.getElementById('dns-detail-modal').hidden=true;
-async function loadSMB(){try{smbObservations=await api('/smb-observations?limit=1000');renderSMB()}catch(e){console.error('smb observations',e)}}
-function renderSMB(){const q=(document.getElementById('smb-filter')?.value||'').toLowerCase(),mode=document.getElementById('smb-risk')?.value||'';const rows=smbObservations.filter(x=>(!q||JSON.stringify(x).toLowerCase().includes(q))&&(!mode||(mode==='risk'&&smbRisk(x))||(mode==='encrypted'&&(x.IsEncrypted||x.is_encrypted))));document.getElementById('smb-count').textContent=`${rows.length} observations`;document.querySelector('#table-smb tbody').innerHTML=rows.map(x=>{const flags=[(x.IsAdminShare||x.is_admin_share)?'ADMIN SHARE':'',(x.IsExecutable||x.is_executable)?'EXECUTABLE':'',(x.IsScript||x.is_script)?'SCRIPT':'',(x.IsEncrypted||x.is_encrypted)?'ENCRYPTED':''].filter(Boolean);return `<tr class="clickable-row smb-detail-row ${smbRisk(x)?'row-threat':''}" data-index="${smbObservations.indexOf(x)}"><td>${time(x.Timestamp||x.timestamp)}</td><td>${esc(x.sensor_id)}</td><td>${esc(x.ClientIP||x.client_ip)} → ${esc(x.ServerIP||x.server_ip)}</td><td>${esc(x.Command||x.command)}</td><td>${esc(x.ShareName||x.share_name||'—')}</td><td>${esc(x.FileName||x.file_name||x.NamedPipe||x.named_pipe||'—')}</td><td>${esc(x.Bytes||x.bytes||0)}</td><td>${esc(x.Status||x.status||'—')}</td><td>${flags.map(f=>`<span class="pill severity-${f==='ENCRYPTED'?'medium':'high'}">${esc(f)}</span>`).join(' ')||'—'}</td></tr>`}).join('')}
+
+async function loadSMB(){
+  const sequence=++smbLoadSequence,params=new URLSearchParams({limit:String(EXPLORER_QUERY_LIMIT)});
+  const search=(document.getElementById('smb-filter')?.value||'').trim();
+  if(search)params.set('search',search);
+  const count=document.getElementById('smb-count');if(count)count.textContent='Loading SMB observations…';
+  try{
+    const rows=await api('/smb-observations?'+params.toString());
+    if(sequence!==smbLoadSequence)return;
+    smbExplorerObservations=Array.isArray(rows)?rows:[];
+    renderSMB();
+  }catch(e){if(sequence===smbLoadSequence){console.error('smb observations',e);if(count)count.textContent='SMB load failed'}}
+}
+function scheduleSMBLoad(){
+  clearTimeout(smbQueryTimer);
+  renderSMB();
+  smbQueryTimer=setTimeout(loadSMB,250);
+}
+function renderSMB(){
+  const q=(document.getElementById('smb-filter')?.value||'').trim().toLowerCase(),mode=document.getElementById('smb-risk')?.value||'';
+  const rows=smbExplorerObservations.filter(x=>(!q||JSON.stringify(x).toLowerCase().includes(q))&&(!mode||(mode==='risk'&&smbRisk(x))||(mode==='encrypted'&&(x.IsEncrypted||x.is_encrypted))));
+  const limited=smbExplorerObservations.length>=EXPLORER_QUERY_LIMIT;
+  document.getElementById('smb-count').textContent=`${rows.length.toLocaleString()} observations${limited?' · view capped at 5,000 matches; refine search for older retained data':''}`;
+  const body=document.querySelector('#table-smb tbody');if(!body)return;
+  body.innerHTML=rows.map(x=>{const flags=[(x.IsAdminShare||x.is_admin_share)?'ADMIN SHARE':'',(x.IsExecutable||x.is_executable)?'EXECUTABLE':'',(x.IsScript||x.is_script)?'SCRIPT':'',(x.IsEncrypted||x.is_encrypted)?'ENCRYPTED':''].filter(Boolean);return `<tr class="clickable-row smb-detail-row ${smbRisk(x)?'row-threat':''}" data-index="${smbExplorerObservations.indexOf(x)}"><td>${time(x.Timestamp||x.timestamp)}</td><td>${esc(x.sensor_id)}</td><td>${esc(x.ClientIP||x.client_ip)} → ${esc(x.ServerIP||x.server_ip)}</td><td>${esc(x.Command||x.command)}</td><td>${esc(x.ShareName||x.share_name||'—')}</td><td>${esc(x.FileName||x.file_name||x.NamedPipe||x.named_pipe||'—')}</td><td>${esc(x.Bytes||x.bytes||0)}</td><td>${esc(x.Status||x.status||'—')}</td><td>${flags.map(f=>`<span class="pill severity-${f==='ENCRYPTED'?'medium':'high'}">${esc(f)}</span>`).join(' ')||'—'}</td></tr>`}).join('');
+  window.OTDataTables?.refresh('table-smb');
+}
 async function loadThreatIntelManagement(){try{const [sources,indicators]=await Promise.all([api('/threat-intel/sources'),api('/threat-intel/indicators?limit=10000')]);threatIntelSources=Array.isArray(sources)?sources:[];threatIntelIndicators=Array.isArray(indicators)?indicators:[];renderThreatIntel()}catch(e){console.error('load threat intel management',e)}}
 function renderThreatIntel(){
   const q=(document.getElementById('ti-filter')?.value||'').toLowerCase(),kind=document.getElementById('ti-type')?.value||'';

@@ -1076,6 +1076,24 @@ func (r *Repository) DeleteSensor(ctx context.Context, id string) error {
 	return err
 }
 
+func learningCompletionConfirmed(raw json.RawMessage) bool {
+	var status struct {
+		Enabled  bool   `json:"enabled"`
+		Mode     string `json:"mode"`
+		Behavior struct {
+			Enabled bool   `json:"enabled"`
+			Mode    string `json:"mode"`
+		} `json:"behavior"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &status) != nil {
+		return false
+	}
+	anyEnabled := status.Enabled || status.Behavior.Enabled
+	legacyComplete := !status.Enabled || strings.EqualFold(strings.TrimSpace(status.Mode), "monitoring")
+	behaviorComplete := !status.Behavior.Enabled || strings.EqualFold(strings.TrimSpace(status.Behavior.Mode), "monitoring")
+	return anyEnabled && legacyComplete && behaviorComplete
+}
+
 func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) ([]AlertHistoryEntry, error) {
 	if x.CapturedAt.IsZero() {
 		x.CapturedAt = time.Now().UTC()
@@ -1096,6 +1114,11 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONF
 WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), defaults(x.UDPConversations, "[]"), defaults(x.UDPTelemetry, "{}"), defaults(x.UDPProtocolExchanges, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
 		return nil, fmt.Errorf("store telemetry snapshot: %w", err)
+	}
+	if learningCompletionConfirmed(x.Baseline) {
+		if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='sensor.learning.complete' AND delivered_at IS NULL`, x.SensorID); err != nil {
+			return nil, fmt.Errorf("acknowledge learning completion command: %w", err)
+		}
 	}
 	var alerts []map[string]interface{}
 	if r.siemAlertsEnabled && len(x.Alerts) > 0 && json.Unmarshal(x.Alerts, &alerts) == nil {
@@ -1275,6 +1298,29 @@ func (r *Repository) HasPendingDataReset(ctx context.Context, sensorID string) (
 	return pending, err
 }
 
+func (r *Repository) HasPendingCommand(ctx context.Context, sensorID, commandType string) (bool, error) {
+	var pending bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sensor_commands WHERE sensor_id=$1 AND command_type=$2 AND delivered_at IS NULL)`, sensorID, commandType).Scan(&pending)
+	return pending, err
+}
+
+func (r *Repository) PendingCommandSensors(ctx context.Context, commandType string) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT sensor_id FROM sensor_commands WHERE command_type=$1 AND delivered_at IS NULL`, commandType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var sensorID string
+		if err := rows.Scan(&sensorID); err != nil {
+			return nil, err
+		}
+		out[sensorID] = true
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]management.Command, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1294,7 +1340,13 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 			return nil, err
 		}
 		out = append(out, c)
-		ids = append(ids, c.ID)
+		// sensor.learning.complete is intentionally NOT acknowledged merely
+		// because the sensor downloaded it. It is idempotent and stays pending
+		// until telemetry proves that every enabled baseline is monitoring.
+		// This closes the pull/apply crash window and makes completion durable.
+		if c.Type != "sensor.learning.complete" {
+			ids = append(ids, c.ID)
+		}
 	}
 	rows.Close()
 	if len(ids) > 0 {
