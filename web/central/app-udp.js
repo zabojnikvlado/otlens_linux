@@ -1,4 +1,4 @@
-let udpRefreshTimer=null;
+let udpRefreshTimer=null,udpLoadSequence=0,udpDetailLoadSequence=0;
 const UDP_PROTOCOLS={dns:['🟦','DNS'],dhcp:['🟩','DHCP'],ntp:['🟧','NTP'],snmp:['🟨','SNMP'],sip:['🟪','SIP'],dtls:['🔷','DTLS'],openvpn:['🟢','OpenVPN'],bittorrent:['🔵','BitTorrent']};
 
 function udpProtocolBadge(protocol){
@@ -46,9 +46,14 @@ function udpProtocolPanel(detail){
 }
 
 async function loadUDPConversations(){
+  const requestSequence=++udpLoadSequence;
   const params=new URLSearchParams({active:'true'}),protocol=document.getElementById('udp-protocol')?.value,port=document.getElementById('udp-port')?.value;
   if(protocol)params.set('protocol',protocol);if(port)params.set('port',port);
-  try{udpConversations=await api('/udp-conversations?'+params);renderUDPConversations()}catch(error){console.error('UDP conversations',error)}
+  try{
+    const loaded=await api('/udp-conversations?'+params);
+    if(requestSequence!==udpLoadSequence)return;
+    udpConversations=loaded;renderUDPConversations();
+  }catch(error){if(requestSequence===udpLoadSequence)console.error('UDP conversations',error)}
 }
 function filteredUDPConversations(){
   const filter=(document.getElementById('udp-filter')?.value||'').toLowerCase();
@@ -62,7 +67,9 @@ function renderUDPConversations(){
 }
 async function openUDPConversation(index){
   const item=udpConversations[index];if(!item)return;let detail=item;
+  const requestSequence=++udpDetailLoadSequence;
   try{detail=await api(`/udp-conversations/${encodeURIComponent(item.ID)}?sensor_id=${encodeURIComponent(item.SensorID)}`)}catch(_){}
+  if(requestSequence!==udpDetailLoadSequence)return;
   const key=detail.Key||{},events=[{label:'Conversation started',at:detail.StartedAt},...(detail.timeline||[]).map(x=>({label:udpEventLabel(x),at:udpEventTime(x),timeout:!!udpField(x,'TimedOut','timed_out'),detail:udpDurationValue(x,'RTT','rtt','ResponseTime','response_time')?`RTT ${udpDurationValue(x,'RTT','rtt','ResponseTime','response_time').toFixed(2)} ms`:''})),{label:'Last packet observed',at:detail.LastSeenAt}].sort((a,b)=>new Date(a.at||0)-new Date(b.at||0));
   document.getElementById('udp-detail-body').innerHTML=`<div class="asset-security-kpis"><div><span>Protocol</span><strong>${udpProtocolBadge(detail.Protocol)}</strong></div><div><span>Status</span><strong>${udpStatusBadge(detail.status)}</strong></div><div><span>Packets / bytes</span><strong>${Number(detail.Packets||0).toLocaleString()} / ${humanBytes(Number(detail.Bytes||0))}</strong></div><div><span>Average RTT</span><strong>${detail.rtt_millis?Number(detail.rtt_millis).toFixed(2)+' ms':'—'}</strong></div></div>
   <dl class="status-list"><div><dt>Conversation ID</dt><dd>${esc(detail.ID)}</dd></div><div><dt>Flow / sensor</dt><dd>${esc(detail.FlowID||'—')} · ${esc(detail.SensorID)}</dd></div><div><dt>Endpoint A</dt><dd>${esc(key.EndpointAIP)}:${esc(key.EndpointAPort)}</dd></div><div><dt>Endpoint B</dt><dd>${esc(key.EndpointBIP)}:${esc(key.EndpointBPort)}</dd></div><div><dt>Started</dt><dd>${time(detail.StartedAt)}</dd></div><div><dt>Last seen / duration</dt><dd>${time(detail.LastSeenAt)} · ${udpDuration(detail.duration_millis)}</dd></div></dl>

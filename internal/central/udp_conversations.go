@@ -38,7 +38,8 @@ func (s *Server) udpConversations(c *gin.Context) {
 		exchanges := udpTimelines(snapshot.UDPProtocolExchanges)
 		for _, conversation := range conversations {
 			if matchUDPConversation(c, conversation) {
-				result = append(result, presentUDPConversation(snapshot.SensorID, snapshot.CapturedAt, conversation, exchanges[conversation.ID]))
+				timeline := udpCurrentSessionExchanges(exchanges[conversation.ID], conversation)
+				result = append(result, presentUDPConversation(snapshot.SensorID, snapshot.CapturedAt, conversation, timeline))
 			}
 		}
 	}
@@ -62,7 +63,8 @@ func (s *Server) udpConversation(c *gin.Context) {
 		}
 		for _, conversation := range conversations {
 			if conversation.ID == id {
-				c.JSON(http.StatusOK, presentUDPConversation(snapshot.SensorID, snapshot.CapturedAt, conversation, udpTimeline(snapshot.UDPProtocolExchanges, id)))
+				timeline := udpCurrentSessionExchanges(udpTimeline(snapshot.UDPProtocolExchanges, id), conversation)
+				c.JSON(http.StatusOK, presentUDPConversation(snapshot.SensorID, snapshot.CapturedAt, conversation, timeline))
 				return
 			}
 		}
@@ -123,6 +125,40 @@ func udpTimeline(raw json.RawMessage, id string) []map[string]any {
 	return result
 }
 
+func udpCurrentSessionExchanges(exchanges []map[string]any, conversation udpconversation.Conversation) []map[string]any {
+	if conversation.StartedAt.IsZero() {
+		return exchanges
+	}
+	result := make([]map[string]any, 0, len(exchanges))
+	for _, exchange := range exchanges {
+		at, ok := udpExchangeStartTime(exchange)
+		if !ok {
+			// Protocol exchanges emitted by the current sensor all carry a request
+			// or start timestamp. Omitting undated records is safer than attaching
+			// evidence from an older endpoint-reused UDP session.
+			continue
+		}
+		if at.Before(conversation.StartedAt) {
+			continue
+		}
+		result = append(result, exchange)
+	}
+	return result
+}
+
+func udpExchangeStartTime(exchange map[string]any) (time.Time, bool) {
+	for _, key := range []string{"RequestedAt", "requested_at", "StartedAt", "started_at", "LastSeenAt", "last_seen_at", "RespondedAt", "responded_at", "CompletedAt", "completed_at", "EndedAt", "ended_at"} {
+		value, ok := exchange[key].(string)
+		if !ok || strings.TrimSpace(value) == "" || strings.HasPrefix(value, "0001-") {
+			continue
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func exchangeConversationID(exchange map[string]any) string {
 	for _, key := range []string{"ConversationID", "conversation_id"} {
 		if value, ok := exchange[key].(string); ok {
@@ -167,17 +203,18 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 	}
 	totals := map[string]float64{}
 	protocols := map[string]uint64{}
-	var rttWeighted, durationWeighted float64
-	var rttWeight, durationWeight uint64
+	var rttTotal, durationWeighted float64
+	var rttSamples, durationWeight uint64
 	for _, snapshot := range snapshots {
 		var telemetry map[string]float64
 		if json.Unmarshal(snapshot.UDPTelemetry, &telemetry) == nil {
 			for key, value := range telemetry {
 				switch key {
 				case "udp_average_rtt":
-					weight := uint64(telemetry["udp_packets_total"])
-					rttWeighted += value * float64(weight)
-					rttWeight += weight
+					// Recomputed below from actual correlated protocol exchanges. The
+					// sensor field historically carried DNS RTT only, which made the
+					// dashboard look like an all-UDP metric when it was not.
+					continue
 				case "udp_average_duration":
 					weight := uint64(telemetry["udp_conversations_active"])
 					durationWeighted += value * float64(weight)
@@ -187,14 +224,20 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 				}
 			}
 		}
+		for _, exchange := range udpTimeline(snapshot.UDPProtocolExchanges, "") {
+			if value := durationMillis(exchange, "RTT", "rtt", "ResponseTime", "response_time", "TimeToResponse"); value > 0 {
+				rttTotal += value
+				rttSamples++
+			}
+		}
 		var conversations []udpconversation.Conversation
 		_ = json.Unmarshal(snapshot.UDPConversations, &conversations)
 		for _, conversation := range conversations {
 			protocols[strings.ToLower(conversation.Protocol)]++
 		}
 	}
-	if rttWeight > 0 {
-		totals["udp_average_rtt"] = rttWeighted / float64(rttWeight)
+	if rttSamples > 0 {
+		totals["udp_average_rtt"] = rttTotal / float64(rttSamples)
 	}
 	if durationWeight > 0 {
 		totals["udp_average_duration"] = durationWeighted / float64(durationWeight)

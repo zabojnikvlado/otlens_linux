@@ -34,7 +34,9 @@ function renderNetworkBehavior(){
   const barValue=state==='learning'?readiness:health,bar=document.getElementById('network-health-bar');
   hero.className=`network-behavior-hero behavior-${state}`;hero.dataset.dashboardTab=canView('alerts')?'nba':'assets';document.getElementById('network-health-score').textContent=state==='learning'?'Learning':`${Math.round(health)}%`;bar.style.width=`${barValue}%`;bar.parentElement?.setAttribute('aria-label',state==='learning'?`Learning readiness ${Math.round(readiness)}%`:`Network health ${Math.round(health)}%`);
   document.getElementById('network-health-state').textContent=state==='healthy'?'Healthy network behavior':state==='degraded'?'Behavior degradation detected':state==='critical'?'Major behavior anomaly':'Building reliable baselines';
-  document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':`${Math.round(Number(overview.learning_readiness||0))}% ready`;document.getElementById('network-coverage').textContent=`${Math.round(Number(overview.coverage||0))}% mature-asset coverage`;
+  const awaitingSensors=Math.max(0,Number(overview.awaiting_sensors||0)),reportingSensors=Math.max(0,Number(overview.reporting_sensors||0));
+  document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':awaitingSensors&&reportingSensors===0?'Awaiting telemetry':`${Math.round(Number(overview.learning_readiness||0))}% ready`;
+  document.getElementById('network-coverage').textContent=awaitingSensors?`${awaitingSensors} sensor(s) awaiting baseline telemetry`:`${Math.round(Number(overview.coverage||0))}% mature-asset coverage`;
   document.getElementById('network-active-baselines').textContent=Number(overview.active_baselines||0).toLocaleString();document.getElementById('network-behavior-alerts').textContent=Number(overview.behavior_alerts||0).toLocaleString();document.getElementById('network-affected-assets').textContent=`${Number(overview.affected_assets||0)} affected assets`;
   const top=overview.top_anomaly;document.getElementById('network-top-anomaly').textContent=top?.asset_ip||'—';document.getElementById('network-top-anomaly-score').textContent=top?`Anomaly ${Number(top.anomaly_score||0).toFixed(1)} · ${nbaPercent(top.confidence)}`:'No active finding';
 }
@@ -52,17 +54,17 @@ function renderBehaviorFindings(){
   body.innerHTML=rows.map(item=>{
     const evidence=nbaEvidence(item);
     const id=nbaID(item),type=behaviorFindingType(item),typeSuffix=type.secondaryCount?` <small>+${type.secondaryCount}</small>`:'';
-    return `<tr class="clickable-row nba-row" data-id="${esc(id)}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="behavior-type-badge" title="${esc(type.signals.map(x=>behaviorFindingTypeLabels[x]||x).join(' · '))}">${esc(type.label)}${typeSuffix}</span></td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td><button class="secondary-btn behavior-details" type="button">Details</button></td></tr>`;
+    return `<tr class="clickable-row nba-row" data-id="${esc(id)}" data-sensor="${esc(nbaValue(item,'SensorID',''))}"><td>${time(nbaValue(item,'LastSeen'))}</td><td>${esc(nbaValue(item,'SensorID','—'))}</td><td>${esc(nbaValue(item,'IP','—'))}</td><td><span class="behavior-type-badge" title="${esc(type.signals.map(x=>behaviorFindingTypeLabels[x]||x).join(' · '))}">${esc(type.label)}${typeSuffix}</span></td><td><span class="severity ${esc(String(nbaValue(item,'Severity')).toLowerCase())}">${esc(nbaValue(item,'Severity','—'))}</span></td><td>${nbaScore(evidence.risk_score)}</td><td>${esc(nbaValue(item,'Status','—'))}</td><td><button class="secondary-btn behavior-details" type="button">Details</button></td></tr>`;
   }).join('');
   document.getElementById('nba-count').textContent=`${rows.length} finding${rows.length===1?'':'s'}`;
-  body.querySelectorAll('.nba-row').forEach(row=>row.onclick=e=>{if(e.target.closest('button'))return;showBehaviorFinding(row.dataset.id)});
-  body.querySelectorAll('.behavior-details').forEach(button=>button.onclick=e=>{e.stopPropagation();const row=button.closest('.nba-row');if(row)showBehaviorFinding(row.dataset.id)});
+  body.querySelectorAll('.nba-row').forEach(row=>row.onclick=e=>{if(e.target.closest('button'))return;showBehaviorFinding(row.dataset.id,row.dataset.sensor)});
+  body.querySelectorAll('.behavior-details').forEach(button=>button.onclick=e=>{e.stopPropagation();const row=button.closest('.nba-row');if(row)showBehaviorFinding(row.dataset.id,row.dataset.sensor)});
   window.OTDataTables?.refresh('table-nba');
 }
 
-async function showBehaviorFinding(id){
-  let item=behaviorFindings.find(value=>String(nbaID(value))===String(id));
-  try{item=await api(`/behavior-findings/${encodeURIComponent(id)}`)}catch(error){if(!item){alert(error.message);return}}
+async function showBehaviorFinding(id,sensorID){
+  let item=behaviorFindings.find(value=>String(nbaID(value))===String(id)&&String(nbaValue(value,'SensorID',''))===String(sensorID||''));
+  try{item=await api(`/behavior-findings/${encodeURIComponent(id)}?sensor_id=${encodeURIComponent(sensorID||'')}`)}catch(error){if(!item){alert(error.message);return}}
   const evidence=nbaEvidence(item),findingType=behaviorFindingType(item);
   document.getElementById('nba-detail-body').innerHTML=`
     <div class="detail-grid">

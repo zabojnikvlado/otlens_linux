@@ -58,20 +58,22 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 	}
 	var alerts []telemetryAlert
 	if err := json.Unmarshal(alertsJSON, &alerts); err != nil {
-		return nil, nil // malformed/empty — nothing to record, not a sync failure
+		return nil, err
 	}
 	var newlyCreated []AlertHistoryEntry
 	for _, a := range alerts {
 		if a.ID == "" {
 			continue
 		}
-		firstSeen := a.FirstSeen
-		if firstSeen.IsZero() {
-			firstSeen = time.Now()
-		}
 		lastSeen := a.LastSeen
 		if lastSeen.IsZero() {
-			lastSeen = firstSeen
+			// A detection without an event timestamp cannot be safely ordered
+			// against retained history. Do not manufacture a fresh active alert.
+			continue
+		}
+		firstSeen := a.FirstSeen
+		if firstSeen.IsZero() {
+			firstSeen = lastSeen
 		}
 		status := a.Status
 		if status == "" {
@@ -85,11 +87,12 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen,evidence)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
-				type = EXCLUDED.type,
-				severity = EXCLUDED.severity,
-				message = EXCLUDED.message,
-				ip = EXCLUDED.ip,
+				type = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.type ELSE alert_history.type END,
+				severity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.severity ELSE alert_history.severity END,
+				message = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.message ELSE alert_history.message END,
+				ip = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.ip ELSE alert_history.ip END,
 				status = CASE
+					WHEN EXCLUDED.last_seen < alert_history.last_seen THEN alert_history.status
 					WHEN alert_history.status='approved' THEN alert_history.status
 					WHEN alert_history.status='confirmed' AND EXCLUDED.status='new' AND EXCLUDED.count<=alert_history.count THEN alert_history.status
 					ELSE EXCLUDED.status
@@ -97,7 +100,7 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				count = GREATEST(alert_history.count, EXCLUDED.count),
 				first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
 				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
-				evidence = EXCLUDED.evidence
+				evidence = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.evidence ELSE alert_history.evidence END
 			RETURNING (xmax = 0) AS inserted
 		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen, jsonObject(a.Evidence))
 		if err != nil {
@@ -352,6 +355,52 @@ func (r *Repository) ListAlertHistory(ctx context.Context, limit int) ([]AlertHi
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ListBehaviorAlertHistory reads behavior findings directly instead of taking
+// a slice of the newest alerts of every type. This prevents unrelated alert
+// volume from pushing still-retained behavior findings out of the NBA view.
+func (r *Repository) ListBehaviorAlertHistory(ctx context.Context, limit int, activeOnly bool) ([]AlertHistoryEntry, error) {
+	if limit <= 0 || limit > 10000 {
+		limit = 10000
+	}
+	activeSQL := ""
+	if activeOnly {
+		activeSQL = " AND status<>'approved' AND last_seen >= NOW()-INTERVAL '5 minutes'"
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
+		FROM alert_history WHERE type LIKE 'behavior\_%' ESCAPE '\'`+activeSQL+` ORDER BY last_seen DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AlertHistoryEntry, 0)
+	for rows.Next() {
+		var e AlertHistoryEntry
+		var evidence []byte
+		if err := rows.Scan(&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen, &evidence); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &e.Evidence)
+		e.Active = alertIsActive(e.Status, e.LastSeen, time.Now())
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) BehaviorAlertHistoryByKey(ctx context.Context, sensorID, alertKey string) (AlertHistoryEntry, error) {
+	var e AlertHistoryEntry
+	var evidence []byte
+	err := r.db.QueryRowContext(ctx, `SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
+		FROM alert_history WHERE sensor_id=$1 AND alert_key=$2 AND type LIKE 'behavior\_%' ESCAPE '\'`, sensorID, alertKey).Scan(
+		&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen, &evidence)
+	if err != nil {
+		return e, err
+	}
+	_ = json.Unmarshal(evidence, &e.Evidence)
+	e.Active = alertIsActive(e.Status, e.LastSeen, time.Now())
+	return e, nil
 }
 
 func jsonObject(value interface{}) string {

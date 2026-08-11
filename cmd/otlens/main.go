@@ -503,7 +503,8 @@ func main() {
 					log.Printf("OTLens analysis result upload failed: %v", err)
 				}
 			}, Snapshot: func() (management.TelemetrySnapshot, error) {
-				graph := topology.Build(application.AssetEngine.GetAll(), application.FlowEngine.GetDirtyFlows(), application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
+				dirtyFlows := application.FlowEngine.GetDirtyFlows()
+				graph := topology.Build(application.AssetEngine.GetAll(), dirtyFlows, application.StoreEngine.GetTags(), cfg.ICS.ModbusPort, cfg.ICS.S7Port, cfg.Deception.HoneypotThreshold)
 				graphJSON, err := marshal(graph)
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
@@ -573,7 +574,18 @@ func main() {
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
-				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON, UDPConversations: udpConversationsJSON, UDPTelemetry: udpTelemetryJSON, UDPProtocolExchanges: udpExchangesJSON}, nil
+				flowSync := make([]management.FlowSyncState, 0, len(dirtyFlows))
+				for _, f := range dirtyFlows {
+					if f == nil {
+						continue
+					}
+					flowSync = append(flowSync, management.FlowSyncState{
+						ID: f.ID, InitiatorIP: f.InitiatorIP, ResponderIP: f.ResponderIP, InitiatorPort: f.InitiatorPort, ResponderPort: f.ResponderPort,
+						PacketsAToB: f.PacketsAToB, PacketsBToA: f.PacketsBToA, BytesAToB: f.BytesAToB, BytesBToA: f.BytesBToA,
+						Packets: f.Packets, Bytes: f.Bytes, LastSeen: f.LastSeen, VLANID: f.VLANID,
+					})
+				}
+				return management.TelemetrySnapshot{SensorID: cfg.Central.SensorID, CapturedAt: time.Now().UTC(), Topology: graphJSON, Tags: tagsJSON, TagChanges: changesJSON, TagEvents: eventsJSON, Alerts: alertsJSON, Baseline: baselineJSON, Rules: rulesJSON, DNSObservations: dnsJSON, SMBObservations: smbJSON, ProtocolObservations: protocolJSON, UDPConversations: udpConversationsJSON, UDPTelemetry: udpTelemetryJSON, UDPProtocolExchanges: udpExchangesJSON, FlowSync: flowSync}, nil
 			}}
 		go worker.Run(ctx)
 		logger.Log.Info("Central synchronization started", zap.String("url", cfg.Central.URL), zap.String("sensor_id", cfg.Central.SensorID))

@@ -143,15 +143,15 @@ func upsertTopologyEdges(ctx context.Context, x execer, sensorID string, edges [
 		}
 		query := `INSERT INTO topology_edges(sensor_id,pair_key,src_ip,dst_ip,protocols,is_ot,from_honeypot,vlan_id,packets,bytes,flow_count,first_seen,last_seen) VALUES ` + strings.Join(values, ",") + `
 ON CONFLICT(sensor_id,pair_key) DO UPDATE SET
-	src_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.src_ip ELSE topology_edges.src_ip END,
-	dst_ip = CASE WHEN EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.dst_ip ELSE topology_edges.dst_ip END,
-	protocols = EXCLUDED.protocols,
+	src_ip = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen AND EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.src_ip ELSE topology_edges.src_ip END,
+	dst_ip = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen AND EXCLUDED.from_honeypot AND NOT topology_edges.from_honeypot THEN EXCLUDED.dst_ip ELSE topology_edges.dst_ip END,
+	protocols = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen THEN EXCLUDED.protocols ELSE topology_edges.protocols END,
 	is_ot = topology_edges.is_ot OR EXCLUDED.is_ot,
 	from_honeypot = topology_edges.from_honeypot OR EXCLUDED.from_honeypot,
-	vlan_id = EXCLUDED.vlan_id,
-	packets = EXCLUDED.packets,
-	bytes = EXCLUDED.bytes,
-	flow_count = EXCLUDED.flow_count,
+	vlan_id = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen THEN EXCLUDED.vlan_id ELSE topology_edges.vlan_id END,
+	packets = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen THEN EXCLUDED.packets ELSE topology_edges.packets END,
+	bytes = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen THEN EXCLUDED.bytes ELSE topology_edges.bytes END,
+	flow_count = CASE WHEN EXCLUDED.last_seen >= topology_edges.last_seen THEN EXCLUDED.flow_count ELSE topology_edges.flow_count END,
 	first_seen = LEAST(topology_edges.first_seen, EXCLUDED.first_seen),
 	last_seen = GREATEST(topology_edges.last_seen, EXCLUDED.last_seen)`
 		if _, err := x.ExecContext(ctx, query, args...); err != nil {
@@ -247,15 +247,15 @@ func upsertTopologyNodes(ctx context.Context, x execer, sensorID string, nodes [
 			INSERT INTO topology_nodes(sensor_id,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			ON CONFLICT(sensor_id,ip) DO UPDATE SET
-				mac = EXCLUDED.mac,
-				hostname = EXCLUDED.hostname,
-				vendor = EXCLUDED.vendor,
+				mac = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.mac='' THEN EXCLUDED.mac ELSE topology_nodes.mac END,
+				hostname = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.hostname='' THEN EXCLUDED.hostname ELSE topology_nodes.hostname END,
+				vendor = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.vendor='' THEN EXCLUDED.vendor ELSE topology_nodes.vendor END,
 				is_ot = topology_nodes.is_ot OR EXCLUDED.is_ot,
-				protocols = EXCLUDED.protocols,
-				confirmed = EXCLUDED.confirmed,
-				score = EXCLUDED.score,
-				vlan_id = EXCLUDED.vlan_id,
-				packet_count = EXCLUDED.packet_count,
+				protocols = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.protocols ELSE topology_nodes.protocols END,
+				confirmed = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.confirmed ELSE topology_nodes.confirmed END,
+				score = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.score ELSE topology_nodes.score END,
+				vlan_id = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.vlan_id ELSE topology_nodes.vlan_id END,
+				packet_count = CASE WHEN EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.packet_count ELSE topology_nodes.packet_count END,
 				first_seen = LEAST(topology_nodes.first_seen, EXCLUDED.first_seen),
 				last_seen = GREATEST(topology_nodes.last_seen, EXCLUDED.last_seen)`,
 			sensorID, n.IP, n.MAC, n.Hostname, n.Vendor, n.IsOT, protocols, n.Confirmed, n.Score, n.VLANID, n.PacketCount, firstSeen, lastSeen,

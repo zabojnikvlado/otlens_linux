@@ -92,11 +92,12 @@ func New(cfg Config) *Client {
 // distinguish authentication/enrollment failures from ordinary transport or
 // server errors without parsing a human-readable string.
 type HTTPError struct {
-	Prefix     string
-	Status     string
-	StatusCode int
-	Body       string
-	Code       string
+	Prefix          string
+	Status          string
+	StatusCode      int
+	Body            string
+	Code            string
+	CurrentSequence int64
 }
 
 func (e *HTTPError) Error() string {
@@ -114,12 +115,13 @@ func syncErr(prefix string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	msg := strings.TrimSpace(string(body))
 	var payload struct {
-		Code string `json:"code"`
+		Code            string `json:"code"`
+		CurrentSequence int64  `json:"current_sequence"`
 	}
 	if msg != "" {
 		_ = json.Unmarshal(body, &payload)
 	}
-	return &HTTPError{Prefix: prefix, Status: resp.Status, StatusCode: resp.StatusCode, Body: msg, Code: strings.TrimSpace(payload.Code)}
+	return &HTTPError{Prefix: prefix, Status: resp.Status, StatusCode: resp.StatusCode, Body: msg, Code: strings.TrimSpace(payload.Code), CurrentSequence: payload.CurrentSequence}
 }
 
 // IsSensorAuthError reports whether an authenticated sensor API call was
@@ -136,6 +138,17 @@ func IsSensorAuthError(err error) bool {
 func IsSensorResetPendingError(err error) bool {
 	var httpErr *HTTPError
 	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusConflict && httpErr.Code == "sensor_reset_pending"
+}
+
+// TelemetrySequenceConflict reports that Central already has a newer telemetry
+// sequence. The worker adopts that sequence and retries on the next sync cycle;
+// it must not mark the rejected snapshot's dirty alerts/flows as synchronized.
+func TelemetrySequenceConflict(err error) (int64, bool) {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict || httpErr.Code != "telemetry_sequence_conflict" || httpErr.CurrentSequence <= 0 {
+		return 0, false
+	}
+	return httpErr.CurrentSequence, true
 }
 
 func enrollmentRequired(err error) bool {

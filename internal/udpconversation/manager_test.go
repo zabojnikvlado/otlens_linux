@@ -236,3 +236,24 @@ func BenchmarkObserveParallel256Shards(b *testing.B) {
 		}
 	})
 }
+
+func TestConversationIDChangesAfterIdleExpiryAndTupleReuse(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 4, MaxPacketsPerConversation: 10, IdleTimeout: time.Second})
+	start := time.Unix(10_000, 0).UTC()
+	packet := udpPacket("10.0.0.1", 53000, "10.0.0.2", 53, 64, start)
+	first, _, ok := manager.ObserveWithContext(packet)
+	if !ok || first == nil {
+		t.Fatal("first UDP conversation was not created")
+	}
+	if expired := manager.ExpireIdle(start.Add(2 * time.Second)); expired != 1 {
+		t.Fatalf("expired = %d, want 1", expired)
+	}
+	packet.Timestamp = start.Add(3 * time.Second)
+	second, _, ok := manager.ObserveWithContext(packet)
+	if !ok || second == nil {
+		t.Fatal("second UDP conversation was not created")
+	}
+	if first.ID == second.ID {
+		t.Fatalf("reused UDP tuple inherited the old conversation ID %q", first.ID)
+	}
+}

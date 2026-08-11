@@ -317,12 +317,15 @@ func hashKey(key Key) uint32 {
 }
 
 func (m *Manager) newConversation(key Key, now time.Time, flowID string) *Conversation {
-	return &Conversation{ID: conversationID(key), FlowID: flowID, SensorID: m.config.SensorID, Key: key, Protocol: "udp", StartedAt: now, LastSeenAt: now}
+	return &Conversation{ID: conversationID(key, now), FlowID: flowID, SensorID: m.config.SensorID, Key: key, Protocol: "udp", StartedAt: now, LastSeenAt: now}
 }
 
-func conversationID(key Key) string {
+func conversationID(key Key, startedAt time.Time) string {
+	// Endpoint tuples are routinely reused by UDP clients. Include the session
+	// start in the identifier so a conversation created after idle expiry cannot
+	// inherit protocol exchanges from an earlier session with the same 4-tuple.
 	return key.EndpointAIP + ":" + fmtPort(key.EndpointAPort) + "-" +
-		key.EndpointBIP + ":" + fmtPort(key.EndpointBPort) + "-udp"
+		key.EndpointBIP + ":" + fmtPort(key.EndpointBPort) + "-udp-" + fmt.Sprintf("%x", startedAt.UnixNano())
 }
 
 func flowID(key Key) string {

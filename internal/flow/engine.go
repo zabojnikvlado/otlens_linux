@@ -440,27 +440,33 @@ func (e *Engine) GetDirtyFlows() []*Flow {
 	return result
 }
 
-// MarkFlowsSynced marks the given flow IDs as successfully reported —
-// call only after Central has acknowledged the sync that included
-// them. Same narrow race window as detect.Engine.MarkAlertsSynced: a
-// flow that changes again between GetDirtyFlows' snapshot and this
-// call just isn't reflected until it changes again and goes dirty once
-// more, which is an acceptable tradeoff for a monitoring field like
-// Packets/Bytes, not silent data loss — the flow itself is never
-// dropped, only briefly slightly stale.
-func (e *Engine) MarkFlowsSynced(ids []string) {
+// MarkFlowsSynced marks only the exact flow versions that Central just
+// acknowledged. A live flow can advance while telemetry is in flight; matching
+// only by ID would lose that newer counter/LastSeen update by marking it synced.
+func (e *Engine) MarkFlowsSynced(sent []SyncSnapshot) {
 
-	if len(ids) == 0 {
+	if len(sent) == 0 {
 		return
 	}
 
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	for _, id := range ids {
-		if f, ok := e.flows[id]; ok {
-			f.Synced = true
+	for _, snapshot := range sent {
+		f, ok := e.flows[snapshot.ID]
+		if !ok {
+			continue
 		}
+		if f.Packets != snapshot.Packets || f.Bytes != snapshot.Bytes ||
+			f.PacketsAToB != snapshot.PacketsAToB || f.PacketsBToA != snapshot.PacketsBToA ||
+			f.BytesAToB != snapshot.BytesAToB || f.BytesBToA != snapshot.BytesBToA ||
+			!f.LastSeen.Equal(snapshot.LastSeen) || f.VLANID != snapshot.VLANID ||
+			f.InitiatorIP != snapshot.InitiatorIP || f.ResponderIP != snapshot.ResponderIP ||
+			f.InitiatorPort != snapshot.InitiatorPort || f.ResponderPort != snapshot.ResponderPort {
+			// It changed after GetDirtyFlows. Leave it dirty for the next sync.
+			continue
+		}
+		f.Synced = true
 	}
 }
 

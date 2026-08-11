@@ -56,7 +56,6 @@ type flowContact struct {
 }
 
 func persistFlowObservations(ctx context.Context, x execer, sensorID string, capturedAt time.Time, edges []topology.Edge) error {
-	bucket := capturedAt.UTC().Truncate(time.Minute)
 	valid := make([]topology.Edge, 0, len(edges))
 	flowIDs := make([]string, 0, len(edges))
 	seenIDs := make(map[string]struct{}, len(edges))
@@ -78,6 +77,7 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		packets, bytes           uint64
 		packetsAToB, packetsBToA uint64
 		bytesAToB, bytesBToA     uint64
+		lastSeen                 time.Time
 	}
 	previous := make(map[string]counter, len(flowIDs))
 
@@ -97,14 +97,14 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 			args = append(args, id)
 			ids = append(ids, fmt.Sprintf("$%d", len(args)))
 		}
-		rows, err := x.QueryContext(ctx, `SELECT flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a FROM flow_counters WHERE sensor_id=$1 AND flow_id IN (`+strings.Join(ids, ",")+`)`, args...)
+		rows, err := x.QueryContext(ctx, `SELECT flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,COALESCE(last_seen,'1970-01-01'::timestamptz) FROM flow_counters WHERE sensor_id=$1 AND flow_id IN (`+strings.Join(ids, ",")+`)`, args...)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var id string
 			var c counter
-			if err := rows.Scan(&id, &c.packets, &c.bytes, &c.packetsAToB, &c.packetsBToA, &c.bytesAToB, &c.bytesBToA); err != nil {
+			if err := rows.Scan(&id, &c.packets, &c.bytes, &c.packetsAToB, &c.packetsBToA, &c.bytesAToB, &c.bytesBToA, &c.lastSeen); err != nil {
 				rows.Close()
 				return err
 			}
@@ -119,16 +119,34 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 
 	type observation struct {
 		edge                     topology.Edge
+		eventAt                  time.Time
 		packets, bytes           uint64
 		packetsAToB, packetsBToA uint64
 		bytesAToB, bytesBToA     uint64
 	}
 	observations := make([]observation, 0, len(valid))
+	accepted := make([]topology.Edge, 0, len(valid))
 	for _, e := range valid {
+		eventAt := e.LastSeen
+		if eventAt.IsZero() {
+			eventAt = capturedAt
+		}
+		old, found := previous[e.ID]
+		if found && !old.lastSeen.IsZero() && !old.lastSeen.Equal(time.Unix(0, 0).UTC()) {
+			if eventAt.Before(old.lastSeen) {
+				// Restored dirty flow older than what Central already folded in.
+				// Do not lower counters or manufacture a counter-reset delta.
+				continue
+			}
+			if eventAt.Equal(old.lastSeen) && (e.Packets < old.packets || e.Bytes < old.bytes || e.PacketsAToB < old.packetsAToB || e.PacketsBToA < old.packetsBToA || e.BytesAToB < old.bytesAToB || e.BytesBToA < old.bytesBToA) {
+				continue
+			}
+		}
+		accepted = append(accepted, e)
 		dp, db := e.Packets, e.Bytes
 		dpa, dpb := e.PacketsAToB, e.PacketsBToA
 		dba, dbb := e.BytesAToB, e.BytesBToA
-		if old, found := previous[e.ID]; found {
+		if found {
 			if dp >= old.packets {
 				dp -= old.packets
 			}
@@ -150,11 +168,16 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		}
 		if dp > 0 || db > 0 {
 			observations = append(observations, observation{
-				edge: e, packets: dp, bytes: db,
+				edge: e, eventAt: eventAt, packets: dp, bytes: db,
 				packetsAToB: dpa, packetsBToA: dpb,
 				bytesAToB: dba, bytesBToA: dbb,
 			})
 		}
+	}
+
+	valid = accepted
+	if len(valid) == 0 {
+		return nil
 	}
 
 	// Keep each statement well below PostgreSQL's bind-parameter ceiling.
@@ -169,7 +192,7 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		for _, o := range observations[start:end] {
 			e := o.edge
 			values = append(values, appendSQLTuple(&args,
-				sensorID, e.ID, bucket, capturedAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol,
+				sensorID, e.ID, o.eventAt.UTC().Truncate(time.Minute), o.eventAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol,
 				e.InitiatorIP, e.ResponderIP, e.InitiatorPort, e.ResponderPort,
 				o.packets, o.bytes, o.packetsAToB, o.packetsBToA, o.bytesAToB, o.bytesBToA, e.VLANID, e.IsOT,
 			))
@@ -185,12 +208,16 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		if end > len(valid) {
 			end = len(valid)
 		}
-		args := make([]interface{}, 0, (end-start)*8)
+		args := make([]interface{}, 0, (end-start)*9)
 		values := make([]string, 0, end-start)
 		for _, e := range valid[start:end] {
-			values = append(values, appendSQLTuple(&args, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA))
+			eventAt := e.LastSeen
+			if eventAt.IsZero() {
+				eventAt = capturedAt
+			}
+			values = append(values, appendSQLTuple(&args, sensorID, e.ID, e.Packets, e.Bytes, e.PacketsAToB, e.PacketsBToA, e.BytesAToB, e.BytesBToA, eventAt))
 		}
-		query := `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,updated_at=NOW()`
+		query := `INSERT INTO flow_counters(sensor_id,flow_id,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,last_seen) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id) DO UPDATE SET packets=EXCLUDED.packets,bytes=EXCLUDED.bytes,packets_a_to_b=EXCLUDED.packets_a_to_b,packets_b_to_a=EXCLUDED.packets_b_to_a,bytes_a_to_b=EXCLUDED.bytes_a_to_b,bytes_b_to_a=EXCLUDED.bytes_b_to_a,last_seen=EXCLUDED.last_seen,updated_at=NOW() WHERE flow_counters.last_seen IS NULL OR EXCLUDED.last_seen >= flow_counters.last_seen`
 		if _, err := x.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}

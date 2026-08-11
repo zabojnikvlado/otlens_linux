@@ -217,32 +217,70 @@ func (w *Worker) sync(ctx context.Context) {
 			if uploadErr == nil {
 				w.markSuccess(nextSequence)
 				if w.Detect != nil && len(snapshot.Alerts) > 0 {
-					var sent []struct {
-						ID string `json:"ID"`
-					}
+					var sent []*detect.Alert
 					if json.Unmarshal(snapshot.Alerts, &sent) == nil {
-						ids := make([]string, 0, len(sent))
-						for _, a := range sent {
-							ids = append(ids, a.ID)
-						}
-						w.Detect.MarkAlertsSynced(ids)
+						w.Detect.MarkAlertsSynced(sent)
 					}
 				}
-				if w.Flow != nil && len(snapshot.Topology) > 0 {
-					var sentGraph struct {
-						Edges []struct {
-							ID string `json:"ID"`
-						} `json:"Edges"`
+				if w.Flow != nil {
+					states := make([]flow.SyncSnapshot, 0, len(snapshot.FlowSync))
+					for _, item := range snapshot.FlowSync {
+						states = append(states, flow.SyncSnapshot{
+							ID: item.ID, InitiatorIP: item.InitiatorIP, ResponderIP: item.ResponderIP,
+							InitiatorPort: item.InitiatorPort, ResponderPort: item.ResponderPort,
+							PacketsAToB: item.PacketsAToB, PacketsBToA: item.PacketsBToA, BytesAToB: item.BytesAToB, BytesBToA: item.BytesBToA,
+							Packets: item.Packets, Bytes: item.Bytes, LastSeen: item.LastSeen, VLANID: item.VLANID,
+						})
 					}
-					if json.Unmarshal(snapshot.Topology, &sentGraph) == nil {
-						ids := make([]string, 0, len(sentGraph.Edges))
-						for _, edge := range sentGraph.Edges {
-							ids = append(ids, edge.ID)
+
+					// Backward-compatible fallback for custom snapshot providers/tests that
+					// have not populated FlowSync yet. Production snapshots carry FlowSync
+					// for *all* selected dirty flows, including flows deliberately omitted
+					// from the public topology graph.
+					if len(states) == 0 && len(snapshot.Topology) > 0 {
+						var sentGraph struct {
+							Edges []struct {
+								ID            string    `json:"ID"`
+								InitiatorIP   string    `json:"InitiatorIP"`
+								ResponderIP   string    `json:"ResponderIP"`
+								InitiatorPort uint16    `json:"InitiatorPort"`
+								ResponderPort uint16    `json:"ResponderPort"`
+								PacketsAToB   uint64    `json:"PacketsAToB"`
+								PacketsBToA   uint64    `json:"PacketsBToA"`
+								BytesAToB     uint64    `json:"BytesAToB"`
+								BytesBToA     uint64    `json:"BytesBToA"`
+								Packets       uint64    `json:"Packets"`
+								Bytes         uint64    `json:"Bytes"`
+								LastSeen      time.Time `json:"LastSeen"`
+								VLANID        uint16    `json:"VLANID"`
+							} `json:"Edges"`
 						}
-						w.Flow.MarkFlowsSynced(ids)
+						if json.Unmarshal(snapshot.Topology, &sentGraph) == nil {
+							for _, item := range sentGraph.Edges {
+								states = append(states, flow.SyncSnapshot{
+									ID: item.ID, InitiatorIP: item.InitiatorIP, ResponderIP: item.ResponderIP,
+									InitiatorPort: item.InitiatorPort, ResponderPort: item.ResponderPort,
+									PacketsAToB: item.PacketsAToB, PacketsBToA: item.PacketsBToA, BytesAToB: item.BytesAToB, BytesBToA: item.BytesBToA,
+									Packets: item.Packets, Bytes: item.Bytes, LastSeen: item.LastSeen, VLANID: item.VLANID,
+								})
+							}
+						}
+					}
+					if len(states) > 0 {
+						w.Flow.MarkFlowsSynced(states)
 					}
 				}
 				break
+			}
+			if currentSequence, conflict := TelemetrySequenceConflict(uploadErr); conflict {
+				w.mu.Lock()
+				if currentSequence > w.sequence {
+					w.sequence = currentSequence
+				}
+				w.pending = 1
+				w.mu.Unlock()
+				log.Printf("OTLens telemetry sequence resynchronized with Central: current=%d rejected=%d", currentSequence, nextSequence)
+				return
 			}
 			if IsSensorAuthError(uploadErr) {
 				w.markUnregistered()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -34,7 +35,8 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS correlation_rule_id BIGINT;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS correlation_rule_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS mitre_tactics TEXT NOT NULL DEFAULT '';
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS mitre_techniques TEXT NOT NULL DEFAULT '';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_open_asset_rule ON incidents(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status <> 'closed';
+DROP INDEX IF EXISTS idx_incidents_open_asset_rule;
+CREATE UNIQUE INDEX idx_incidents_open_asset_rule ON incidents(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained');
 CREATE INDEX IF NOT EXISTS idx_incidents_updated ON incidents(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_incidents_status_score_updated ON incidents(status,score DESC,updated_at DESC);
 CREATE TABLE IF NOT EXISTS incident_events (
@@ -369,7 +371,13 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			// same built-in rule duplicates work and can overwrite NBA-specific scoring.
 			continue
 		}
-		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,ip,string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen) FROM alert_history WHERE ip<>'' AND status IN ('new','confirmed') AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$3 GROUP BY sensor_id,ip HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff)
+		relevantTypes := uniqueStrings(append(append([]string{}, rule.RequiredTypes...), rule.SequenceTypes...))
+		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,ip,string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen)
+			FROM alert_history
+			WHERE ip<>'' AND status IN ('new','confirmed')
+			  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$3
+			  AND (cardinality($4::text[])=0 OR type=ANY($4::text[]))
+			GROUP BY sensor_id,ip HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff, relevantTypes)
 		if qerr != nil {
 			return qerr
 		}
@@ -419,7 +427,7 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			var id int64
 			tactics, _ := json.Marshal(rule.MITRETactics)
 			techniques, _ := json.Marshal(rule.MITRETechniques)
-			err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques) VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status<>'closed' DO UPDATE SET title=EXCLUDED.title,severity=EXCLUDED.severity,score=EXCLUDED.score,confidence=EXCLUDED.confidence,summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),mitre_tactics=EXCLUDED.mitre_tactics,mitre_techniques=EXCLUDED.mitre_techniques,updated_at=NOW() RETURNING id`, c.SensorID, c.IP, title, sev, score, confidence, summary, c.First, c.Last, rule.ID, rule.Name, string(tactics), string(techniques)).Scan(&id)
+			err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques) VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET title=EXCLUDED.title,severity=CASE WHEN (CASE LOWER(EXCLUDED.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= (CASE LOWER(incidents.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) THEN EXCLUDED.severity ELSE incidents.severity END,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),mitre_tactics=EXCLUDED.mitre_tactics,mitre_techniques=EXCLUDED.mitre_techniques,updated_at=NOW() RETURNING id`, c.SensorID, c.IP, title, sev, score, confidence, summary, c.First, c.Last, rule.ID, rule.Name, string(tactics), string(techniques)).Scan(&id)
 			if err != nil {
 				return err
 			}
@@ -432,7 +440,12 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 				FROM alert_history
 				WHERE sensor_id=$3 AND ip=$4 AND status IN ('new','confirmed')
 				  AND last_seen>NOW()-($5*INTERVAL '1 minute') AND last_seen>$6
-				ON CONFLICT DO NOTHING`, id, string(metadata), c.SensorID, c.IP, rule.WindowMinutes, correlationCutoff); err != nil {
+				  AND (cardinality($7::text[])=0 OR type=ANY($7::text[]))
+				ON CONFLICT(incident_id,event_type,source_key) DO UPDATE SET
+				  severity=EXCLUDED.severity,
+				  message=EXCLUDED.message,
+				  event_at=GREATEST(incident_events.event_at,EXCLUDED.event_at),
+				  metadata=EXCLUDED.metadata`, id, string(metadata), c.SensorID, c.IP, rule.WindowMinutes, correlationCutoff, relevantTypes); err != nil {
 				return err
 			}
 		}
@@ -486,15 +499,20 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 		var incidentID int64
 		err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques)
 			VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,'Network Behavior Analytics','["TA0001"]','[]')
-			ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status<>'closed' DO UPDATE SET
-				severity=EXCLUDED.severity,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),
+			ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET
+				severity=CASE WHEN (CASE LOWER(EXCLUDED.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= (CASE LOWER(incidents.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) THEN EXCLUDED.severity ELSE incidents.severity END,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),
 				summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),updated_at=NOW()
 			RETURNING id`, item.sensorID, item.ip, "Network behavior incident on "+item.ip, item.severity, scoreValue, confidenceValue, item.message, item.firstSeen, item.lastSeen, ruleID).Scan(&incidentID)
 		if err != nil {
 			return err
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO incident_events(incident_id,event_type,source_key,severity,message,event_at,metadata)
-			VALUES($1,'behavior',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, incidentID, item.alertKey, item.severity, item.message, item.lastSeen, string(item.evidence)); err != nil {
+			VALUES($1,'behavior',$2,$3,$4,$5,$6)
+			ON CONFLICT(incident_id,event_type,source_key) DO UPDATE SET
+			  severity=EXCLUDED.severity,
+			  message=EXCLUDED.message,
+			  event_at=GREATEST(incident_events.event_at,EXCLUDED.event_at),
+			  metadata=EXCLUDED.metadata`, incidentID, item.alertKey, item.severity, item.message, item.lastSeen, string(item.evidence)); err != nil {
 			return err
 		}
 	}
@@ -830,16 +848,77 @@ func (r *Repository) IncidentEvents(ctx context.Context, id int64) ([]IncidentEv
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []IncidentEvent{}
 	for rows.Next() {
 		var x IncidentEvent
 		if err = rows.Scan(&x.ID, &x.IncidentID, &x.EventType, &x.SourceKey, &x.Severity, &x.Message, &x.EventAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+
+	// Older incidents, or incidents created while alert workflow state changed
+	// concurrently with correlation, can have a valid correlation summary but no
+	// persisted incident_events rows. Reconstruct the evidence window from
+	// alert_history so the analyst workbench never presents a contradictory empty
+	// timeline for an incident that explicitly says it matched events.
+	var sensorID, assetIP string
+	var lastSeen time.Time
+	var windowMinutes int
+	var requiredJSON, sequenceJSON []byte
+	if err := r.db.QueryRowContext(ctx, `SELECT i.sensor_id,i.asset_ip,i.last_seen,COALESCE(r.window_minutes,1440),COALESCE(r.required_types,'[]'::jsonb),COALESCE(r.sequence_types,'[]'::jsonb)
+		FROM incidents i LEFT JOIN correlation_rules r ON r.id=i.correlation_rule_id WHERE i.id=$1`, id).Scan(&sensorID, &assetIP, &lastSeen, &windowMinutes, &requiredJSON, &sequenceJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return out, nil
+		}
+		return nil, err
+	}
+	if windowMinutes < 1 {
+		windowMinutes = 1440
+	}
+	windowStart := lastSeen.Add(-time.Duration(windowMinutes) * time.Minute)
+	allowedTypes := map[string]bool{}
+	var requiredTypes, sequenceTypes []string
+	_ = json.Unmarshal(requiredJSON, &requiredTypes)
+	_ = json.Unmarshal(sequenceJSON, &sequenceTypes)
+	for _, alertType := range append(requiredTypes, sequenceTypes...) {
+		if normalized := strings.ToLower(strings.TrimSpace(alertType)); normalized != "" {
+			allowedTypes[normalized] = true
+		}
+	}
+	fallback, err := r.db.QueryContext(ctx, `SELECT alert_key,type,severity,message,last_seen
+		FROM alert_history
+		WHERE sensor_id=$1 AND ip=$2
+		  AND last_seen >= $3 AND last_seen <= $4
+		ORDER BY last_seen DESC
+		LIMIT 500`, sensorID, assetIP, windowStart, lastSeen)
+	if err != nil {
+		return nil, err
+	}
+	defer fallback.Close()
+	for fallback.Next() {
+		var sourceKey, alertType, severity, message string
+		var eventAt time.Time
+		if err := fallback.Scan(&sourceKey, &alertType, &severity, &message, &eventAt); err != nil {
+			return nil, err
+		}
+		if len(allowedTypes) > 0 && !allowedTypes[strings.ToLower(strings.TrimSpace(alertType))] {
+			continue
+		}
+		out = append(out, IncidentEvent{IncidentID: id, EventType: "alert", SourceKey: sourceKey, Severity: severity, Message: message, EventAt: eventAt})
+	}
+	return out, fallback.Err()
 }
 func (r *Repository) UpdateIncident(ctx context.Context, id int64, status, owner, summary string) error {
 	res, err := r.db.ExecContext(ctx, `UPDATE incidents SET status=$2,owner=$3,summary=$4,updated_at=NOW() WHERE id=$1`, id, status, owner, summary)

@@ -206,6 +206,26 @@ type SyncResponse struct {
 	AssetContexts      []AssetPolicyContext `json:"asset_contexts,omitempty"`
 }
 
+// FlowSyncState is runtime-only acknowledgement metadata for a telemetry
+// snapshot. It is deliberately excluded from JSON: Central does not need it;
+// the sensor worker uses it after an HTTP ACK to mark only the exact local flow
+// versions represented by that sync cycle as synchronized.
+type FlowSyncState struct {
+	ID            string
+	InitiatorIP   string
+	ResponderIP   string
+	InitiatorPort uint16
+	ResponderPort uint16
+	PacketsAToB   uint64
+	PacketsBToA   uint64
+	BytesAToB     uint64
+	BytesBToA     uint64
+	Packets       uint64
+	Bytes         uint64
+	LastSeen      time.Time
+	VLANID        uint16
+}
+
 // TelemetrySnapshot is the periodically uploaded sensor view used by the
 // Central Topology, Assets and OT Tags tabs. Sensors remain the source of
 // truth for passive discovery; Central only aggregates and persists it.
@@ -228,6 +248,7 @@ type TelemetrySnapshot struct {
 	BatchID              string          `json:"batch_id,omitempty"`
 	Sequence             int64           `json:"sequence,omitempty"`
 	Checksum             string          `json:"checksum,omitempty"`
+	FlowSync             []FlowSyncState `json:"-"`
 }
 
 type AnalysisJob struct {

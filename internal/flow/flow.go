@@ -81,3 +81,23 @@ type Flow struct {
 	// accumulate far more of these than fit in one JSONB value.
 	Synced bool
 }
+
+// SyncSnapshot is the subset of a flow serialized into Central telemetry that
+// must still match before an ACK is allowed to mark the live flow synchronized.
+// It prevents an in-flight HTTP request from acknowledging a newer local flow
+// version that Central never received.
+type SyncSnapshot struct {
+	ID            string
+	InitiatorIP   string
+	ResponderIP   string
+	InitiatorPort uint16
+	ResponderPort uint16
+	PacketsAToB   uint64
+	PacketsBToA   uint64
+	BytesAToB     uint64
+	BytesBToA     uint64
+	Packets       uint64
+	Bytes         uint64
+	LastSeen      time.Time
+	VLANID        uint16
+}

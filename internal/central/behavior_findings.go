@@ -1,7 +1,9 @@
 package central
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"sort"
@@ -42,6 +44,9 @@ type NetworkBehaviorOverview struct {
 	PreviewTopScore   float64                `json:"preview_top_score"`
 	PreviewTopReason  string                 `json:"preview_top_reason,omitempty"`
 	ActiveBaselines   uint64                 `json:"active_baselines"`
+	RegisteredSensors int                    `json:"registered_sensors"`
+	ReportingSensors  int                    `json:"reporting_sensors"`
+	AwaitingSensors   int                    `json:"awaiting_sensors"`
 	BehaviorAlerts    int                    `json:"behavior_alerts"`
 	AffectedAssets    int                    `json:"affected_assets"`
 	TopAnomaly        *AssetBehaviorProfile  `json:"top_anomaly,omitempty"`
@@ -80,7 +85,7 @@ func toString(value interface{}) string {
 	return string(data)
 }
 
-func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.TelemetrySnapshot, assetCount int) NetworkBehaviorOverview {
+func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.TelemetrySnapshot, assetCount, registeredSensors int) NetworkBehaviorOverview {
 	type baselineStatus struct {
 		Behavior struct {
 			Enabled           bool    `json:"enabled"`
@@ -103,7 +108,20 @@ func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.Te
 			PreviewTopReason      string  `json:"preview_top_reason"`
 		} `json:"anomaly"`
 	}
-	overview := NetworkBehaviorOverview{LearningComplete: true, State: "unknown", Profiles: []AssetBehaviorProfile{}}
+	if registeredSensors < len(telemetry) {
+		registeredSensors = len(telemetry)
+	}
+	overview := NetworkBehaviorOverview{
+		LearningComplete:  true,
+		State:             "unknown",
+		Profiles:          []AssetBehaviorProfile{},
+		RegisteredSensors: registeredSensors,
+		ReportingSensors:  len(telemetry),
+		AwaitingSensors:   max(0, registeredSensors-len(telemetry)),
+	}
+	if overview.AwaitingSensors > 0 {
+		overview.LearningComplete = false
+	}
 	var covered uint64
 	var readinessTotal, patternRateTotal, timeCoverageTotal float64
 	enabledSensors := 0
@@ -214,12 +232,17 @@ func buildBehaviorOverview(alerts []AlertHistoryEntry, telemetry []management.Te
 }
 
 func (s *Server) behaviorOverview(c *gin.Context) {
-	alerts, err := s.Repo.ListAlertHistory(c.Request.Context(), 2000)
+	alerts, err := s.Repo.ListBehaviorAlertHistory(c.Request.Context(), 10000, true)
 	if err != nil {
 		respondInternalError(c, err)
 		return
 	}
 	telemetry, err := s.Repo.Telemetry(c.Request.Context())
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	registered, err := s.Repo.ListSensors(c.Request.Context())
 	if err != nil {
 		respondInternalError(c, err)
 		return
@@ -233,36 +256,33 @@ func (s *Server) behaviorOverview(c *gin.Context) {
 			assetCount += len(graph.Nodes)
 		}
 	}
-	c.JSON(http.StatusOK, buildBehaviorOverview(alerts, telemetry, assetCount))
+	c.JSON(http.StatusOK, buildBehaviorOverview(alerts, telemetry, assetCount, len(registered)))
 }
 
 func (s *Server) behaviorFindings(c *gin.Context) {
-	alerts, err := s.Repo.ListAlertHistory(c.Request.Context(), 2000)
+	alerts, err := s.Repo.ListBehaviorAlertHistory(c.Request.Context(), 10000, false)
 	if err != nil {
 		respondInternalError(c, err)
 		return
 	}
-	result := make([]AlertHistoryEntry, 0)
-	for _, alert := range alerts {
-		if strings.HasPrefix(alert.Type, "behavior_") {
-			result = append(result, alert)
-		}
-	}
-	c.JSON(http.StatusOK, result)
+	c.JSON(http.StatusOK, alerts)
 }
 
 func (s *Server) behaviorFinding(c *gin.Context) {
 	id := c.Param("id")
-	alerts, err := s.Repo.ListAlertHistory(c.Request.Context(), 2000)
+	sensorID := strings.TrimSpace(c.Query("sensor_id"))
+	if sensorID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sensor_id is required for an unambiguous behavior finding"})
+		return
+	}
+	alert, err := s.Repo.BehaviorAlertHistoryByKey(c.Request.Context(), sensorID, id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "behavior finding not found"})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}
-	for _, alert := range alerts {
-		if alert.AlertKey == id && strings.HasPrefix(alert.Type, "behavior_") {
-			c.JSON(http.StatusOK, alert)
-			return
-		}
-	}
-	c.JSON(http.StatusNotFound, gin.H{"error": "behavior finding not found"})
+	c.JSON(http.StatusOK, alert)
 }

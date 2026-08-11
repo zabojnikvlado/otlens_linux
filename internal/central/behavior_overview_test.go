@@ -17,7 +17,7 @@ func TestBuildBehaviorOverview(t *testing.T) {
 		{SensorID: "s1", IP: "10.0.0.20", Type: "behavior_finding", Status: "approved", Active: false, Evidence: map[string]interface{}{"risk_score": 99.0}},
 		{SensorID: "s1", IP: "10.0.0.30", Type: "behavior_finding", Status: "new", Active: false, LastSeen: now.Add(-time.Hour), Evidence: map[string]interface{}{"risk_score": 95.0}},
 	}
-	got := buildBehaviorOverview(alerts, []management.TelemetrySnapshot{{SensorID: "s1", Baseline: baseline}}, 10)
+	got := buildBehaviorOverview(alerts, []management.TelemetrySnapshot{{SensorID: "s1", Baseline: baseline}}, 10, 1)
 	if !got.LearningComplete || got.ActiveBaselines != 842 || got.Coverage != 80 {
 		t.Fatalf("unexpected baseline overview: %+v", got)
 	}
@@ -31,8 +31,19 @@ func TestBuildBehaviorOverview(t *testing.T) {
 
 func TestBuildBehaviorOverviewLearningIsNotHealthy(t *testing.T) {
 	baseline := json.RawMessage(`{"behavior":{"enabled":true,"mode":"learning","profiles":3,"asset_profiles":1}}`)
-	got := buildBehaviorOverview(nil, []management.TelemetrySnapshot{{Baseline: baseline}}, 4)
+	got := buildBehaviorOverview(nil, []management.TelemetrySnapshot{{Baseline: baseline}}, 4, 1)
 	if got.State != "learning" || got.LearningComplete {
 		t.Fatalf("learning baseline reported as ready: %+v", got)
+	}
+}
+
+func TestBuildBehaviorOverviewMissingRegisteredSensorStaysLearning(t *testing.T) {
+	baseline := json.RawMessage(`{"behavior":{"enabled":true,"mode":"monitoring","profiles":10,"asset_profiles":2}}`)
+	got := buildBehaviorOverview(nil, []management.TelemetrySnapshot{{SensorID: "s1", Baseline: baseline}}, 2, 2)
+	if got.LearningComplete || got.State != "learning" {
+		t.Fatalf("missing registered sensor must not report monitoring as globally mature: %+v", got)
+	}
+	if got.RegisteredSensors != 2 || got.ReportingSensors != 1 || got.AwaitingSensors != 1 {
+		t.Fatalf("unexpected sensor telemetry rollup: %+v", got)
 	}
 }

@@ -496,6 +496,15 @@ func (s *Server) telemetry(c *gin.Context) {
 	}
 	newAlerts, err := s.Repo.PutTelemetry(c, x)
 	if err != nil {
+		var sequenceConflict *TelemetrySequenceConflictError
+		if errors.As(err, &sequenceConflict) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":            "telemetry sequence is older than Central state",
+				"code":             "telemetry_sequence_conflict",
+				"current_sequence": sequenceConflict.CurrentSequence,
+			})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}

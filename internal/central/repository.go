@@ -150,9 +150,27 @@ CREATE TABLE IF NOT EXISTS protocol_observations (
  src_port INTEGER NOT NULL DEFAULT 0, dst_port INTEGER NOT NULL DEFAULT 0,
  operation TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '', resource TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
  encrypted BOOLEAN NOT NULL DEFAULT FALSE, from_analysis BOOLEAN NOT NULL DEFAULT FALSE,
+ conversation_id TEXT NOT NULL DEFAULT '', flow_id TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT '', rtt_millis DOUBLE PRECISION NOT NULL DEFAULT 0,
  attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
  UNIQUE(sensor_id,observed_at,protocol,src_ip,dst_ip,src_port,dst_port,operation,summary)
 );
+ALTER TABLE protocol_observations ADD COLUMN IF NOT EXISTS conversation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE protocol_observations ADD COLUMN IF NOT EXISTS flow_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE protocol_observations ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT '';
+ALTER TABLE protocol_observations ADD COLUMN IF NOT EXISTS rtt_millis DOUBLE PRECISION NOT NULL DEFAULT 0;
+DO $$
+DECLARE legacy_unique TEXT;
+BEGIN
+ SELECT conname INTO legacy_unique
+ FROM pg_constraint
+ WHERE conrelid='protocol_observations'::regclass AND contype='u'
+   AND pg_get_constraintdef(oid) LIKE '%sensor_id%observed_at%protocol%src_ip%dst_ip%src_port%dst_port%operation%summary%'
+ LIMIT 1;
+ IF legacy_unique IS NOT NULL THEN
+  EXECUTE format('ALTER TABLE protocol_observations DROP CONSTRAINT %I', legacy_unique);
+ END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_protocol_observations_event_unique ON protocol_observations(sensor_id,observed_at,protocol,src_ip,dst_ip,src_port,dst_port,operation,conversation_id,flow_id,direction,summary);
 CREATE INDEX IF NOT EXISTS protocol_observations_sensor_time_idx ON protocol_observations(sensor_id, observed_at DESC);
 CREATE INDEX IF NOT EXISTS protocol_observations_protocol_time_idx ON protocol_observations(protocol, observed_at DESC);
 CREATE INDEX IF NOT EXISTS sensor_telemetry_captured_at_idx ON sensor_telemetry(captured_at);
@@ -389,26 +407,71 @@ CREATE TABLE IF NOT EXISTS dns_observations (
  server_ip TEXT NOT NULL DEFAULT '',
  query_name TEXT NOT NULL,
  query_type INTEGER NOT NULL DEFAULT 0,
+ transaction_id INTEGER NOT NULL DEFAULT 0,
+ conversation_id TEXT NOT NULL DEFAULT '',
+ direction TEXT NOT NULL DEFAULT '',
  response_code INTEGER NOT NULL DEFAULT 0,
  is_response BOOLEAN NOT NULL DEFAULT FALSE,
+ answer_count INTEGER NOT NULL DEFAULT 0,
+ payload_bytes INTEGER NOT NULL DEFAULT 0,
  answers JSONB NOT NULL DEFAULT '[]'::jsonb,
  cnames JSONB NOT NULL DEFAULT '[]'::jsonb,
  ttl BIGINT NOT NULL DEFAULT 0,
  UNIQUE(sensor_id,observed_at,client_ip,query_name,is_response)
 );
+ALTER TABLE dns_observations ADD COLUMN IF NOT EXISTS transaction_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dns_observations ADD COLUMN IF NOT EXISTS conversation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE dns_observations ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT '';
+ALTER TABLE dns_observations ADD COLUMN IF NOT EXISTS answer_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dns_observations ADD COLUMN IF NOT EXISTS payload_bytes INTEGER NOT NULL DEFAULT 0;
+DO $$
+DECLARE legacy_unique TEXT;
+BEGIN
+ SELECT conname INTO legacy_unique
+ FROM pg_constraint
+ WHERE conrelid='dns_observations'::regclass AND contype='u'
+   AND pg_get_constraintdef(oid) LIKE '%sensor_id%observed_at%client_ip%query_name%is_response%'
+ LIMIT 1;
+ IF legacy_unique IS NOT NULL THEN
+  EXECUTE format('ALTER TABLE dns_observations DROP CONSTRAINT %I', legacy_unique);
+ END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dns_observations_event_unique ON dns_observations(sensor_id,observed_at,client_ip,server_ip,transaction_id,query_name,query_type,is_response);
 CREATE INDEX IF NOT EXISTS idx_dns_observations_lookup ON dns_observations(sensor_id,observed_at,query_name);
 CREATE INDEX IF NOT EXISTS idx_dns_observations_client ON dns_observations(sensor_id,client_ip,observed_at);
 
 CREATE TABLE IF NOT EXISTS smb_observations (
  id BIGSERIAL PRIMARY KEY, sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  observed_at TIMESTAMPTZ NOT NULL, client_ip TEXT NOT NULL DEFAULT '', server_ip TEXT NOT NULL DEFAULT '',
- client_port INTEGER NOT NULL DEFAULT 0, server_port INTEGER NOT NULL DEFAULT 445, command TEXT NOT NULL DEFAULT '',
+ client_port INTEGER NOT NULL DEFAULT 0, server_port INTEGER NOT NULL DEFAULT 445, dialect TEXT NOT NULL DEFAULT '', command TEXT NOT NULL DEFAULT '',
  message_id NUMERIC(20,0) NOT NULL DEFAULT 0, session_id NUMERIC(20,0) NOT NULL DEFAULT 0, tree_id BIGINT NOT NULL DEFAULT 0,
+ file_id_persistent NUMERIC(20,0) NOT NULL DEFAULT 0, file_id_volatile NUMERIC(20,0) NOT NULL DEFAULT 0,
+ request_command TEXT NOT NULL DEFAULT '', request_matched BOOLEAN NOT NULL DEFAULT FALSE, stream_gapped BOOLEAN NOT NULL DEFAULT FALSE, stream_resynced BOOLEAN NOT NULL DEFAULT FALSE,
  share_name TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL DEFAULT '', named_pipe TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT '',
  bytes BIGINT NOT NULL DEFAULT 0, status BIGINT NOT NULL DEFAULT 0, is_response BOOLEAN NOT NULL DEFAULT FALSE,
  is_admin_share BOOLEAN NOT NULL DEFAULT FALSE, is_executable BOOLEAN NOT NULL DEFAULT FALSE, is_script BOOLEAN NOT NULL DEFAULT FALSE, is_encrypted BOOLEAN NOT NULL DEFAULT FALSE,
  UNIQUE(sensor_id,observed_at,client_ip,server_ip,message_id,command,is_response)
 );
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS dialect TEXT NOT NULL DEFAULT '';
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS file_id_persistent NUMERIC(20,0) NOT NULL DEFAULT 0;
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS file_id_volatile NUMERIC(20,0) NOT NULL DEFAULT 0;
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS request_command TEXT NOT NULL DEFAULT '';
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS request_matched BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS stream_gapped BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE smb_observations ADD COLUMN IF NOT EXISTS stream_resynced BOOLEAN NOT NULL DEFAULT FALSE;
+DO $$
+DECLARE legacy_unique TEXT;
+BEGIN
+ SELECT conname INTO legacy_unique
+ FROM pg_constraint
+ WHERE conrelid='smb_observations'::regclass AND contype='u'
+   AND pg_get_constraintdef(oid) LIKE '%sensor_id%observed_at%client_ip%server_ip%message_id%command%is_response%'
+ LIMIT 1;
+ IF legacy_unique IS NOT NULL THEN
+  EXECUTE format('ALTER TABLE smb_observations DROP CONSTRAINT %I', legacy_unique);
+ END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_smb_observations_event_unique ON smb_observations(sensor_id,observed_at,client_ip,server_ip,session_id,message_id,command,is_response);
 CREATE INDEX IF NOT EXISTS idx_smb_observations_lookup ON smb_observations(sensor_id,observed_at,client_ip,server_ip);
 CREATE INDEX IF NOT EXISTS idx_smb_observations_artifact ON smb_observations(sensor_id,share_name,file_name,observed_at);
 CREATE TABLE IF NOT EXISTS flow_counters (
@@ -420,9 +483,11 @@ CREATE TABLE IF NOT EXISTS flow_counters (
  packets_b_to_a BIGINT NOT NULL DEFAULT 0,
  bytes_a_to_b BIGINT NOT NULL DEFAULT 0,
  bytes_b_to_a BIGINT NOT NULL DEFAULT 0,
+ last_seen TIMESTAMPTZ,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY(sensor_id,flow_id)
 );
+ALTER TABLE flow_counters ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS flow_observations (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -449,6 +514,9 @@ CREATE TABLE IF NOT EXISTS flow_observations (
  UNIQUE(sensor_id,flow_id,bucket_start)
 );
 CREATE INDEX IF NOT EXISTS idx_flow_observations_contact ON flow_observations(sensor_id,bucket_start,src_ip,dst_ip);
+UPDATE flow_counters fc SET last_seen=history.last_seen
+FROM (SELECT sensor_id,flow_id,MAX(bucket_end) AS last_seen FROM flow_observations GROUP BY sensor_id,flow_id) history
+WHERE fc.sensor_id=history.sensor_id AND fc.flow_id=history.flow_id AND fc.last_seen IS NULL;
 CREATE TABLE IF NOT EXISTS asset_security_status (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
@@ -1094,6 +1162,16 @@ func learningCompletionConfirmed(raw json.RawMessage) bool {
 	return anyEnabled && legacyComplete && behaviorComplete
 }
 
+type TelemetrySequenceConflictError struct {
+	SensorID         string
+	IncomingSequence int64
+	CurrentSequence  int64
+}
+
+func (e *TelemetrySequenceConflictError) Error() string {
+	return fmt.Sprintf("telemetry sequence conflict for %s: incoming=%d current=%d", e.SensorID, e.IncomingSequence, e.CurrentSequence)
+}
+
 func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) ([]AlertHistoryEntry, error) {
 	if x.CapturedAt.IsZero() {
 		x.CapturedAt = time.Now().UTC()
@@ -1109,9 +1187,34 @@ func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySna
 		return nil, fmt.Errorf("begin telemetry transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Serialize ingestion per sensor before looking at sequence state. A stale
+	// packet must never run any of the derived-data side effects below (flow
+	// deltas, topology ledgers, DNS/SMB/protocol history or alert history).
+	// The advisory lock also covers the first-ever insert where there is no row
+	// yet for SELECT ... FOR UPDATE to lock.
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, x.SensorID); err != nil {
+		return nil, fmt.Errorf("lock telemetry sequence: %w", err)
+	}
+	var currentSequence int64
+	var currentChecksum string
+	sequenceErr := tx.QueryRowContext(ctx, `SELECT sequence,checksum FROM sensor_telemetry WHERE sensor_id=$1 FOR UPDATE`, x.SensorID).Scan(&currentSequence, &currentChecksum)
+	if sequenceErr != nil && !errors.Is(sequenceErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("load telemetry sequence: %w", sequenceErr)
+	}
+	if sequenceErr == nil {
+		if x.Sequence < currentSequence || (x.Sequence == currentSequence && !strings.EqualFold(strings.TrimSpace(x.Checksum), strings.TrimSpace(currentChecksum))) {
+			return nil, &TelemetrySequenceConflictError{SensorID: x.SensorID, IncomingSequence: x.Sequence, CurrentSequence: currentSequence}
+		}
+		if x.Sequence == currentSequence {
+			// Exact retry after Central committed but the sensor missed the HTTP
+			// response. Acknowledge it without replaying any side effect.
+			return nil, nil
+		}
+	}
+
 	_, err = tx.ExecContext(ctx, `INSERT INTO sensor_telemetry(sensor_id,captured_at,topology,tags,tag_changes,tag_events,alerts,baseline,rules,dns_observations,smb_observations,udp_conversations,udp_telemetry,udp_protocol_exchanges,batch_id,sequence,checksum,updated_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,udp_conversations=EXCLUDED.udp_conversations,udp_telemetry=EXCLUDED.udp_telemetry,udp_protocol_exchanges=EXCLUDED.udp_protocol_exchanges,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()
-WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), defaults(x.UDPConversations, "[]"), defaults(x.UDPTelemetry, "{}"), defaults(x.UDPProtocolExchanges, "[]"), x.BatchID, x.Sequence, x.Checksum)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONFLICT(sensor_id) DO UPDATE SET captured_at=EXCLUDED.captured_at,topology=EXCLUDED.topology,tags=EXCLUDED.tags,tag_changes=EXCLUDED.tag_changes,tag_events=EXCLUDED.tag_events,alerts=EXCLUDED.alerts,baseline=EXCLUDED.baseline,rules=EXCLUDED.rules,dns_observations=EXCLUDED.dns_observations,smb_observations=EXCLUDED.smb_observations,udp_conversations=EXCLUDED.udp_conversations,udp_telemetry=EXCLUDED.udp_telemetry,udp_protocol_exchanges=EXCLUDED.udp_protocol_exchanges,batch_id=EXCLUDED.batch_id,sequence=EXCLUDED.sequence,checksum=EXCLUDED.checksum,updated_at=NOW()`, x.SensorID, x.CapturedAt, x.Topology, x.Tags, defaults(x.TagChanges, "[]"), defaults(x.TagEvents, "[]"), defaults(x.Alerts, "[]"), defaults(x.Baseline, "{}"), defaults(x.Rules, "[]"), defaults(x.DNSObservations, "[]"), defaults(x.SMBObservations, "[]"), defaults(x.UDPConversations, "[]"), defaults(x.UDPTelemetry, "{}"), defaults(x.UDPProtocolExchanges, "[]"), x.BatchID, x.Sequence, x.Checksum)
 	if err != nil {
 		return nil, fmt.Errorf("store telemetry snapshot: %w", err)
 	}
@@ -1161,7 +1264,10 @@ WHERE sensor_telemetry.sequence <= EXCLUDED.sequence`, x.SensorID, x.CapturedAt,
 	// on record, since ListTopologyNodes is a superset fill-in, not a
 	// strict foreign key.
 	var graph topology.Graph
-	if len(x.Topology) > 0 && json.Unmarshal(x.Topology, &graph) == nil {
+	if len(x.Topology) > 0 {
+		if err := json.Unmarshal(x.Topology, &graph); err != nil {
+			return nil, fmt.Errorf("decode topology: %w", err)
+		}
 		if err := persistFlowObservations(ctx, tx, x.SensorID, x.CapturedAt, graph.Edges); err != nil {
 			return nil, fmt.Errorf("persist flow observations: %w", err)
 		}

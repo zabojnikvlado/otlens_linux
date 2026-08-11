@@ -11,6 +11,8 @@
 package detect
 
 import (
+	"bytes"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
@@ -764,17 +766,15 @@ func (e *Engine) GetDirtyAlerts() []*Alert {
 	return result
 }
 
-// MarkAlertsSynced marks the given alert IDs as successfully reported —
-// call only after Central has acknowledged the sync that included them.
-// There's a narrow window where an alert changes again between
-// GetDirtyAlerts' snapshot and this call — that update just isn't
-// reflected in Central until the alert changes again and goes dirty
-// once more (at most one sync interval later), which is an acceptable
-// tradeoff for a monitoring field like Count/LastSeen, not silent data
-// loss: the alert itself is never dropped, only briefly slightly stale.
-func (e *Engine) MarkAlertsSynced(ids []string) {
+// MarkAlertsSynced marks only the exact alert versions that Central just
+// acknowledged. An alert may change while the telemetry HTTP request is in
+// flight; matching by ID alone would incorrectly mark that newer local state as
+// synchronized even though Central only received the older snapshot. Comparing
+// all persisted/telemetry-visible fields keeps the newer version dirty so it is
+// sent on the next cycle.
+func (e *Engine) MarkAlertsSynced(sent []*Alert) {
 
-	if len(ids) == 0 {
+	if len(sent) == 0 {
 		return
 	}
 
@@ -782,12 +782,47 @@ func (e *Engine) MarkAlertsSynced(ids []string) {
 	defer e.mutex.Unlock()
 
 	now := time.Now()
-	for _, id := range ids {
-		if alert, ok := e.alerts[id]; ok {
-			alert.Synced = true
-			alert.lastSyncTouch = now
+	for _, snapshot := range sent {
+		if snapshot == nil || snapshot.ID == "" {
+			continue
 		}
+		alert, ok := e.alerts[snapshot.ID]
+		if !ok {
+			continue
+		}
+		if !sameAlertSyncVersion(alert, snapshot) {
+			// The live alert advanced after GetDirtyAlerts captured snapshot.
+			// Leave it dirty; the next telemetry cycle must carry that version.
+			continue
+		}
+		alert.Synced = true
+		alert.lastSyncTouch = now
 	}
+}
+
+func sameAlertSyncVersion(current, sent *Alert) bool {
+	if current == nil || sent == nil {
+		return false
+	}
+	return current.ID == sent.ID &&
+		current.Type == sent.Type &&
+		current.Severity == sent.Severity &&
+		current.Message == sent.Message &&
+		current.IP == sent.IP &&
+		current.PreviousMAC == sent.PreviousMAC &&
+		current.NewMAC == sent.NewMAC &&
+		current.FirstSeen.Equal(sent.FirstSeen) &&
+		current.LastSeen.Equal(sent.LastSeen) &&
+		current.Count == sent.Count &&
+		current.Status == sent.Status &&
+		current.StatusChangedAt.Equal(sent.StatusChangedAt) &&
+		sameAlertEvidence(current.Evidence, sent.Evidence)
+}
+
+func sameAlertEvidence(current, sent map[string]interface{}) bool {
+	left, leftErr := json.Marshal(current)
+	right, rightErr := json.Marshal(sent)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
 // Alerts, e.g. at startup after loading from disk.
