@@ -6,7 +6,9 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"strings"
@@ -87,13 +89,13 @@ func (s *Server) sendEmailNotification(alert AlertHistoryEntry) error {
 		return fmt.Errorf("email notifications enabled but smtp_host/from/to are not fully configured")
 	}
 
-	subject := fmt.Sprintf("[OTLens] %s alert: %s", strings.ToUpper(alert.Severity), alert.Type)
+	subject := sanitizeMailHeader(fmt.Sprintf("[OTLens] %s alert: %s", strings.ToUpper(alert.Severity), alert.Type))
 	body := fmt.Sprintf(
 		"Sensor: %s\nSeverity: %s\nType: %s\nIP: %s\nMessage: %s\nFirst seen: %s\n\n— OTLens Central",
 		alert.SensorID, alert.Severity, alert.Type, alert.IP, alert.Message, alert.FirstSeen.Format(time.RFC3339),
 	)
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s\r\n",
-		cfg.From, strings.Join(cfg.To, ", "), subject, body)
+		sanitizeMailHeader(cfg.From), sanitizeMailHeader(strings.Join(cfg.To, ", ")), subject, body)
 	return s.sendEmailRaw(cfg.From, cfg.To, msg)
 }
 
@@ -112,9 +114,24 @@ func (s *Server) sendEmailHTML(subject, htmlBody string, to []string) error {
 	}
 	msg := fmt.Sprintf(
 		"From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n",
-		cfg.From, strings.Join(to, ", "), subject, htmlBody,
+		sanitizeMailHeader(cfg.From), sanitizeMailHeader(strings.Join(to, ", ")), sanitizeMailHeader(subject), htmlBody,
 	)
 	return s.sendEmailRaw(cfg.From, to, msg)
+}
+
+func sanitizeMailHeader(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
+}
+
+func validateEnvelopeAddresses(from string, to []string) error {
+	for _, value := range append([]string{from}, to...) {
+		if strings.ContainsAny(value, "\r\n") || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("invalid SMTP envelope address")
+		}
+	}
+	return nil
 }
 
 // sendEmailRaw does the actual SMTP connection/send for both
@@ -122,38 +139,51 @@ func (s *Server) sendEmailHTML(subject, htmlBody string, to []string) error {
 // construction that precedes this.
 func (s *Server) sendEmailRaw(from string, to []string, msg string) error {
 	cfg := s.Notifications.Email
+	if err := validateEnvelopeAddresses(from, to); err != nil {
+		return err
+	}
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
 	var auth smtp.Auth
 	if cfg.Username != "" {
 		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.SMTPHost)
 	}
 
-	if !cfg.UseTLS {
-		return smtp.SendMail(addr, auth, from, to, []byte(msg))
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	tlsCfg := &tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12}
+	var conn net.Conn
+	var err error
+	if cfg.UseTLS && cfg.SMTPPort == 465 {
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+	} else {
+		conn, err = dialer.Dial("tcp", addr)
 	}
-
-	// smtp.SendMail's plaintext path doesn't do STARTTLS/implicit TLS —
-	// most providers require one or the other, so this is the explicit
-	// STARTTLS flow instead.
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.SMTPHost})
 	if err != nil {
-		// Fall back to STARTTLS over a plain connection if implicit TLS
-		// (port 465-style) isn't what this server speaks.
-		client, dialErr := smtp.Dial(addr)
-		if dialErr != nil {
-			return fmt.Errorf("connect: %w", err)
-		}
-		defer client.Close()
-		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
-			return fmt.Errorf("starttls: %w", err)
-		}
-		return sendSMTP(client, auth, from, to, msg)
+		return fmt.Errorf("connect: %w", err)
 	}
+	// A dial timeout only protects connection establishment. Bound the whole
+	// SMTP exchange too, otherwise a server that accepts TCP and then stalls can
+	// block the report/notification worker indefinitely.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	client, err := smtp.NewClient(conn, cfg.SMTPHost)
 	if err != nil {
+		_ = conn.Close()
 		return err
 	}
 	defer client.Close()
+
+	if cfg.SMTPPort != 465 {
+		startTLSSupported, _ := client.Extension("STARTTLS")
+		if cfg.UseTLS && !startTLSSupported {
+			return fmt.Errorf("SMTP server does not advertise STARTTLS")
+		}
+		// Match net/smtp's safe default: opportunistically upgrade when the
+		// server supports STARTTLS, and require the upgrade when UseTLS is set.
+		if startTLSSupported {
+			if err := client.StartTLS(tlsCfg); err != nil {
+				return fmt.Errorf("starttls: %w", err)
+			}
+		}
+	}
 	return sendSMTP(client, auth, from, to, msg)
 }
 
@@ -189,13 +219,21 @@ func (s *Server) sendWebhookNotification(ctx context.Context, alert AlertHistory
 	if cfg.URL == "" {
 		return fmt.Errorf("webhook notifications enabled but url is not configured")
 	}
+	eventID := fmt.Sprintf("alert:%s:%s:%d:%d", alert.SensorID, alert.AlertKey, alert.Count, alert.LastSeen.UTC().UnixNano())
 	payload, err := json.Marshal(map[string]interface{}{
-		"sensor_id":  alert.SensorID,
-		"severity":   alert.Severity,
-		"type":       alert.Type,
-		"message":    alert.Message,
-		"ip":         alert.IP,
-		"first_seen": alert.FirstSeen,
+		"schema_version": "otlens.notification.v1",
+		"event_id":       eventID,
+		"sensor_id":      alert.SensorID,
+		"alert_key":      alert.AlertKey,
+		"severity":       alert.Severity,
+		"type":           alert.Type,
+		"message":        alert.Message,
+		"ip":             alert.IP,
+		"status":         alert.Status,
+		"count":          alert.Count,
+		"first_seen":     alert.FirstSeen,
+		"last_seen":      alert.LastSeen,
+		"evidence":       alert.Evidence,
 	})
 	if err != nil {
 		return err
@@ -206,17 +244,24 @@ func (s *Server) sendWebhookNotification(ctx context.Context, alert AlertHistory
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	for k, v := range cfg.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-OTLens-Event-ID", eventID)
+	req.Header.Set("Idempotency-Key", eventID)
+	client := &http.Client{
+		Timeout:       15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook returned %s", resp.Status)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("webhook returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
 	return nil
 }

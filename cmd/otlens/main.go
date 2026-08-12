@@ -342,9 +342,17 @@ func main() {
 						log.Printf("OTLens baseline candidate promoted: %s", command.Target)
 					}
 				case "asset.confirm":
-					application.AssetEngine.Confirm(command.Target)
+					if application.AssetEngine.Confirm(command.Target) {
+						if err := application.Snapshotter.Flush(); err != nil {
+							log.Printf("OTLens asset confirm persistence flush failed: %v", err)
+						}
+					}
 				case "asset.delete":
-					application.AssetEngine.Delete(command.Target)
+					if application.AssetEngine.Delete(command.Target) {
+						if err := application.Snapshotter.Flush(); err != nil {
+							log.Printf("OTLens asset delete persistence flush failed: %v", err)
+						}
+					}
 				case "alert.approve":
 					application.DetectEngine.ApproveAlert(command.Target)
 				case "alert.confirm":

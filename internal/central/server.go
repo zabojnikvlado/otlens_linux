@@ -39,9 +39,8 @@ type Server struct {
 	SensorToken           string
 	BootstrapUsername     string
 	BootstrapPasswordHash string
-	SIEMSource            string
 	SIEMEnabled           bool
-	AuditExport           bool
+	SIEMMaxAttempts       int
 	AnalysisEnabled       bool
 	AnalysisDir           string
 	AnalysisMaxBytes      int64
@@ -214,7 +213,6 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		started := time.Now().UTC()
 		c.Next()
 		if s.Repo == nil {
 			return
@@ -232,35 +230,7 @@ func (s *Server) auditMiddleware() gin.HandlerFunc {
 		}); err != nil {
 			log.Printf("audit_log insert failed: %v", err)
 		}
-		if !s.AuditExport {
-			return
-		}
-		source := s.SIEMSource
-		if source == "" {
-			source = "otlens-central"
-		}
-		entry := map[string]interface{}{
-			"source":     source,
-			"kind":       "audit",
-			"event_time": started,
-			"audit": map[string]interface{}{
-				"action":     method + " " + c.FullPath(),
-				"method":     method,
-				"path":       c.Request.URL.Path,
-				"status":     status,
-				"success":    status < 400,
-				"source_ip":  c.ClientIP(),
-				"user_agent": c.Request.UserAgent(),
-				"sensor_id":  c.Param("id"),
-				"rule_id":    c.Param("rule"),
-				"ruleset_id": c.Param("ruleset"),
-				"actor":      actor,
-			},
-		}
-		key := fmt.Sprintf("audit:%d:%s:%s:%d", started.UnixNano(), method, c.Request.URL.Path, status)
-		if err := s.Repo.EnqueueSIEM(c, key, "audit", entry); err != nil {
-			fmt.Fprintf(os.Stderr, "OTLens Central audit enqueue failed: %v\n", err)
-		}
+
 	}
 }
 
@@ -321,6 +291,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.POST("/reconnaissance/campaigns/:id/run", requireAction(ActionAssetConfirmDelete), s.runReconCampaign)
 	api.DELETE("/reconnaissance/campaigns/:id", requireAction(ActionAssetConfirmDelete), s.deleteReconCampaign)
 	api.GET("/sensors/:id/assets/:ip/recon-history", requireView(ViewAssets), s.assetReconHistory)
+	api.GET("/sensors/:id/assets/:ip/alerts", requireView(ViewAssets), s.assetAlertHistory)
 	api.POST("/sensors/actions", requireAction(ActionSensorStartStop), s.sensorActions)
 	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
@@ -417,9 +388,9 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/analysis/jobs", requireView(ViewAnalysis), s.analysisJobs)
 	api.POST("/analysis/jobs", requireAction(ActionAnalysisManage), s.createAnalysisJob)
 	api.DELETE("/analysis/jobs/:job", requireAction(ActionAnalysisManage), s.deleteAnalysisJob)
-	api.GET("/data/backups", requireView(ViewData), s.listBackups)
+	api.GET("/data/backups", requireView(ViewDashboard), s.listBackups)
 	api.POST("/data/backups", requireAction(ActionDataManagement), s.createBackup)
-	api.GET("/data/backups/:backup/download", requireView(ViewData), s.downloadBackup)
+	api.GET("/data/backups/:backup/download", requireAction(ActionDataManagement), s.downloadBackup)
 	api.DELETE("/data/backups/:backup", requireAction(ActionDataManagement), s.deleteBackup)
 	api.POST("/data/reset", requireAction(ActionDataManagement), s.resetData)
 
@@ -585,6 +556,14 @@ func (s *Server) assets(c *gin.Context) {
 		if json.Unmarshal(snapshot.Topology, &graph) != nil {
 			continue
 		}
+		contexts, _ := s.Repo.ListAssetContexts(c, snapshot.SensorID)
+		vlanRows, _ := s.Repo.ListVLANConfig(c, snapshot.SensorID)
+		vlanLevels := map[int]*float64{}
+		vlanNames := map[int]string{}
+		for _, v := range vlanRows {
+			vlanLevels[v.VLANID] = v.PurdueLevel
+			vlanNames[v.VLANID] = v.Name
+		}
 		threshold := graph.HoneypotThreshold
 		if threshold <= 0 {
 			threshold = 100
@@ -592,7 +571,9 @@ func (s *Server) assets(c *gin.Context) {
 		for _, node := range graph.Nodes {
 			node["SensorID"] = snapshot.SensorID
 			ip := fmt.Sprint(node["IP"])
+			identity := canonicalAssetIdentity(fmt.Sprint(node["MAC"]), ip)
 			if im, ok := identityMeta[snapshot.SensorID+"\x00"+ip]; ok {
+				identity = im.CanonicalID
 				node["CanonicalIdentity"] = im.CanonicalID
 				node["IdentityFirstSeen"] = im.FirstSeen
 				node["IdentityLastSeen"] = im.LastSeen
@@ -600,9 +581,40 @@ func (s *Server) assets(c *gin.Context) {
 				node["IdentitySourceCount"] = im.SourceCount
 				node["IdentityConfidence"] = im.IdentityConfidence
 				node["IdentityAliases"] = im.Aliases
-				node["IdentityActive"] = time.Since(im.LastSeen) <= 10*time.Minute
+				node["IdentityActive"] = true
+				node["IdentityFresh"] = time.Since(im.LastSeen) <= 10*time.Minute
 			}
-			if rp, ok := profiles[snapshot.SensorID+"\x00"+ip]; ok {
+			discoveredOT, _ := node["IsOT"].(bool)
+			node["DiscoveredIsOT"] = discoveredOT
+			if ac, ok := contexts[identity]; ok {
+				node["AssetRole"] = ac.AssetRole
+				node["Criticality"] = ac.Criticality
+				node["Zone"] = ac.Zone
+				node["PurdueOverride"] = ac.PurdueOverride
+				node["IsAttackPathEntry"] = ac.IsEntryPoint
+				node["IsAttackPathTarget"] = ac.IsTarget
+				if ac.AssetRole != "" || ac.PurdueOverride != nil {
+					node["IsOT"] = roleIsOT(ac.AssetRole) || (ac.PurdueOverride != nil && *ac.PurdueOverride <= 3)
+				}
+			}
+			vlanID, _ := strconv.Atoi(fmt.Sprint(node["VLANID"]))
+			if name := vlanNames[vlanID]; name != "" {
+				node["VLANName"] = name
+			}
+			if ac, ok := contexts[identity]; ok && ac.PurdueOverride != nil {
+				node["PurdueLevel"] = *ac.PurdueOverride
+				node["PurdueSource"] = "asset_override"
+			} else if level := vlanLevels[vlanID]; level != nil {
+				node["PurdueLevel"] = *level
+				node["PurdueSource"] = "vlan_config"
+			} else {
+				node["PurdueSource"] = "unclassified"
+			}
+			// Reconnaissance identity is owned by the stable asset identity, not
+			// by its current/previous IP. Otherwise a DHCP address reused by a
+			// different MAC can inherit the previous device's OS/firmware/serial.
+			profile, profileOK := profiles[snapshot.SensorID+"\x00"+identity]
+			if rp, ok := profile, profileOK; ok {
 				if rp.Hostname != "" {
 					node["ReconHostname"] = rp.Hostname
 					if fmt.Sprint(node["Hostname"]) == "" {
@@ -656,6 +668,11 @@ func (s *Server) devices(c *gin.Context) {
 			respondInternalError(c, err)
 			return
 		}
+		contexts, err := s.Repo.ListAssetContexts(c, snapshot.SensorID)
+		if err != nil {
+			respondInternalError(c, err)
+			return
+		}
 		threshold := graph.HoneypotThreshold
 		if threshold <= 0 {
 			threshold = 100
@@ -666,7 +683,16 @@ func (s *Server) devices(c *gin.Context) {
 			node["HoneypotThreshold"] = threshold
 			node["IsHoneypot"] = score >= threshold
 			mac := fmt.Sprint(node["MAC"])
+			if normalized, err := normalizeAssetMAC(mac); err == nil {
+				mac = normalized
+			}
 			isOT, _ := node["IsOT"].(bool)
+			node["DiscoveredIsOT"] = isOT
+			identity := canonicalAssetIdentity(mac, fmt.Sprint(node["IP"]))
+			if ac, ok := contexts[identity]; ok && (ac.AssetRole != "" || ac.PurdueOverride != nil) {
+				isOT = roleIsOT(ac.AssetRole) || (ac.PurdueOverride != nil && *ac.PurdueOverride <= 3)
+				node["IsOT"] = isOT
+			}
 			confirmed := true
 			if v, ok := node["Confirmed"].(bool); ok {
 				confirmed = v
@@ -697,6 +723,14 @@ func (s *Server) setDeviceCategory(c *gin.Context) {
 		return
 	}
 	sensorID, mac := c.Param("id"), c.Param("mac")
+	if _, err := normalizeAssetMAC(mac); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validAssetCategory(strings.TrimSpace(req.Category)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid category"})
+		return
+	}
 	if err := s.Repo.SetAssetCategory(c, sensorID, mac, req.Category, req.Name, identityFromContext(c).Username); err != nil {
 		respondInternalError(c, err)
 		return
@@ -770,7 +804,7 @@ func (s *Server) importDeviceList(c *gin.Context) {
 		return
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device list imported: %d row(s) for %s", applied, sensorID), sensorID)
-	c.JSON(http.StatusOK, gin.H{"applied": applied})
+	c.JSON(http.StatusOK, gin.H{"received": len(rows), "applied": applied, "skipped": len(rows) - applied})
 }
 
 func importedTagKey(tag map[string]interface{}) string {
@@ -925,11 +959,12 @@ func (s *Server) vulnerabilities(c *gin.Context) {
 			if vendor == "" || vendor == "<nil>" {
 				continue
 			}
-			mac := strings.ToLower(strings.TrimSpace(fmt.Sprint(node["MAC"])))
+			mac := strings.TrimSpace(fmt.Sprint(node["MAC"]))
 			ip := strings.TrimSpace(fmt.Sprint(node["IP"]))
-			identity := "ip:" + ip
-			if mac != "" && mac != "<nil>" {
-				identity = "mac:" + strings.ReplaceAll(mac, "-", ":")
+			identity := canonicalAssetIdentity("", ip)
+			if normalized, err := normalizeAssetMAC(mac); err == nil {
+				mac = normalized
+				identity = canonicalAssetIdentity(normalized, ip)
 			}
 			assetsByVendor[vendor] = append(assetsByVendor[vendor], gin.H{
 				"SensorID": snapshot.SensorID, "IP": node["IP"], "MAC": node["MAC"], "Hostname": node["Hostname"], "AssetIdentity": identity,
@@ -994,16 +1029,13 @@ func (s *Server) getMaxLevelJump(c *gin.Context) {
 // setVLANConfig names a VLAN and/or assigns it a Purdue Model level.
 // Level: null clears it (unclassified again), a number sets it.
 //
-// This only affects Central's own naming/visualization/grouping (the
-// Network Segmentation tab, and the Topology map's VLAN labels) — the
-// sensor's own live segmentation_violation detection rule still reads
-// its *own* detect.segmentation.vlanlevels from its local config file,
-// which this does not currently update. Keep the two in sync manually
-// for now if the live rule matters; see DOCUMENTATION.md.
+// Central persists this configuration and sends the complete authoritative
+// snapshot to the sensor on every sync. No parallel one-shot command is queued:
+// two delivery channels can otherwise replay stale policy in the wrong order.
 func (s *Server) setVLANConfig(c *gin.Context) {
 	vlanID, err := strconv.Atoi(c.Param("vlanid"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer"})
+	if err != nil || !validVLANID(vlanID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer between 0 and 4094"})
 		return
 	}
 	var req struct {
@@ -1014,27 +1046,28 @@ func (s *Server) setVLANConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	if err := validatePurdueLevel(req.PurdueLevel); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	sensorID := c.Param("id")
 	if err := s.Repo.SetVLANConfig(c, sensorID, vlanID, req.Name, req.PurdueLevel, identityFromContext(c).Username); err != nil {
 		respondInternalError(c, err)
 		return
-	}
-	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
-		log.Printf("segmentation config push failed for %s: %v", sensorID, err)
 	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("VLAN %d configured: %s (level %v)", vlanID, req.Name, req.PurdueLevel), sensorID)
 	c.Status(http.StatusOK)
 }
 
 // setMaxLevelJump sets a sensor's segmentation max-level-jump and
-// pushes the updated config to it — the Network Segmentation tab's
-// per-sensor "how many levels apart is too many" setting.
+// exposes it through the next authoritative sensor sync — the Network
+// Segmentation tab's per-sensor "how many levels apart is too many" setting.
 func (s *Server) setMaxLevelJump(c *gin.Context) {
 	var req struct {
 		MaxLevelJump float64 `json:"max_level_jump"`
 	}
-	if c.ShouldBindJSON(&req) != nil || req.MaxLevelJump <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "max_level_jump must be a positive number"})
+	if c.ShouldBindJSON(&req) != nil || req.MaxLevelJump <= 0 || req.MaxLevelJump > 5 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_level_jump must be > 0 and <= 5"})
 		return
 	}
 	sensorID := c.Param("id")
@@ -1042,33 +1075,19 @@ func (s *Server) setMaxLevelJump(c *gin.Context) {
 		respondInternalError(c, err)
 		return
 	}
-	if err := s.pushSegmentationConfig(c, sensorID); err != nil {
-		log.Printf("segmentation config push failed for %s: %v", sensorID, err)
-	}
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("segmentation max_level_jump set: %s -> %v", sensorID, req.MaxLevelJump), sensorID)
 	c.Status(http.StatusOK)
 }
 
-// pushSegmentationConfig queues the "segmentation.config" command with
-// a sensor's complete current VLAN levels + max_level_jump — see
-// Repository.BuildSegmentationConfigCommand. Not fatal to the calling
-// handler if it fails (the setting is already saved either way; the
-// sensor just won't have the live update until the next successful
-// push, e.g. the next time this endpoint is called, or once
-// reconnected if it's currently offline — QueueCommands' row just sits
-// there until PopCommands next delivers it).
-func (s *Server) pushSegmentationConfig(c *gin.Context, sensorID string) error {
-	payload, err := s.Repo.BuildSegmentationConfigCommand(c, sensorID)
-	if err != nil {
-		return err
-	}
-	return s.Repo.QueueCommands(c, sensorID, "segmentation.config", []string{payload})
-}
+// Segmentation is distributed as authoritative state in every sensor sync.
+// Historical one-shot segmentation.config commands are deliberately discarded
+// by sync(): replaying an old queued snapshot after the current snapshot would
+// temporarily roll a restarted/offline sensor back to stale VLAN/Purdue policy.
 
 func (s *Server) listVLANAssets(c *gin.Context) {
 	vlanID, err := strconv.Atoi(c.Param("vlanid"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer"})
+	if err != nil || !validVLANID(vlanID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vlanid must be an integer between 0 and 4094"})
 		return
 	}
 	assets, err := s.Repo.ListVLANAssets(c, c.Param("id"), vlanID)
@@ -1101,6 +1120,20 @@ func (s *Server) settings(c *gin.Context) {
 	if s.Vuln != nil {
 		vulnCount = s.Vuln.Count()
 	}
+	runtimeConfig := make(map[string]map[string]interface{}, len(s.RuntimeConfig)+1)
+	for group, values := range s.RuntimeConfig {
+		copyValues := make(map[string]interface{}, len(values))
+		for key, value := range values {
+			copyValues[key] = value
+		}
+		runtimeConfig[group] = copyValues
+	}
+	if stats, err := s.Repo.GetSIEMQueueStats(c, s.SIEMMaxAttempts); err == nil {
+		runtimeConfig["SIEM delivery queue"] = map[string]interface{}{
+			"queued": stats.Queued, "ready": stats.Ready, "failed": stats.Failed,
+			"exhausted": stats.Exhausted, "oldest_created_at": stats.OldestCreatedAt,
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"SensorOfflineAfterSeconds":   int64(s.SensorOfflineAfter / time.Second),
 		"SensorCheckIntervalSeconds":  int64(s.SensorCheckInterval / time.Second),
@@ -1122,7 +1155,7 @@ func (s *Server) settings(c *gin.Context) {
 		"NotificationsMinSeverity":    s.Notifications.MinSeverity,
 		"NotificationsEmailEnabled":   s.Notifications.Email.Enabled,
 		"NotificationsWebhookEnabled": s.Notifications.Webhook.Enabled,
-		"RuntimeConfig":               s.RuntimeConfig,
+		"RuntimeConfig":               runtimeConfig,
 		"SchemaVersion":               s.Repo.SchemaVersion(c),
 	})
 }
@@ -1681,6 +1714,33 @@ func (s *Server) alertSearch(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": page.Total, "limit": page.Limit, "offset": page.Offset})
 }
 
+func (s *Server) assetAlertHistory(c *gin.Context) {
+	limit := 500
+	if value := strings.TrimSpace(c.Query("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > 5000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 5000"})
+			return
+		}
+		limit = parsed
+	}
+	entries, err := s.Repo.ListAssetAlertHistory(c, c.Param("id"), c.Param("ip"), limit)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	out := make([]gin.H, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, gin.H{
+			"SensorID": e.SensorID, "ID": e.AlertKey, "AlertKey": e.AlertKey, "Type": e.Type, "Severity": e.Severity,
+			"Message": e.Message, "IP": e.IP, "Status": e.Status, "Count": e.Count, "Active": e.Active,
+			"ApprovedBy": e.ApprovedBy, "ApprovedAt": e.ApprovedAt, "FirstSeen": e.FirstSeen, "LastSeen": e.LastSeen,
+			"Evidence": e.Evidence,
+		})
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (s *Server) alerts(c *gin.Context) {
 	entries, err := s.Repo.ListAlertHistory(c, 2000)
 	if err != nil {
@@ -2021,18 +2081,72 @@ func (s *Server) exportRules(c *gin.Context) {
 		return
 	}
 	result := make([]map[string]interface{}, 0)
+	// custom_rules remains as a compatibility convenience for old importers,
+	// but is de-duplicated across sensors. custom_rules_by_sensor is the
+	// authoritative v3 representation so a multi-sensor export never merges
+	// divergent copies of the same rule into one ambiguous import set.
+	custom := make([]map[string]interface{}, 0)
+	customSeen := make(map[string]bool)
+	customBySensor := make(map[string][]map[string]interface{})
+	warnings := make([]string, 0)
+	runtimeSnapshots := make([]map[string]interface{}, 0, len(v))
 	for _, snapshot := range v {
+		runtimeSnapshots = append(runtimeSnapshots, map[string]interface{}{
+			"sensor_id": snapshot.SensorID, "captured_at": snapshot.CapturedAt, "sequence": snapshot.Sequence,
+		})
 		var rows []map[string]interface{}
-		if json.Unmarshal(snapshot.Rules, &rows) != nil {
+		if err := json.Unmarshal(snapshot.Rules, &rows); err != nil {
+			warnings = append(warnings, fmt.Sprintf("sensor %s rules could not be decoded: %v", snapshot.SensorID, err))
 			continue
 		}
 		for _, row := range rows {
-			row["SensorID"] = snapshot.SensorID
-			result = append(result, row)
+			runtimeRow := make(map[string]interface{}, len(row)+1)
+			for key, value := range row {
+				runtimeRow[key] = value
+			}
+			runtimeRow["SensorID"] = snapshot.SensorID
+			result = append(result, runtimeRow)
+
+			kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(row["Kind"])))
+			if kind == "" {
+				kind = strings.ToLower(strings.TrimSpace(fmt.Sprint(row["kind"])))
+			}
+			if kind != "custom" {
+				continue
+			}
+			importRow := make(map[string]interface{}, len(row))
+			for key, value := range row {
+				if strings.EqualFold(key, "SensorID") {
+					continue
+				}
+				importRow[key] = value
+			}
+			customBySensor[snapshot.SensorID] = append(customBySensor[snapshot.SensorID], importRow)
+			canonical, marshalErr := json.Marshal(importRow)
+			if marshalErr != nil {
+				warnings = append(warnings, fmt.Sprintf("sensor %s custom rule could not be canonicalized: %v", snapshot.SensorID, marshalErr))
+				continue
+			}
+			key := string(canonical)
+			if !customSeen[key] {
+				customSeen[key] = true
+				custom = append(custom, importRow)
+			}
 		}
 	}
 	c.Header("Content-Disposition", "attachment; filename=otlens-rules.json")
-	c.JSON(http.StatusOK, gin.H{"format": "otlens-policy-v1", "exported_at": time.Now().UTC(), "rules": result})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{
+		"format":                 "otlens-policy-v3",
+		"exported_at":            time.Now().UTC(),
+		"runtime_sensor_count":   len(v),
+		"runtime_snapshots":      runtimeSnapshots,
+		"rules":                  result,         // complete runtime rule snapshots, tagged by sensor
+		"custom_rules":           custom,         // compatibility: exact duplicates de-duplicated
+		"custom_rules_by_sensor": customBySensor, // authoritative import source for multi-sensor exports
+		"warnings":               warnings,
+	})
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("rules exported: sensors=%d custom=%d warnings=%d", len(v), len(custom), len(warnings)), "")
 }
 
 func (s *Server) createRule(c *gin.Context) {
@@ -2352,15 +2466,21 @@ func (s *Server) listReports(c *gin.Context) {
 		respondInternalError(c, err)
 		return
 	}
+	c.Header("Cache-Control", "no-store")
 	c.JSON(200, reports)
 }
 
 func (s *Server) getReport(c *gin.Context) {
 	rep, err := s.Repo.GetReport(c, c.Param("id"))
 	if err != nil {
-		c.JSON(404, gin.H{"error": "report not found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "report not found"})
+		} else {
+			respondInternalError(c, err)
+		}
 		return
 	}
+	c.Header("Cache-Control", "no-store")
 	c.JSON(200, rep)
 }
 
@@ -2592,6 +2712,7 @@ func (s *Server) downloadReportPDF(c *gin.Context) {
 	}
 	filename := strings.ReplaceAll(rep.ID, "\"", "") + ".pdf"
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "application/pdf", pdf)
 	s.logAudit(c, identityFromContext(c).Username, "report PDF downloaded: "+rep.ID, "")
 }
@@ -2616,6 +2737,24 @@ func (s *Server) assetActions(c *gin.Context) {
 		return
 	}
 	sensorID := c.Param("id")
+	if len(req.Targets) == 0 {
+		c.JSON(400, gin.H{"error": "at least one asset target is required"})
+		return
+	}
+	clean := make([]string, 0, len(req.Targets))
+	seen := map[string]bool{}
+	for _, target := range req.Targets {
+		normalized, err := normalizeAssetMAC(target)
+		if err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		if !seen[normalized] {
+			seen[normalized] = true
+			clean = append(clean, normalized)
+		}
+	}
+	req.Targets = clean
 	if err := s.Repo.QueueCommands(c, sensorID, "asset."+req.Action, req.Targets); err != nil {
 		respondInternalError(c, err)
 		return
@@ -2971,14 +3110,37 @@ func (s *Server) sensors(c *gin.Context) {
 }
 func (s *Server) sync(c *gin.Context) {
 	sensorID := c.Param("id")
-	commands, _ := s.Repo.PopCommands(c, sensorID)
-	response := management.SyncResponse{Commands: commands}
-	if contexts, err := s.Repo.ListAssetContexts(c, sensorID); err == nil {
-		response.AssetContexts = make([]management.AssetPolicyContext, 0, len(contexts))
-		for _, x := range contexts {
-			response.AssetContexts = append(response.AssetContexts, management.AssetPolicyContext{AssetIP: x.AssetIP, AssetRole: x.AssetRole, Criticality: x.Criticality, Zone: x.Zone, PurdueOverride: x.PurdueOverride})
-		}
+	response := management.SyncResponse{}
+
+	contexts, err := s.Repo.ResolvedAssetContexts(c, sensorID)
+	if err != nil {
+		respondInternalError(c, err)
+		return
 	}
+	response.AssetContexts = make([]management.AssetPolicyContext, 0, len(contexts))
+	for _, x := range contexts {
+		response.AssetContexts = append(response.AssetContexts, management.AssetPolicyContext{AssetIP: x.AssetIP, AssetRole: x.AssetRole, Criticality: x.Criticality, Zone: x.Zone, PurdueOverride: x.PurdueOverride})
+	}
+
+	configured, err := s.Repo.HasSegmentationConfig(c, sensorID)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	if configured {
+		segmentation, err := s.Repo.SegmentationConfig(c, sensorID)
+		if err != nil {
+			respondInternalError(c, err)
+			return
+		}
+		response.Segmentation = &segmentation
+	} else {
+		// Always send an explicit unmanaged state. A sensor may have persisted a
+		// Central-managed policy from a previous Central; omitting this field would
+		// leave that stale policy active forever instead of returning to local YAML.
+		response.Segmentation = &management.SegmentationConfig{Managed: false}
+	}
+
 	if snapshot, err := s.Repo.ThreatIntelSnapshot(c); err == nil {
 		response.ThreatIntelVersion = snapshot.Version
 		sensorVersion, _ := strconv.ParseInt(c.Query("threat_intel_version"), 10, 64)
@@ -2990,8 +3152,33 @@ func (s *Server) sync(c *gin.Context) {
 		response.RulesVersion = rs.Version
 		response.RuleSet = rs
 	}
-	c.JSON(200, response)
+
+	// Pull one-shot commands only after authoritative state above has been read
+	// successfully. Asset confirm/delete remain pending until telemetry proves
+	// execution (Repository.PopCommands); this ordering also avoids consuming
+	// unrelated commands merely because an asset-context/segmentation query
+	// failed before a response could be built.
+	commands, err := s.Repo.PopCommands(c, sensorID)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	filteredCommands := make([]management.Command, 0, len(commands))
+	for _, command := range commands {
+		// Segmentation is authoritative state in SyncResponse.Segmentation. Older
+		// builds queued complete segmentation.config snapshots as commands; if
+		// several accumulated while a sensor was offline, replaying them after the
+		// current snapshot could temporarily roll policy backwards. PopCommands
+		// retires those legacy rows but they are never executed by current sensors.
+		if command.Type == "segmentation.config" {
+			continue
+		}
+		filteredCommands = append(filteredCommands, command)
+	}
+	response.Commands = filteredCommands
+	c.JSON(http.StatusOK, response)
 }
+
 func (s *Server) putRuleset(c *gin.Context) {
 	var rs management.RuleSet
 	if c.ShouldBindJSON(&rs) != nil || rs.ID == "" {
@@ -3347,16 +3534,35 @@ func (s *Server) createBackup(c *gin.Context) {
 		return
 	}
 	if req.Scope == "sensors" {
-		for _, id := range req.SensorIDs {
-			_ = s.Repo.QueueCommands(c, id, "sensor.backup.create", []string{func() string {
-				if strings.TrimSpace(req.Name) == "" {
-					return "auto"
-				}
-				return req.Name
-			}()})
+		if len(req.SensorIDs) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "at least one sensor_id is required"})
+			return
 		}
-		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup created: sensors (%s)", strings.Join(req.SensorIDs, ",")), "")
-		c.JSON(202, gin.H{"status": "queued", "sensors": len(req.SensorIDs)})
+		target := strings.TrimSpace(req.Name)
+		if target == "" {
+			target = "auto"
+		}
+		queued := make([]string, 0, len(req.SensorIDs))
+		failed := make(map[string]string)
+		for _, id := range req.SensorIDs {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if err := s.Repo.QueueCommands(c, id, "sensor.backup.create", []string{target}); err != nil {
+				failed[id] = err.Error()
+				continue
+			}
+			queued = append(queued, id)
+		}
+		status := http.StatusAccepted
+		label := "queued"
+		if len(failed) > 0 {
+			status = http.StatusMultiStatus
+			label = "partial"
+		}
+		s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("sensor backup commands %s: queued=%d failed=%d", label, len(queued), len(failed)), "")
+		c.JSON(status, gin.H{"status": label, "queued": queued, "failed": failed})
 		return
 	}
 	id := fmt.Sprintf("bkp-%d", time.Now().UTC().UnixNano())
@@ -3385,14 +3591,44 @@ func (s *Server) deleteBackup(c *gin.Context) {
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("backup deleted: %s", backupID), "")
 	c.Status(204)
 }
+func safeExportFilename(name, fallback, extension string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = fallback
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+		if b.Len() >= 96 {
+			break
+		}
+	}
+	base := strings.Trim(b.String(), ".")
+	if base == "" {
+		base = fallback
+	}
+	return base + extension
+}
+
 func (s *Server) downloadBackup(c *gin.Context) {
 	b, name, err := s.Repo.BackupPayload(c, c.Param("backup"))
 	if err != nil {
-		c.JSON(404, gin.H{"error": "backup not found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(404, gin.H{"error": "backup not found"})
+		} else {
+			respondInternalError(c, err)
+		}
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".json"))
+	filename := safeExportFilename(name, "otlens-central-core", ".json")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Header("Cache-Control", "no-store")
 	c.Data(200, "application/json", b)
+	s.logAudit(c, identityFromContext(c).Username, "central core snapshot downloaded: "+c.Param("backup"), "")
 }
 
 func (s *Server) assetSecurityStatuses(c *gin.Context) {

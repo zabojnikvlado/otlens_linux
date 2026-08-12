@@ -79,8 +79,8 @@ async function openUDPConversation(index){
 function exportUDP(format){
   const rows=filteredUDPConversations(),json=JSON.stringify(rows,null,2);
   let content=json,type='application/json',name='udp-conversations.json';
-  if(format==='csv'){const headers=['ID','SensorID','Protocol','Status','StartedAt','LastSeenAt','DurationMillis','EndpointA','EndpointB','Packets','Bytes','DirectionA','DirectionB'];content=[headers.join(','),...rows.map(x=>{const k=x.Key||{},v=[x.ID,x.SensorID,x.Protocol,x.status,x.StartedAt,x.LastSeenAt,x.duration_millis,`${k.EndpointAIP}:${k.EndpointAPort}`,`${k.EndpointBIP}:${k.EndpointBPort}`,x.Packets,x.Bytes,x.DirectionA,x.DirectionB];return v.map(y=>`"${String(y??'').replaceAll('"','""')}"`).join(',')})].join('\n');type='text/csv';name='udp-conversations.csv'}
-  const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();URL.revokeObjectURL(url);
+  if(format==='csv'){const headers=['ID','SensorID','Protocol','Status','StartedAt','LastSeenAt','DurationMillis','EndpointA','EndpointB','Packets','Bytes','DirectionA','DirectionB'],csvCell=value=>{let text=String(value??'');if(/^[\s]*[=+\-@]/.test(text))text="'"+text;return `"${text.replaceAll('"','""')}"`};content=[headers.join(','),...rows.map(x=>{const k=x.Key||{},v=[x.ID,x.SensorID,x.Protocol,x.status,x.StartedAt,x.LastSeenAt,x.duration_millis,`${k.EndpointAIP}:${k.EndpointAPort}`,`${k.EndpointBIP}:${k.EndpointBPort}`,x.Packets,x.Bytes,x.DirectionA,x.DirectionB];return v.map(csvCell).join(',')})].join('\n');type='text/csv';name='udp-conversations.csv'}
+  const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 function configureUDPRefresh(){
   clearInterval(udpRefreshTimer);udpRefreshTimer=null;

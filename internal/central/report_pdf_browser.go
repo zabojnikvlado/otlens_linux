@@ -108,7 +108,6 @@ func renderStyledReportPDF(parent context.Context, htmlBody, reportID string) ([
 		"--disable-background-networking",
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--allow-file-access-from-files",
 		"--user-data-dir=" + profilePath,
 		"--no-pdf-header-footer",
 		"--print-to-pdf-no-header",

@@ -29,14 +29,24 @@ type ReportingPolicySnapshot struct {
 // learning would forget every approved OT master/protocol and remote-management
 // relationship and immediately produce false "first seen"/unauthorized hits.
 type PolicyLearningSnapshot struct {
-	TrustedOTAccess      map[string]map[string]bool         `json:"trusted_ot_access,omitempty"`
-	TrustedOTMasters     map[string]map[string]bool         `json:"trusted_ot_masters,omitempty"`
-	TrustedOTTimeSources map[string]map[string]bool         `json:"trusted_ot_time_sources,omitempty"`
-	TrustedOTProtocols   map[string]map[string]bool         `json:"trusted_ot_protocols,omitempty"`
-	TrustedRemoteMgmt    map[string]bool                    `json:"trusted_remote_management,omitempty"`
-	OTAssets             map[string]bool                    `json:"ot_assets,omitempty"`
-	HostnameByMAC        map[string]string                  `json:"hostname_by_mac,omitempty"`
-	Reporting            map[string]ReportingPolicySnapshot `json:"reporting,omitempty"`
+	TrustedOTAccess      map[string]map[string]bool `json:"trusted_ot_access,omitempty"`
+	TrustedOTMasters     map[string]map[string]bool `json:"trusted_ot_masters,omitempty"`
+	TrustedOTTimeSources map[string]map[string]bool `json:"trusted_ot_time_sources,omitempty"`
+	TrustedOTProtocols   map[string]map[string]bool `json:"trusted_ot_protocols,omitempty"`
+	TrustedRemoteMgmt    map[string]bool            `json:"trusted_remote_management,omitempty"`
+	// OTAssets contains only protocol-inferred/learned identity. Central
+	// operator context is delivered separately on every sync and must never be
+	// folded into this persisted learning snapshot.
+	OTAssets      map[string]bool                    `json:"ot_assets,omitempty"`
+	HostnameByMAC map[string]string                  `json:"hostname_by_mac,omitempty"`
+	Reporting     map[string]ReportingPolicySnapshot `json:"reporting,omitempty"`
+
+	// Central-managed segmentation is persisted with the learned policy state
+	// so a restarted sensor keeps the last authoritative VLAN/Purdue policy
+	// during the short interval before its first successful Central sync.
+	ManagedSegmentation bool               `json:"managed_segmentation,omitempty"`
+	VLANLevels          map[uint16]float64 `json:"vlan_levels,omitempty"`
+	MaxLevelJump        float64            `json:"max_level_jump,omitempty"`
 }
 
 type reportingState struct {
@@ -87,29 +97,20 @@ func (e *Engine) SetAssetPolicyContexts(contexts []AssetPolicyContext) {
 		next[c.IP] = c
 	}
 
-	// Preserve protocol-inferred OT identity for assets that have no explicit
-	// Central context, but let an explicit operator context override stale
-	// inferred state. Without this, changing an asset from PLC/OT to an
-	// enterprise role would leave it permanently classified as OT.
-	nextOT := make(map[string]bool, len(e.otAssets)+len(next))
-	for ip, inferred := range e.otAssets {
-		if _, explicitlyManaged := next[ip]; !explicitlyManaged && inferred {
-			nextOT[ip] = true
-		}
-	}
-	for ip, c := range next {
-		if isOTRole(c.Role) || (c.PurdueLevel != nil && *c.PurdueLevel <= 3) {
-			nextOT[ip] = true
-		}
-	}
-	e.otAssets = nextOT
+	// Keep operator-owned context separate from protocol-inferred learning.
+	// Conflating the two makes a temporary Central override leak into the
+	// persisted learning snapshot and survive after the override is removed or
+	// the IP is later reused by another device. Effective OT classification is
+	// resolved at read time by isOTAssetLocked.
 	e.assetContexts = next
 }
 
 func isOTRole(role string) bool {
 	role = strings.ToLower(role)
-	return strings.Contains(role, "plc") || strings.Contains(role, "rtu") || strings.Contains(role, "controller") ||
+	return role == "ot" || role == "ot_asset" || strings.Contains(role, "ot asset") ||
+		strings.Contains(role, "plc") || strings.Contains(role, "rtu") || strings.Contains(role, "controller") ||
 		strings.Contains(role, "ied") || strings.Contains(role, "drive") || strings.Contains(role, "field") ||
+		strings.Contains(role, "sensor") || strings.Contains(role, "actuator") || strings.Contains(role, "instrument") || strings.Contains(role, "valve") ||
 		strings.Contains(role, "hmi") || strings.Contains(role, "scada") || strings.Contains(role, "historian") ||
 		strings.Contains(role, "engineering") || strings.Contains(role, "operator") || strings.Contains(role, "safety")
 }
@@ -150,19 +151,23 @@ func (e *Engine) markOTAsset(ip string) {
 	e.policyMutex.Unlock()
 }
 
-func (e *Engine) isOTAsset(ip string) bool {
+func (e *Engine) isOTAssetLocked(ip string) bool {
 	if ip == "" {
 		return false
 	}
-	e.policyMutex.Lock()
-	defer e.policyMutex.Unlock()
-	if e.otAssets[ip] {
-		return true
-	}
 	if c, ok := e.assetContexts[ip]; ok {
+		// Explicit operator context is authoritative in both directions: an OT
+		// role/Purdue level can promote a device, and an explicit enterprise
+		// role can suppress stale protocol inference without deleting history.
 		return isOTRole(c.Role) || (c.PurdueLevel != nil && *c.PurdueLevel <= 3)
 	}
-	return false
+	return e.otAssets[ip]
+}
+
+func (e *Engine) isOTAsset(ip string) bool {
+	e.policyMutex.Lock()
+	defer e.policyMutex.Unlock()
+	return e.isOTAssetLocked(ip)
 }
 
 func (e *Engine) sourceExplicitlyApprovedForOT(src string) bool {
@@ -349,7 +354,10 @@ func (e *Engine) isExpectedOTProtocol(dst, protocol string, port uint16) bool {
 	if len(x) == 0 {
 		// In monitoring, a known OT asset with no learned protocol relation is
 		// deliberately treated as new/unknown rather than silently trusted.
-		return !e.otAssets[dst]
+		// Use the same effective operator+inferred classification as the rest of
+		// the policy engine; direct access to e.otAssets would ignore an explicit
+		// Central reclassification.
+		return !e.isOTAssetLocked(dst)
 	}
 	return x[fmt.Sprintf("%s/%d", strings.ToLower(protocol), port)]
 }
@@ -441,6 +449,16 @@ func (e *Engine) PolicyLearningSnapshot() PolicyLearningSnapshot {
 			out.Reporting[ip] = ReportingPolicySnapshot{LastSeen: st.LastSeen, LastGap: st.LastGap, TypicalGap: st.TypicalGap, Samples: st.Samples}
 		}
 	}
+	e.ipVLANMutex.RLock()
+	out.ManagedSegmentation = e.segmentationManaged
+	out.MaxLevelJump = e.maxLevelJump
+	if e.segmentationManaged {
+		out.VLANLevels = make(map[uint16]float64, len(e.vlanLevels))
+		for vlan, level := range e.vlanLevels {
+			out.VLANLevels[vlan] = level
+		}
+	}
+	e.ipVLANMutex.RUnlock()
 	return out
 }
 
@@ -526,6 +544,24 @@ func (e *Engine) RestorePolicyLearning(snapshot PolicyLearningSnapshot) {
 			e.reporting[ip] = &reportingState{LastSeen: st.LastSeen, LastGap: st.LastGap, TypicalGap: st.TypicalGap, Samples: st.Samples}
 		}
 	}
+	if snapshot.ManagedSegmentation {
+		levels := make(map[uint16]float64, len(snapshot.VLANLevels))
+		for vlan, level := range snapshot.VLANLevels {
+			if vlan > 4094 || !validSegmentationPurdueLevel(level) {
+				continue
+			}
+			levels[vlan] = level
+		}
+		e.ipVLANMutex.Lock()
+		e.vlanLevels = levels
+		e.maxLevelJump = snapshot.MaxLevelJump
+		if e.maxLevelJump <= 0 || e.maxLevelJump > 5 {
+			e.maxLevelJump = 1
+		}
+		e.segmentationManaged = true
+		e.segmentationEnabled = len(levels) > 0 || len(e.segmentationPolicy) > 0
+		e.ipVLANMutex.Unlock()
+	}
 }
 
 func (e *Engine) resetPolicyLearningState() {
@@ -550,14 +586,10 @@ func (e *Engine) resetPolicyLearningState() {
 	e.externalFlowLastSweep = time.Time{}
 	e.dnsTunnel = make(map[string]*dnsTunnelState)
 	e.lastPacketObserved = time.Time{}
-	// Keep otAssets derived from current context, but forget protocol-inferred
-	// OT identity so a learning reset can rebuild it from live traffic.
+	// Forget protocol-inferred OT identity so a learning reset rebuilds it
+	// exclusively from live traffic. Central operator context is intentionally
+	// kept separately and remains effective through isOTAssetLocked.
 	e.otAssets = make(map[string]bool)
-	for ip, c := range e.assetContexts {
-		if isOTRole(c.Role) || (c.PurdueLevel != nil && *c.PurdueLevel <= 3) {
-			e.otAssets[ip] = true
-		}
-	}
 }
 
 func maxDuration(a, b time.Duration) time.Duration {

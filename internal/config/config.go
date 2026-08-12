@@ -8,6 +8,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -704,8 +705,11 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	if cfg.Database.Host == "" || cfg.Database.Name == "" || cfg.Database.User == "" {
 		return nil, fmt.Errorf("central database host, name and user must be configured")
 	}
-	if cfg.SIEM.Enabled && strings.TrimSpace(cfg.SIEM.URL) == "" {
-		return nil, fmt.Errorf("siem.url must be configured when siem.enabled is true")
+	if cfg.SIEM.Enabled {
+		u, err := url.Parse(strings.TrimSpace(cfg.SIEM.URL))
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("siem.url must be an absolute http(s) URL when siem.enabled is true")
+		}
 	}
 	if cfg.SIEM.BatchSize <= 0 {
 		cfg.SIEM.BatchSize = 100
@@ -715,6 +719,49 @@ func LoadCentral(path string) (*CentralConfig, error) {
 	}
 	if cfg.SIEM.RetryInterval <= 0 {
 		cfg.SIEM.RetryInterval = 15 * time.Second
+	}
+	if cfg.Notifications.Enabled {
+		validSeverity := map[string]bool{"low": true, "medium": true, "high": true, "critical": true}
+		if !validSeverity[strings.ToLower(strings.TrimSpace(cfg.Notifications.MinSeverity))] {
+			return nil, fmt.Errorf("notifications.min_severity must be low, medium, high, or critical")
+		}
+		if cfg.Notifications.Email.Enabled {
+			if strings.TrimSpace(cfg.Notifications.Email.SMTPHost) == "" || strings.TrimSpace(cfg.Notifications.Email.From) == "" || len(cfg.Notifications.Email.To) == 0 {
+				return nil, fmt.Errorf("notifications.email smtp_host, from, and to are required when email notifications are enabled")
+			}
+			if cfg.Notifications.Email.SMTPPort <= 0 || cfg.Notifications.Email.SMTPPort > 65535 {
+				return nil, fmt.Errorf("notifications.email.smtp_port must be between 1 and 65535")
+			}
+		}
+		if cfg.Notifications.Webhook.Enabled {
+			u, err := url.Parse(strings.TrimSpace(cfg.Notifications.Webhook.URL))
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return nil, fmt.Errorf("notifications.webhook.url must be an absolute http(s) URL")
+			}
+		}
+	}
+	if cfg.Reports.Enabled {
+		if !strings.EqualFold(strings.TrimSpace(cfg.Reports.Schedule), "weekly") {
+			return nil, fmt.Errorf("reports.schedule must be weekly when reports.enabled is true")
+		}
+		validWeekday := map[string]bool{
+			"sunday": true, "monday": true, "tuesday": true, "wednesday": true,
+			"thursday": true, "friday": true, "saturday": true,
+		}
+		if !validWeekday[strings.ToLower(strings.TrimSpace(cfg.Reports.DayOfWeek))] {
+			return nil, fmt.Errorf("reports.day_of_week must be sunday through saturday")
+		}
+		if cfg.Reports.HourUTC < 0 || cfg.Reports.HourUTC > 23 {
+			return nil, fmt.Errorf("reports.hour_utc must be between 0 and 23")
+		}
+		if len(cfg.Reports.Recipients) > 0 {
+			if strings.TrimSpace(cfg.Notifications.Email.SMTPHost) == "" || strings.TrimSpace(cfg.Notifications.Email.From) == "" {
+				return nil, fmt.Errorf("reports.recipients requires notifications.email.smtp_host and notifications.email.from")
+			}
+			if cfg.Notifications.Email.SMTPPort <= 0 || cfg.Notifications.Email.SMTPPort > 65535 {
+				return nil, fmt.Errorf("notifications.email.smtp_port must be between 1 and 65535 when reports have recipients")
+			}
+		}
 	}
 	return &cfg, nil
 }
@@ -903,6 +950,26 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Deception.HoneypotThreshold < 0 || cfg.Deception.HoneypotThreshold > 100 {
 		return nil, fmt.Errorf("deception.honeypotthreshold must be between 0 and 100, got %d", cfg.Deception.HoneypotThreshold)
+	}
+
+	if cfg.Detect.Segmentation.MaxLevelJump <= 0 || cfg.Detect.Segmentation.MaxLevelJump > 5 {
+		return nil, fmt.Errorf("detect.segmentation.maxleveljump must be > 0 and <= 5, got %.3g", cfg.Detect.Segmentation.MaxLevelJump)
+	}
+	validPurdue := func(level float64) bool {
+		switch level {
+		case 0, 1, 2, 3, 3.5, 4, 5:
+			return true
+		default:
+			return false
+		}
+	}
+	for vlan, level := range cfg.Detect.Segmentation.VLANLevels {
+		if vlan > 4094 {
+			return nil, fmt.Errorf("detect.segmentation.vlanlevels contains invalid VLAN %d; expected 0-4094", vlan)
+		}
+		if !validPurdue(level) {
+			return nil, fmt.Errorf("detect.segmentation.vlanlevels[%d] has invalid Purdue level %.3g; allowed levels are 0, 1, 2, 3, 3.5, 4, 5", vlan, level)
+		}
 	}
 
 	seenDeceptionIPs := make(map[string]struct{}, len(cfg.Deception.Stations))

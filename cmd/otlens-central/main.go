@@ -80,7 +80,7 @@ func main() {
 		log.Fatalf("postgres connection failed: %v", err)
 	}
 	defer repo.Close()
-	repo.ConfigureSIEM(cfg.SIEM.Enabled && cfg.SIEM.ExportAlerts)
+	repo.ConfigureSIEM(cfg.SIEM.Enabled && cfg.SIEM.ExportAlerts, cfg.SIEM.Enabled && cfg.SIEM.ExportAudit, cfg.SIEM.Source)
 
 	bootstrapHash, err := central.HashPassword(cfg.Auth.BootstrapPassword)
 	if err != nil {
@@ -143,7 +143,7 @@ func main() {
 	srv := &central.Server{StartedAt: time.Now().UTC(),
 		Repo: repo, ManagementToken: cfg.Auth.ManagementToken, SensorToken: strings.TrimSpace(cfg.Auth.SensorToken),
 		BootstrapUsername: cfg.Auth.BootstrapUsername, BootstrapPasswordHash: bootstrapHash,
-		SIEMSource: cfg.SIEM.Source, SIEMEnabled: cfg.SIEM.Enabled, AuditExport: cfg.SIEM.Enabled && cfg.SIEM.ExportAudit,
+		SIEMEnabled: cfg.SIEM.Enabled, SIEMMaxAttempts: cfg.SIEM.MaxAttempts,
 		AnalysisEnabled: cfg.Analysis.Enabled && cfg.Analysis.AllowImport, AnalysisDir: cfg.Analysis.UploadDirectory,
 		AnalysisMaxBytes:    cfg.Analysis.MaxUploadSizeMB * 1024 * 1024,
 		Vuln:                vulnDB,
@@ -174,7 +174,7 @@ func main() {
 		Enabled: cfg.SIEM.Enabled, URL: cfg.SIEM.URL, ExportAlerts: cfg.SIEM.ExportAlerts,
 		ExportAudit: cfg.SIEM.ExportAudit, BearerToken: cfg.SIEM.BearerToken, Headers: cfg.SIEM.Headers,
 		Timeout: cfg.SIEM.Timeout, RetryInterval: cfg.SIEM.RetryInterval, BatchSize: cfg.SIEM.BatchSize,
-		MaxAttempts: cfg.SIEM.MaxAttempts, Source: cfg.SIEM.Source, InsecureSkipVerify: cfg.SIEM.TLS.InsecureSkipVerify,
+		MaxAttempts: cfg.SIEM.MaxAttempts, InsecureSkipVerify: cfg.SIEM.TLS.InsecureSkipVerify,
 		CACertFile: cfg.SIEM.TLS.CACertFile, ClientCertFile: cfg.SIEM.TLS.ClientCertFile,
 		ClientKeyFile: cfg.SIEM.TLS.ClientKeyFile, ServerName: cfg.SIEM.TLS.ServerName,
 	}, repo)
@@ -241,31 +241,38 @@ func main() {
 		}
 	}()
 
-	// Checks once an hour whether the configured weekly slot
-	// (Reports.DayOfWeek/HourUTC) is the current hour — see
-	// DueReportWindow in internal/central/reports.go. Hourly is coarse
-	// enough that this can't double-fire within the same due hour (it
-	// only checks, doesn't track "already ran this week" separately,
-	// so an hourly cadence is what keeps a single due hour from
-	// producing more than one report).
+	// Check immediately and then every 15 minutes. GenerateAndDispatchReport is
+	// idempotent for the anchored weekly slot, so frequent checks are safe and a
+	// Central restart during the configured hour can no longer make the report
+	// disappear for an entire week.
 	go func() {
 		if !reportsCfg.Enabled {
 			return
 		}
-		ticker := time.NewTicker(time.Hour)
+		run := func() {
+			// Delivery retries are independent of the one-hour weekly generation
+			// window. A temporary SMTP outage must not strand a saved report until
+			// the operator notices it manually.
+			if err := srv.RetryPendingReportDeliveries(workerCtx); err != nil {
+				log.Printf("scheduled report delivery retry failed: %v", err)
+			}
+			start, end, due := central.DueReportWindow(reportsCfg, time.Now())
+			if !due {
+				return
+			}
+			if err := srv.GenerateAndDispatchReport(workerCtx, start, end); err != nil {
+				log.Printf("scheduled report generation failed: %v", err)
+			}
+		}
+		run()
+		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-workerCtx.Done():
 				return
 			case <-ticker.C:
-				start, end, due := central.DueReportWindow(reportsCfg, time.Now())
-				if !due {
-					continue
-				}
-				if err := srv.GenerateAndDispatchReport(workerCtx, start, end); err != nil {
-					log.Printf("scheduled report generation failed: %v", err)
-				}
+				run()
 			}
 		}
 	}()

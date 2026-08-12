@@ -2,6 +2,7 @@ package central
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -30,8 +31,52 @@ type AuditFilter struct {
 }
 
 func (r *Repository) InsertAuditLog(ctx context.Context, e AuditEntry) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO audit_log(actor,action,method,path,status,success,source_ip,sensor_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, e.Actor, e.Action, e.Method, e.Path, e.Status, e.Success, e.SourceIP, e.SensorID)
-	return err
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO audit_log(actor,action,method,path,status,success,source_ip,sensor_id)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+		RETURNING id,created_at`,
+		e.Actor, e.Action, e.Method, e.Path, e.Status, e.Success, e.SourceIP, e.SensorID,
+	).Scan(&e.ID, &e.CreatedAt); err != nil {
+		return err
+	}
+	if r.siemAuditEnabled {
+		source := strings.TrimSpace(r.siemSource)
+		if source == "" {
+			source = "otlens-central"
+		}
+		eventKey := fmt.Sprintf("audit:%d", e.ID)
+		payload := map[string]interface{}{
+			"schema_version": "otlens.siem.v1",
+			"event_id":       eventKey,
+			"source":         source,
+			"kind":           "audit",
+			"event_time":     e.CreatedAt.UTC(),
+			"audit": map[string]interface{}{
+				"id":        e.ID,
+				"actor":     e.Actor,
+				"action":    e.Action,
+				"method":    e.Method,
+				"path":      e.Path,
+				"status":    e.Status,
+				"success":   e.Success,
+				"source_ip": e.SourceIP,
+				"sensor_id": e.SensorID,
+			},
+		}
+		encoded, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO siem_outbox(event_key,kind,payload) VALUES($1,'audit',$2) ON CONFLICT(event_key) DO NOTHING`, eventKey, encoded); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) ListAuditLog(ctx context.Context, limit int) ([]AuditEntry, error) {

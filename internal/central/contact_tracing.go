@@ -12,14 +12,15 @@ import (
 )
 
 type AssetSecurityStatus struct {
-	SensorID   string     `json:"sensor_id"`
-	AssetIP    string     `json:"asset_ip"`
-	Status     string     `json:"status"`
-	Reason     string     `json:"reason"`
-	Source     string     `json:"source"`
-	DetectedAt *time.Time `json:"detected_at,omitempty"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	UpdatedBy  string     `json:"updated_by"`
+	SensorID      string     `json:"sensor_id"`
+	AssetIdentity string     `json:"asset_identity,omitempty"`
+	AssetIP       string     `json:"asset_ip"`
+	Status        string     `json:"status"`
+	Reason        string     `json:"reason"`
+	Source        string     `json:"source"`
+	DetectedAt    *time.Time `json:"detected_at,omitempty"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	UpdatedBy     string     `json:"updated_by"`
 }
 type MalwareIncident struct {
 	ID             int64           `json:"id"`
@@ -226,21 +227,42 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 }
 
 func (r *Repository) SetAssetSecurityStatus(ctx context.Context, v AssetSecurityStatus) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO asset_security_status(sensor_id,asset_ip,status,reason,source,detected_at,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,NOW(),$7) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET status=EXCLUDED.status,reason=EXCLUDED.reason,source=EXCLUDED.source,detected_at=EXCLUDED.detected_at,updated_at=NOW(),updated_by=EXCLUDED.updated_by`, v.SensorID, v.AssetIP, v.Status, v.Reason, v.Source, v.DetectedAt, v.UpdatedBy)
+	identity, err := r.ResolveAssetIdentity(ctx, v.SensorID, v.AssetIP)
+	if err != nil {
+		return err
+	}
+	v.AssetIdentity = identity
+	_, err = r.db.ExecContext(ctx, `INSERT INTO asset_security_status(sensor_id,asset_identity,asset_ip,status,reason,source,detected_at,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8) ON CONFLICT(sensor_id,asset_identity) DO UPDATE SET asset_ip=EXCLUDED.asset_ip,status=EXCLUDED.status,reason=EXCLUDED.reason,source=EXCLUDED.source,detected_at=EXCLUDED.detected_at,updated_at=NOW(),updated_by=EXCLUDED.updated_by`, v.SensorID, identity, v.AssetIP, v.Status, v.Reason, v.Source, v.DetectedAt, v.UpdatedBy)
 	return err
 }
 func (r *Repository) ListAssetSecurityStatuses(ctx context.Context, sensorID string) ([]AssetSecurityStatus, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_ip,status,reason,source,detected_at,updated_at,updated_by FROM asset_security_status WHERE ($1='' OR sensor_id=$1) ORDER BY updated_at DESC`, sensorID)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_identity,asset_ip,status,reason,source,detected_at,updated_at,updated_by FROM asset_security_status WHERE ($1='' OR sensor_id=$1) ORDER BY updated_at DESC`, sensorID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AssetSecurityStatus
+	out := []AssetSecurityStatus{}
+	seen := map[string]bool{}
 	for rows.Next() {
 		var v AssetSecurityStatus
-		if err := rows.Scan(&v.SensorID, &v.AssetIP, &v.Status, &v.Reason, &v.Source, &v.DetectedAt, &v.UpdatedAt, &v.UpdatedBy); err != nil {
+		if err := rows.Scan(&v.SensorID, &v.AssetIdentity, &v.AssetIP, &v.Status, &v.Reason, &v.Source, &v.DetectedAt, &v.UpdatedAt, &v.UpdatedBy); err != nil {
 			return nil, err
 		}
+		if v.AssetIdentity == "" {
+			v.AssetIdentity = canonicalAssetIdentity("", v.AssetIP)
+		}
+		key := v.SensorID + "\x00" + v.AssetIdentity
+		if seen[key] {
+			continue
+		}
+		if ip, ok, err := r.CurrentAssetIP(ctx, v.SensorID, v.AssetIdentity); err != nil {
+			return nil, err
+		} else if !ok {
+			continue // orphaned historical status must not attach to a future IP reuser
+		} else {
+			v.AssetIP = ip
+		}
+		seen[key] = true
 		out = append(out, v)
 	}
 	return out, rows.Err()

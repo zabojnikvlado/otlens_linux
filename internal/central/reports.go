@@ -3,6 +3,7 @@ package central
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
@@ -20,85 +21,150 @@ type ReportsConfig struct {
 	Recipients []string
 }
 
-// weekdayFromName parses "monday".."sunday" (case-insensitive), for
-// ReportsConfig.DayOfWeek. Defaults to Monday on anything unrecognized
-// rather than erroring — a scheduled job shouldn't get permanently
-// stuck over one typo'd config value.
-func weekdayFromName(name string) time.Weekday {
+// weekdayFromName parses "monday".."sunday" (case-insensitive). The bool is
+// deliberately explicit: silently treating a typo as Monday can generate a
+// report on the wrong day, which is worse than not generating one and logging
+// the configuration error.
+func weekdayFromName(name string) (time.Weekday, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "sunday":
-		return time.Sunday
+		return time.Sunday, true
 	case "monday":
-		return time.Monday
+		return time.Monday, true
 	case "tuesday":
-		return time.Tuesday
+		return time.Tuesday, true
 	case "wednesday":
-		return time.Wednesday
+		return time.Wednesday, true
 	case "thursday":
-		return time.Thursday
+		return time.Thursday, true
 	case "friday":
-		return time.Friday
+		return time.Friday, true
 	case "saturday":
-		return time.Saturday
+		return time.Saturday, true
 	default:
-		return time.Monday
+		return time.Monday, false
 	}
 }
 
 // DueReportWindow reports whether now falls within the hour a weekly
-// report is due (matching both the configured weekday and hour, UTC),
-// and if so, the [periodStart, periodEnd) it should cover — the 7 days
-// immediately before now. Checked on an hourly-or-finer ticker (see
-// main.go), so "within the hour" is enough granularity to not miss or
-// double-fire the schedule.
+// report is due (matching both the configured weekday and hour, UTC), and if
+// so, the exact anchored [periodStart, periodEnd) it should cover. Anchoring
+// to HH:00:00 is important: otherwise a Central restart at 10:37 would shift
+// every weekly report window by 37 minutes.
 func DueReportWindow(cfg ReportsConfig, now time.Time) (start, end time.Time, due bool) {
 	now = now.UTC()
-	if now.Weekday() != weekdayFromName(cfg.DayOfWeek) || now.Hour() != cfg.HourUTC {
+	if !cfg.Enabled || !strings.EqualFold(strings.TrimSpace(cfg.Schedule), "weekly") || cfg.HourUTC < 0 || cfg.HourUTC > 23 {
 		return time.Time{}, time.Time{}, false
 	}
-	return now.AddDate(0, 0, -7), now, true
+	weekday, ok := weekdayFromName(cfg.DayOfWeek)
+	if !ok || now.Weekday() != weekday || now.Hour() != cfg.HourUTC {
+		return time.Time{}, time.Time{}, false
+	}
+	end = time.Date(now.Year(), now.Month(), now.Day(), cfg.HourUTC, 0, 0, 0, time.UTC)
+	return end.AddDate(0, 0, -7), end, true
 }
 
-// GenerateAndDispatchReport runs the full pipeline: generate, save
-// (always, regardless of what happens next), then email if recipients
-// are configured. A failed email doesn't lose the report — it's
-// already saved by that point, and the failure reason is saved
-// alongside it so it's visible from the Reports tab.
+// GenerateAndDispatchReport is idempotent for one reporting slot. The report
+// is persisted before any email is attempted, so report content/window is
+// durable before delivery begins. SMTP itself has no idempotency primitive:
+// if the remote server accepts the message but persisting EmailSent fails,
+// a later retry can still duplicate that message; this residual is surfaced
+// in documentation rather than pretending SMTP provides exactly-once delivery.
 func (s *Server) GenerateAndDispatchReport(ctx context.Context, periodStart, periodEnd time.Time) error {
-	rep, err := s.Repo.GenerateReport(ctx, periodStart, periodEnd)
+	reportID := fmt.Sprintf("report-%d", periodEnd.UTC().UnixNano())
+	rep, err := s.Repo.GetReport(ctx, reportID)
 	if err != nil {
-		return fmt.Errorf("generate: %w", err)
-	}
-	rep.ID = fmt.Sprintf("report-%d", periodEnd.Unix())
-	rep.Recipients = s.Reports.Recipients
-
-	if len(s.Reports.Recipients) > 0 {
-		subject := fmt.Sprintf("OTLens weekly summary — %s to %s",
-			periodStart.Format("Jan 2"), periodEnd.Format("Jan 2, 2006"))
-		if err := s.sendEmailHTML(subject, rep.HTML, s.Reports.Recipients); err != nil {
-			rep.EmailError = err.Error()
-			log.Printf("report: email send failed: %v", err)
-		} else {
-			rep.EmailSent = true
+		if err != sql.ErrNoRows {
+			return fmt.Errorf("load existing report: %w", err)
+		}
+		rep, err = s.Repo.GenerateReport(ctx, periodStart, periodEnd)
+		if err != nil {
+			return fmt.Errorf("generate: %w", err)
+		}
+		rep.ID = reportID
+		rep.Recipients = append([]string(nil), s.Reports.Recipients...)
+		if err := s.Repo.SaveReport(ctx, rep); err != nil {
+			return fmt.Errorf("save before delivery: %w", err)
 		}
 	}
+	return s.deliverSavedReport(ctx, rep)
+}
 
-	if err := s.Repo.SaveReport(ctx, rep); err != nil {
-		return fmt.Errorf("save: %w", err)
+func reportDeliveryBackoff(attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	// 15m, 30m, 45m ... capped at six hours. Linear backoff avoids a
+	// multi-day silent gap after a short SMTP outage while still preventing a
+	// broken mail relay from being hammered every scheduler tick forever.
+	d := 15 * time.Minute * time.Duration(attempts+1)
+	if d > 6*time.Hour {
+		d = 6 * time.Hour
+	}
+	return d
+}
+
+// deliverSavedReport retries only an already-persisted report. The report
+// body/window never changes between attempts. A future NextEmailAttemptAt is
+// respected so the scheduler can call this method frequently without turning
+// a broken SMTP server into a tight retry loop.
+func (s *Server) deliverSavedReport(ctx context.Context, rep Report) error {
+	if rep.EmailSent || len(rep.Recipients) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	if rep.NextEmailAttemptAt != nil && rep.NextEmailAttemptAt.After(now) {
+		return nil
+	}
+	subject := fmt.Sprintf("OTLens weekly summary — %s to %s",
+		rep.PeriodStart.Format("Jan 2"), rep.PeriodEnd.Format("Jan 2, 2006"))
+	sent := true
+	deliveryErr := ""
+	if err := s.sendEmailHTML(subject, rep.HTML, rep.Recipients); err != nil {
+		sent = false
+		deliveryErr = err.Error()
+		log.Printf("report: email send failed id=%s attempt=%d: %v", rep.ID, rep.EmailAttempts+1, err)
+	}
+	retryAfter := time.Duration(0)
+	if !sent {
+		retryAfter = reportDeliveryBackoff(rep.EmailAttempts)
+	}
+	if err := s.Repo.UpdateReportDelivery(ctx, rep.ID, rep.Recipients, sent, deliveryErr, retryAfter); err != nil {
+		return fmt.Errorf("persist delivery result: %w", err)
+	}
+	return nil
+}
+
+// RetryPendingReportDeliveries allows a transient SMTP outage to recover after
+// the configured weekly generation hour has passed. Older code retried only
+// while DueReportWindow was true, so an outage lasting that one hour left a
+// saved report permanently unsent.
+func (s *Server) RetryPendingReportDeliveries(ctx context.Context) error {
+	reports, err := s.Repo.ListReportsPendingDelivery(ctx, 20)
+	if err != nil {
+		return err
+	}
+	for _, rep := range reports {
+		if err := s.deliverSavedReport(ctx, rep); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // Report is one generated summary — see GenerateReport.
 type Report struct {
-	ID          string
-	PeriodStart time.Time
-	PeriodEnd   time.Time
-	HTML        string
-	Recipients  []string
-	EmailSent   bool
-	EmailError  string
-	GeneratedAt time.Time
+	ID                 string
+	PeriodStart        time.Time
+	PeriodEnd          time.Time
+	HTML               string
+	Recipients         []string
+	EmailSent          bool
+	EmailError         string
+	EmailAttempts      int
+	LastEmailAttemptAt *time.Time
+	NextEmailAttemptAt *time.Time
+	GeneratedAt        time.Time
 }
 
 // reportData is everything GenerateReport pulls together before
@@ -107,10 +173,11 @@ type Report struct {
 type reportData struct {
 	PeriodStart, PeriodEnd time.Time
 	NewAssets              int
-	OpenAlerts             int
+	UnreviewedAlerts       int
+	ActiveAlerts           int
 	AlertsBySeverity       map[string]int
 	NewAlertsThisPeriod    int
-	NewIncidents           []Incident
+	NewIncidents           []ManagedIncident
 	TopologyEdgeGrowth     int
 	OfflineSensors         []string
 	TotalSensors           int
@@ -122,22 +189,42 @@ type reportData struct {
 // full pipeline (this function, then SaveReport, then optionally
 // email).
 func (r *Repository) GenerateReport(ctx context.Context, periodStart, periodEnd time.Time) (Report, error) {
+	// Build every KPI/table from one database snapshot. Without this, a live
+	// telemetry sync between SELECTs could make the exported report internally
+	// inconsistent (for example alert totals from one moment and incidents from
+	// another).
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return Report{}, err
+	}
+	defer tx.Rollback()
 	data := reportData{PeriodStart: periodStart, PeriodEnd: periodEnd, AlertsBySeverity: map[string]int{}}
 
-	if err := r.db.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT (sensor_id, mac)) FROM topology_nodes
-		WHERE mac != '' AND first_seen >= $1 AND first_seen < $2`,
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM (
+		 SELECT sensor_id,asset_identity,MIN(first_seen) AS first_seen
+		 FROM asset_identity_history
+		 WHERE asset_identity<>''
+		 GROUP BY sensor_id,asset_identity
+		) assets WHERE first_seen >= $1 AND first_seen < $2`,
 		periodStart, periodEnd).Scan(&data.NewAssets); err != nil {
 		return Report{}, fmt.Errorf("new assets: %w", err)
 	}
 
-	if err := r.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM alert_history WHERE status = 'new'`,
-	).Scan(&data.OpenAlerts); err != nil {
-		return Report{}, fmt.Errorf("open alerts: %w", err)
+	).Scan(&data.UnreviewedAlerts); err != nil {
+		return Report{}, fmt.Errorf("unreviewed alerts: %w", err)
 	}
 
-	sevRows, err := r.db.QueryContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM alert_history
+		WHERE status <> 'approved' AND last_seen >= NOW() - INTERVAL '5 minutes'`,
+	).Scan(&data.ActiveAlerts); err != nil {
+		return Report{}, fmt.Errorf("active alerts: %w", err)
+	}
+
+	sevRows, err := tx.QueryContext(ctx, `
 		SELECT severity, COUNT(*) FROM alert_history WHERE status = 'new' GROUP BY severity`,
 	)
 	if err != nil {
@@ -150,29 +237,29 @@ func (r *Repository) GenerateReport(ctx context.Context, periodStart, periodEnd 
 			sevRows.Close()
 			return Report{}, err
 		}
-		data.AlertsBySeverity[sev] = n
+		data.AlertsBySeverity[strings.ToLower(strings.TrimSpace(sev))] += n
 	}
 	sevRows.Close()
 
-	if err := r.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM alert_history WHERE first_seen >= $1 AND first_seen < $2`,
 		periodStart, periodEnd).Scan(&data.NewAlertsThisPeriod); err != nil {
 		return Report{}, fmt.Errorf("new alerts this period: %w", err)
 	}
 
-	incidents, err := r.ListIncidents(ctx, periodEnd.Sub(periodStart), 2)
+	incidents, err := listManagedIncidentsCreatedBetween(ctx, tx, periodStart, periodEnd)
 	if err != nil {
 		return Report{}, fmt.Errorf("incidents: %w", err)
 	}
 	data.NewIncidents = incidents
 
-	if err := r.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM topology_edges WHERE first_seen >= $1 AND first_seen < $2`,
 		periodStart, periodEnd).Scan(&data.TopologyEdgeGrowth); err != nil {
 		return Report{}, fmt.Errorf("topology growth: %w", err)
 	}
 
-	offlineRows, err := r.db.QueryContext(ctx, `SELECT id FROM sensors WHERE status = 'offline'`)
+	offlineRows, err := tx.QueryContext(ctx, `SELECT id FROM sensors WHERE status = 'offline'`)
 	if err != nil {
 		return Report{}, fmt.Errorf("offline sensors: %w", err)
 	}
@@ -186,15 +273,18 @@ func (r *Repository) GenerateReport(ctx context.Context, periodStart, periodEnd 
 	}
 	offlineRows.Close()
 
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sensors`).Scan(&data.TotalSensors); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sensors`).Scan(&data.TotalSensors); err != nil {
 		return Report{}, fmt.Errorf("total sensors: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return Report{}, err
+	}
 	return Report{
 		PeriodStart: periodStart,
 		PeriodEnd:   periodEnd,
 		HTML:        renderReportHTML(data),
-		GeneratedAt: time.Now(),
+		GeneratedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -217,7 +307,7 @@ func renderReportHTML(d reportData) string {
 		severityTotal += n
 	}
 
-	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>
 *{box-sizing:border-box}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#eef2f6;color:#172033;margin:0;padding:32px 16px;line-height:1.45}
 .report{background:#fff;max-width:900px;margin:0 auto;border:1px solid #dce3eb;border-radius:14px;overflow:hidden;box-shadow:0 16px 40px rgba(15,23,42,.08)}
 .hero{background:linear-gradient(135deg,#0f2942,#174f73);color:#fff;padding:30px 36px}.brand{font-size:12px;letter-spacing:.16em;text-transform:uppercase;opacity:.78}.hero h1{font-size:28px;line-height:1.2;margin:8px 0 6px}.period{font-size:14px;opacity:.82}.content{padding:30px 36px 38px}
@@ -233,13 +323,13 @@ table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;border
 
 	sb.WriteString(`<div class="summary">`)
 	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>New assets</span><small>First observed this period</small></div>`, d.NewAssets))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>Open alerts</span><small>%d newly observed</small></div>`, d.OpenAlerts, d.NewAlertsThisPeriod))
+	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>Unreviewed alerts</span><small>%d active in last 5m · %d newly observed</small></div>`, d.UnreviewedAlerts, d.ActiveAlerts, d.NewAlertsThisPeriod))
 	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d</b><span>New connections</span><small>Topology growth</small></div>`, d.TopologyEdgeGrowth))
 	sb.WriteString(fmt.Sprintf(`<div class="kpi"><b>%d%%</b><span>Sensor availability</span><small>%d of %d online</small></div>`, availability, d.TotalSensors-len(d.OfflineSensors), d.TotalSensors))
 	sb.WriteString(`</div>`)
 
 	sb.WriteString(`<section><h2>Alert posture</h2>`)
-	sb.WriteString(fmt.Sprintf(`<p class="section-note">%d open alerts grouped by severity.</p><table><thead><tr><th>Severity</th><th class="number">Open alerts</th><th class="number">Share</th></tr></thead><tbody>`, severityTotal))
+	sb.WriteString(fmt.Sprintf(`<p class="section-note">%d unreviewed alerts grouped by severity; %d are active in the last 5 minutes.</p><table><thead><tr><th>Severity</th><th class="number">Unreviewed</th><th class="number">Share</th></tr></thead><tbody>`, severityTotal, d.ActiveAlerts))
 	for _, sev := range []string{"critical", "high", "medium", "low"} {
 		n := d.AlertsBySeverity[sev]
 		share := 0
@@ -250,18 +340,22 @@ table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;border
 	}
 	sb.WriteString(`</tbody></table></section>`)
 
-	sb.WriteString(`<section><h2>Correlated incidents</h2><p class="section-note">Incidents with two or more related alert types on the same sensor and IP.</p>`)
+	sb.WriteString(`<section><h2>Managed incidents</h2><p class="section-note">Incidents created during this exact reporting window.</p>`)
 	if len(d.NewIncidents) == 0 {
 		sb.WriteString(`<div class="empty">No correlated incidents were identified in this reporting window.</div>`)
 	} else {
-		sb.WriteString(`<table><thead><tr><th>Sensor</th><th>IP address</th><th>Severity</th><th>Detection types</th></tr></thead><tbody>`)
+		sb.WriteString(`<table><thead><tr><th>Sensor</th><th>IP address</th><th>Severity</th><th>Rule / title</th></tr></thead><tbody>`)
 		for _, inc := range d.NewIncidents {
 			sev := strings.ToLower(inc.Severity)
 			if sev == "" {
 				sev = "low"
 			}
+			label := strings.TrimSpace(inc.RuleName)
+			if label == "" {
+				label = strings.TrimSpace(inc.Title)
+			}
 			sb.WriteString(fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td><span class="severity %s">%s</span></td><td>%s</td></tr>`,
-				esc(inc.SensorID), esc(inc.IP), esc(sev), esc(strings.ToUpper(inc.Severity)), esc(strings.Join(inc.Types, ", "))))
+				esc(inc.SensorID), esc(inc.IP), esc(sev), esc(strings.ToUpper(inc.Severity)), esc(label)))
 		}
 		sb.WriteString(`</tbody></table>`)
 	}
@@ -283,11 +377,78 @@ table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;border
 // itself isn't lost just because delivery didn't work).
 func (r *Repository) SaveReport(ctx context.Context, rep Report) error {
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO report_history(id, period_start, period_end, html, recipients, email_sent, email_error, generated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		rep.ID, rep.PeriodStart, rep.PeriodEnd, rep.HTML, strings.Join(rep.Recipients, ","), rep.EmailSent, rep.EmailError, rep.GeneratedAt,
+		INSERT INTO report_history(id, period_start, period_end, html, recipients, email_sent, email_error, email_attempts, last_email_attempt_at, next_email_attempt_at, generated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT(id) DO NOTHING`,
+		rep.ID, rep.PeriodStart, rep.PeriodEnd, rep.HTML, strings.Join(rep.Recipients, ","), rep.EmailSent, rep.EmailError, rep.EmailAttempts, rep.LastEmailAttemptAt, rep.NextEmailAttemptAt, rep.GeneratedAt,
 	)
 	return err
+}
+
+// UpdateReportDelivery records the last SMTP outcome without regenerating or
+// replacing the report body. This is intentionally separate from SaveReport so
+// delivery retries cannot mutate the historical reporting window/content.
+func (r *Repository) UpdateReportDelivery(ctx context.Context, id string, recipients []string, sent bool, deliveryErr string, retryAfter time.Duration) error {
+	var next interface{}
+	if !sent && retryAfter > 0 {
+		next = time.Now().UTC().Add(retryAfter)
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE report_history
+		SET recipients=$2,email_sent=$3,email_error=$4,
+		    email_attempts=email_attempts+1,last_email_attempt_at=NOW(),next_email_attempt_at=$5
+		WHERE id=$1`, id, strings.Join(recipients, ","), sent, deliveryErr, next)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ListManagedIncidentsCreatedBetween is the report-specific incident query.
+// Using the legacy rolling ListIncidents helper here made report contents drift
+// with the time the report happened to run and did not match the managed
+// Incident workbench. Reports instead need an exact half-open time window.
+type reportQueryer interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+func (r *Repository) ListManagedIncidentsCreatedBetween(ctx context.Context, start, end time.Time) ([]ManagedIncident, error) {
+	return listManagedIncidentsCreatedBetween(ctx, r.db, start, end)
+}
+
+func listManagedIncidentsCreatedBetween(ctx context.Context, q reportQueryer, start, end time.Time) ([]ManagedIncident, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id,sensor_id,asset_ip,title,severity,score,confidence,status,owner,summary,
+		       first_seen,last_seen,updated_at,COALESCE(correlation_rule_id,0),correlation_rule_name,
+		       mitre_tactics,mitre_techniques
+		FROM incidents
+		WHERE created_at >= $1 AND created_at < $2
+		ORDER BY created_at DESC,id DESC`, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ManagedIncident, 0)
+	for rows.Next() {
+		var x ManagedIncident
+		var tactics, techniques string
+		if err := rows.Scan(&x.ID, &x.SensorID, &x.IP, &x.Title, &x.Severity, &x.Score, &x.Confidence,
+			&x.Status, &x.Owner, &x.Summary, &x.FirstSeen, &x.LastSeen, &x.UpdatedAt, &x.RuleID,
+			&x.RuleName, &tactics, &techniques); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(tactics), &x.MITRETactics)
+		_ = json.Unmarshal([]byte(techniques), &x.MITRETechniques)
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 
 // ListReports returns the most recently generated reports, newest
@@ -298,7 +459,8 @@ func (r *Repository) ListReports(ctx context.Context, limit int) ([]Report, erro
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, period_start, period_end, recipients, email_sent, email_error, generated_at
+		SELECT id, period_start, period_end, recipients, email_sent, email_error,
+		       email_attempts,last_email_attempt_at,next_email_attempt_at,generated_at
 		FROM report_history ORDER BY generated_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -308,7 +470,7 @@ func (r *Repository) ListReports(ctx context.Context, limit int) ([]Report, erro
 	for rows.Next() {
 		var rep Report
 		var recipients string
-		if err := rows.Scan(&rep.ID, &rep.PeriodStart, &rep.PeriodEnd, &recipients, &rep.EmailSent, &rep.EmailError, &rep.GeneratedAt); err != nil {
+		if err := rows.Scan(&rep.ID, &rep.PeriodStart, &rep.PeriodEnd, &recipients, &rep.EmailSent, &rep.EmailError, &rep.EmailAttempts, &rep.LastEmailAttemptAt, &rep.NextEmailAttemptAt, &rep.GeneratedAt); err != nil {
 			return nil, err
 		}
 		if recipients != "" {
@@ -324,9 +486,10 @@ func (r *Repository) GetReport(ctx context.Context, id string) (Report, error) {
 	var rep Report
 	var recipients string
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, period_start, period_end, html, recipients, email_sent, email_error, generated_at
+		SELECT id, period_start, period_end, html, recipients, email_sent, email_error,
+		       email_attempts,last_email_attempt_at,next_email_attempt_at,generated_at
 		FROM report_history WHERE id=$1`, id,
-	).Scan(&rep.ID, &rep.PeriodStart, &rep.PeriodEnd, &rep.HTML, &recipients, &rep.EmailSent, &rep.EmailError, &rep.GeneratedAt)
+	).Scan(&rep.ID, &rep.PeriodStart, &rep.PeriodEnd, &rep.HTML, &recipients, &rep.EmailSent, &rep.EmailError, &rep.EmailAttempts, &rep.LastEmailAttemptAt, &rep.NextEmailAttemptAt, &rep.GeneratedAt)
 	if err != nil {
 		return Report{}, err
 	}
@@ -334,6 +497,40 @@ func (r *Repository) GetReport(ctx context.Context, id string) (Report, error) {
 		rep.Recipients = strings.Split(recipients, ",")
 	}
 	return rep, nil
+}
+
+// ListReportsPendingDelivery returns saved, unsent reports whose SMTP retry
+// backoff has elapsed. A durable saved report therefore does not depend on the
+// Central process remaining up during one specific weekly hour.
+func (r *Repository) ListReportsPendingDelivery(ctx context.Context, limit int) ([]Report, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id,period_start,period_end,html,recipients,email_sent,email_error,
+		       email_attempts,last_email_attempt_at,next_email_attempt_at,generated_at
+		FROM report_history
+		WHERE email_sent=FALSE AND recipients<>''
+		  AND (next_email_attempt_at IS NULL OR next_email_attempt_at<=NOW())
+		ORDER BY COALESCE(next_email_attempt_at,generated_at),generated_at
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Report, 0)
+	for rows.Next() {
+		var rep Report
+		var recipients string
+		if err := rows.Scan(&rep.ID, &rep.PeriodStart, &rep.PeriodEnd, &rep.HTML, &recipients, &rep.EmailSent, &rep.EmailError, &rep.EmailAttempts, &rep.LastEmailAttemptAt, &rep.NextEmailAttemptAt, &rep.GeneratedAt); err != nil {
+			return nil, err
+		}
+		if recipients != "" {
+			rep.Recipients = strings.Split(recipients, ",")
+		}
+		out = append(out, rep)
+	}
+	return out, rows.Err()
 }
 
 // DeleteReport permanently removes one saved report.

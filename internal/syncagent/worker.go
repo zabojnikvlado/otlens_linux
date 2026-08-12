@@ -142,6 +142,15 @@ func (w *Worker) sync(ctx context.Context) {
 		}
 		w.Detect.SetAssetPolicyContexts(converted)
 		return nil
+	}, func(seg management.SegmentationConfig) error {
+		if w.Detect != nil {
+			if seg.Managed {
+				w.Detect.UpdateSegmentationConfig(seg.VLANLevels, seg.MaxLevelJump)
+			} else {
+				w.Detect.RestoreLocalSegmentationConfig()
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		if IsSensorAuthError(err) {

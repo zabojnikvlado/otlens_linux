@@ -51,7 +51,7 @@ var retentionTables = []retentionTable{
 // category first (each table against its own *_days cutoff), then —
 // only if the tables this system can touch are still over
 // MaxDatabaseSizeGB after that — a size backstop that deletes the
-// globally oldest rows across all five tables (not a fixed per-category
+// globally oldest rows across all tracked retention tables (not a fixed per-category
 // priority order) until back at or under TargetDatabaseSizeGB. Meant to
 // be called on a ticker (see cmd/otlens-central/main.go); logs a summary
 // either way and never panics — a failed sweep just tries again next
@@ -128,7 +128,7 @@ func (r *Repository) ageBasedRetention(ctx context.Context, cfg RetentionConfig)
 	return deleted, nil
 }
 
-// sizeBasedRetention repeatedly finds whichever of the five tables
+// sizeBasedRetention repeatedly finds whichever tracked table
 // currently holds the single oldest row (comparing across all of them,
 // not a fixed priority order) and deletes a batch of that table's oldest
 // rows, until the tracked tables' combined size is back at or under

@@ -444,7 +444,7 @@ func (a *Application) Start() {
 	if err := a.Snapshotter.Restore(); err != nil {
 
 		logger.Log.Warn(
-			"Restoring persisted state failed, starting from empty state",
+			"Restoring persisted state was incomplete; successfully restored components were kept",
 			zap.Error(err),
 		)
 	}

@@ -36,22 +36,20 @@ func (r *Repository) AlertsByDay(ctx context.Context, days int) ([]DayCount, err
 	return scanDayCounts(rows)
 }
 
-// NewAssetsByDay returns the number of distinct new (sensor, MAC)
-// assets first observed per day over the last `days` days — based on
-// topology_nodes.first_seen. A device that changed IP shows up once,
-// on the day its *earliest* recorded IP first appeared, not once per
-// IP it's ever had (topology_nodes has one row per (sensor, ip), so
-// this counts DISTINCT (sensor_id, mac) rather than raw rows).
+// NewAssetsByDay returns the number of distinct stable asset identities first
+// observed per day. asset_identity_history is used rather than topology_nodes
+// because an IP can later be reused by another MAC and overwrite the current IP
+// row; the identity ledger preserves both physical devices.
 func (r *Repository) NewAssetsByDay(ctx context.Context, days int) ([]DayCount, error) {
 	if days <= 0 {
 		days = 30
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT day, COUNT(*) FROM (
-			SELECT sensor_id, mac, MIN(date_trunc('day', first_seen)) AS day
-			FROM topology_nodes
-			WHERE mac != ''
-			GROUP BY sensor_id, mac
+			SELECT sensor_id, asset_identity, MIN(date_trunc('day', first_seen)) AS day
+			FROM asset_identity_history
+			WHERE asset_identity != ''
+			GROUP BY sensor_id, asset_identity
 		) AS first_per_asset
 		WHERE day > NOW() - ($1 * INTERVAL '1 day')
 		GROUP BY day ORDER BY day ASC`,

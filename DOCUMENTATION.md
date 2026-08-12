@@ -289,7 +289,10 @@ simulation mode (log without alerting, to test a rule before it's live),
 and suppression. Built-in rules can be enabled/disabled; custom rules can
 be fully edited, deleted, and exported/imported as JSON (handy for copying
 a rule set between sensors). Needs `rule_manage` to create/edit/delete;
-viewing and exporting only needs the Rules tab's view permission.
+viewing and exporting only needs the Rules tab's view permission. Rule exports use
+`otlens-policy-v3`: complete runtime snapshots stay tagged by sensor and
+`custom_rules_by_sensor` is the authoritative import source, so divergent
+custom rules from multiple sensors are never silently merged into one target.
 
 ### Alerts
 
@@ -310,6 +313,13 @@ number of distinct findings from ever producing a telemetry payload big
 enough to hit PostgreSQL's hard 256 MB per-JSONB-value limit — the
 failure mode this replaced.
 
+The red **Alerts** navigation badge is the number of `new` / unreviewed
+retained alerts, not the five-minute activity window. The Alerts page summary
+shows those concepts separately: matching rows, **active (last 5m)**,
+**unreviewed**, and total retained. Restarting a sensor therefore does not make
+old unreviewed alerts disappear merely because they have not recurred in the
+last five minutes.
+
 **Out-of-band notifications** (`notifications` in `central.config.yaml`)
 send an email and/or webhook when a new alert at or above
 `min_severity` is recorded. Off by default; email is off even when
@@ -329,26 +339,33 @@ permission as Alerts.
 
 ### Reports
 
-A weekly HTML summary — new assets, open alerts by severity, new
-incidents, topology growth, sensor health — covering the 7 days before
-each generation. Not a true PDF (no PDF library in this codebase); it's
-a self-contained HTML document instead, which most email clients render
-directly and which the recipient can print/save as PDF if they want one.
+A weekly security summary covering an exact anchored 7-day window. It reports
+new assets, **unreviewed alerts** by severity, the point-in-time count of alerts
+active in the last 5 minutes, managed incidents created in the window, topology
+growth, and sensor health. The saved artifact is self-contained HTML; the
+Reports tab can also render that saved HTML to a styled PDF through a local
+Chrome/Chromium/Edge headless renderer.
 
-Configured via `reports` in `central.config.yaml`: off by default,
-weekly on a configurable day/hour (UTC). Every generated report is saved
-to `report_history` and viewable from the Reports tab **regardless of
-whether email delivery is configured or succeeds** — so this still works
-on a fully offline/air-gapped Central with no SMTP set up at all, and a
-failed send doesn't lose the report. Recipients here are deliberately
-separate from `notifications.email.to` (a weekly management summary and
-a real-time alert ping often go to different people), but both share the
-same SMTP connection settings (`notifications.email.smtp_host` etc.) —
-there's no second copy of those for reports specifically.
+Configured via `reports` in `central.config.yaml`: off by default, weekly on a
+validated day/hour (UTC). The scheduler checks immediately at Central startup
+and every 15 minutes during normal operation, while a deterministic report ID
+makes the configured weekly slot idempotent. The report body is generated from one repeatable-read PostgreSQL snapshot and
+persisted to `report_history` **before** SMTP is attempted, so concurrent sensor
+sync cannot mix KPI values from different database moments and a mail failure
+never loses the report. SMTP delivery state/error is saved separately; unsent
+saved reports are retried every 15 minutes with bounded backoff even after the
+configured generation hour has passed.
 
-Click **Generate now** (needs `data_management`) to produce one
-immediately, covering the 7 days before that click, instead of waiting
-for the next scheduled slot.
+Recipients are deliberately separate from `notifications.email.to`, but report
+mail uses the same SMTP connection settings (`notifications.email.smtp_host`,
+port, credentials, from address and TLS). If report recipients are configured,
+Central validates the required SMTP settings at startup. SMTP itself cannot
+provide transactional exactly-once delivery: if a remote server accepts a mail
+and Central loses the connection before recording the result, a retry can still
+produce a duplicate.
+
+Click **Generate now** (needs `data_management`) to produce an independent
+7-day report ending at the click time.
 
 ### Sensors
 
@@ -408,6 +425,29 @@ own password. What's on it beyond that depends on `users_roles_manage`:
   themselves aren't rendered for them, and the underlying `GET /v1/users`/
   `/v1/roles` endpoints reject their requests server-side too.
 
+### SIEM and outbound notifications
+
+SIEM export uses an at-least-once PostgreSQL outbox and one JSON event per HTTP
+POST. Audit export is queued atomically from the authoritative `audit_log`
+insert, so rich export/download audit records are not omitted just because the
+request was a GET. Alert event time is based on the alert observation (`last_seen`, falling
+back to `first_seen`) rather than upload time. Every envelope carries
+`schema_version`, a stable `event_id`, `X-OTLens-Event-ID`, and `Idempotency-Key`;
+collectors should deduplicate on that identifier because a retry can occur after
+a receiver accepted an event but Central did not persist the acknowledgement.
+Redirects are rejected so a POST cannot silently turn into a GET. Delivered
+queue rows are removed; the authoritative source history remains in
+`alert_history` / `audit_log`. Temporarily disabling `export_alerts` or
+`export_audit` does **not** delete already queued events of that kind; they stay
+in the outbox and resume when that export kind is enabled again. When
+`max_attempts` is non-zero, exhausted rows remain as an observable dead-letter
+queue and are shown in Settings.
+
+Real-time email/webhook notifications are intentionally separate from SIEM.
+They are best-effort notifications for newly created alerts, not a durable
+compliance channel. Webhooks carry their own stable alert event ID and refuse
+redirects; SMTP and webhook operations are bounded by timeouts.
+
 ### Settings
 
 *(Admin only.)* Read-only operational status: sensor offline-detection
@@ -419,8 +459,16 @@ file directly.
 
 ### Data Management
 
-*(Admin only — `data_management`.)* Backup PostgreSQL data or queue a
-selected sensor's SQLite backup; reset specific data categories (alerts,
+*(Admin only — `data_management`.)* Create a versioned Central core JSON snapshot or queue a
+selected sensor's SQLite backup. The core snapshot is assembled under one
+repeatable-read PostgreSQL transaction and its SHA-256 is verified again before
+download. It deliberately excludes authentication secrets (including sensor
+auth-token hashes) and high-volume DNS/SMB/protocol/flow history; it is stored
+inside the same PostgreSQL database and is therefore **not** disaster-recovery
+backup. Use `pg_dump`/external PostgreSQL backup for full backup/restore. Sensor
+backup commands flush current in-memory state before SQLite `VACUUM INTO`, but
+Central currently confirms command queueing rather than remote filesystem
+completion. Reset specific data categories (alerts,
 analysis jobs, SIEM queue, rules, learning, assets/flows, OT tags, or a
 full factory reset) on Central or on selected sensors. Destructive resets
 require typing `RESET` to confirm. Central backups are listed with

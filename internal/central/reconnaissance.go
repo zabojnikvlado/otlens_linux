@@ -207,21 +207,21 @@ func insertReconDerivedAlertTx(ctx context.Context, tx *sql.Tx, sensorID, ruleID
 	return err
 }
 
-func persistReconSecurityChangesTx(ctx context.Context, tx *sql.Tx, sensorID string, x management.ReconResult) error {
+func persistReconSecurityChangesTx(ctx context.Context, tx *sql.Tx, sensorID, assetIdentity string, x management.ReconResult) error {
 	for _, ch := range x.Changes {
 		if ch.Kind != "changed" {
 			continue
 		}
-		ev := map[string]interface{}{"source": "reconnaissance_profile", "field": ch.Field, "previous": ch.Previous, "current": ch.Current, "job_target": x.Target}
+		ev := map[string]interface{}{"source": "reconnaissance_profile", "asset_identity": assetIdentity, "field": ch.Field, "previous": ch.Previous, "current": ch.Current, "job_target": x.Target}
 		switch ch.Field {
 		case "firmware":
 			if err := insertReconDerivedAlertTx(ctx, tx, sensorID, "builtin.firmware_change", "firmware_change", "critical",
-				fmt.Sprintf("recon-firmware|%s|%s", x.Target, ch.Current), fmt.Sprintf("Firmware on %s changed from %s to %s", x.Target, ch.Previous, ch.Current), x.Target, ev); err != nil {
+				fmt.Sprintf("recon-firmware|%s|%s", assetIdentity, ch.Current), fmt.Sprintf("Firmware on %s changed from %s to %s", x.Target, ch.Previous, ch.Current), x.Target, ev); err != nil {
 				return err
 			}
 		case "hostname", "vendor", "model", "serial", "operating_system":
 			if err := insertReconDerivedAlertTx(ctx, tx, sensorID, "builtin.asset_identity_drift", "asset_identity_drift", "high",
-				fmt.Sprintf("recon-identity|%s|%s|%s", x.Target, ch.Field, ch.Current), fmt.Sprintf("Asset %s identity field %s changed from %s to %s", x.Target, ch.Field, ch.Previous, ch.Current), x.Target, ev); err != nil {
+				fmt.Sprintf("recon-identity|%s|%s|%s", assetIdentity, ch.Field, ch.Current), fmt.Sprintf("Asset %s identity field %s changed from %s to %s", x.Target, ch.Field, ch.Previous, ch.Current), x.Target, ev); err != nil {
 				return err
 			}
 		}
@@ -274,6 +274,25 @@ func (r *Repository) ReconResults(ctx context.Context, jobID string) ([]manageme
 	}
 	return out, rows.Err()
 }
+func resolveReconAssetIdentityTx(ctx context.Context, tx *sql.Tx, sensorID, ip string) (string, error) {
+	var identity string
+	err := tx.QueryRowContext(ctx, `SELECT CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END FROM topology_nodes WHERE sensor_id=$1 AND ip=$2 AND active=TRUE ORDER BY last_seen DESC LIMIT 1`, sensorID, ip).Scan(&identity)
+	if err == nil {
+		return identity, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	err = tx.QueryRowContext(ctx, `SELECT asset_identity FROM asset_identity_history WHERE sensor_id=$1 AND ip=$2 ORDER BY last_seen DESC LIMIT 1`, sensorID, ip).Scan(&identity)
+	if err == nil {
+		return identity, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return canonicalAssetIdentity("", ip), nil
+}
+
 func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results []management.ReconResult, jobErr string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -286,30 +305,34 @@ func (r *Repository) CompleteReconJob(ctx context.Context, jobID string, results
 	}
 	for i := range results {
 		x := &results[i]
+		assetIdentity, identityErr := resolveReconAssetIdentityTx(ctx, tx, sensorID, x.Target)
+		if identityErr != nil {
+			return identityErr
+		}
 		var previous management.ReconResult
 		var previousServices []byte
 		previous.Target = x.Target
-		errPrev := tx.QueryRowContext(ctx, `SELECT hostname,vendor,operating_system,model,firmware,serial,services FROM asset_recon_profile WHERE sensor_id=$1 AND ip=$2`, sensorID, x.Target).Scan(&previous.Hostname, &previous.Vendor, &previous.OS, &previous.Model, &previous.Firmware, &previous.Serial, &previousServices)
+		errPrev := tx.QueryRowContext(ctx, `SELECT hostname,vendor,operating_system,model,firmware,serial,services FROM asset_recon_profile WHERE sensor_id=$1 AND asset_identity=$2`, sensorID, assetIdentity).Scan(&previous.Hostname, &previous.Vendor, &previous.OS, &previous.Model, &previous.Firmware, &previous.Serial, &previousServices)
 		var previousPtr *management.ReconResult
 		if errPrev == nil {
 			_ = json.Unmarshal(previousServices, &previous.Services)
 			previousPtr = &previous
 		}
 		x.Changes = reconChanges(previousPtr, *x)
-		if err = persistReconSecurityChangesTx(ctx, tx, sensorID, *x); err != nil {
+		if err = persistReconSecurityChangesTx(ctx, tx, sensorID, assetIdentity, *x); err != nil {
 			return err
 		}
 		services, _ := json.Marshal(x.Services)
 		evidence, _ := json.Marshal(x.Evidence)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_profile(sensor_id,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
-			ON CONFLICT(sensor_id,ip) DO UPDATE SET hostname=COALESCE(NULLIF(EXCLUDED.hostname,''),asset_recon_profile.hostname),vendor=COALESCE(NULLIF(EXCLUDED.vendor,''),asset_recon_profile.vendor),operating_system=COALESCE(NULLIF(EXCLUDED.operating_system,''),asset_recon_profile.operating_system),model=COALESCE(NULLIF(EXCLUDED.model,''),asset_recon_profile.model),firmware=COALESCE(NULLIF(EXCLUDED.firmware,''),asset_recon_profile.firmware),serial=COALESCE(NULLIF(EXCLUDED.serial,''),asset_recon_profile.serial),ot_identity=CASE WHEN EXCLUDED.ot_identity='{}'::jsonb THEN asset_recon_profile.ot_identity ELSE EXCLUDED.ot_identity END,services=EXCLUDED.services,evidence=EXCLUDED.evidence,last_profiled_at=NOW()`, sensorID, x.Target, x.Hostname, x.Vendor, x.OS, x.Model, x.Firmware, x.Serial, mustJSON(x.OTIdentity), services, evidence); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_profile(sensor_id,asset_identity,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+			ON CONFLICT(sensor_id,asset_identity) DO UPDATE SET ip=EXCLUDED.ip,hostname=COALESCE(NULLIF(EXCLUDED.hostname,''),asset_recon_profile.hostname),vendor=COALESCE(NULLIF(EXCLUDED.vendor,''),asset_recon_profile.vendor),operating_system=COALESCE(NULLIF(EXCLUDED.operating_system,''),asset_recon_profile.operating_system),model=COALESCE(NULLIF(EXCLUDED.model,''),asset_recon_profile.model),firmware=COALESCE(NULLIF(EXCLUDED.firmware,''),asset_recon_profile.firmware),serial=COALESCE(NULLIF(EXCLUDED.serial,''),asset_recon_profile.serial),ot_identity=CASE WHEN EXCLUDED.ot_identity='{}'::jsonb THEN asset_recon_profile.ot_identity ELSE EXCLUDED.ot_identity END,services=EXCLUDED.services,evidence=EXCLUDED.evidence,last_profiled_at=NOW()`, sensorID, assetIdentity, x.Target, x.Hostname, x.Vendor, x.OS, x.Model, x.Firmware, x.Serial, mustJSON(x.OTIdentity), services, evidence); err != nil {
 			return err
 		}
 		x.Audit = append(x.Audit, management.ReconAuditStep{Stage: "persist_results", Status: "ok", Detail: "result stored and asset profile updated", ObservedAt: time.Now().UTC()})
 		b, _ := json.Marshal(x)
 		changes, _ := json.Marshal(x.Changes)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_history(sensor_id,ip,job_id,result,changes) VALUES($1,$2,$3,$4,$5)`, sensorID, x.Target, jobID, b, changes); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_recon_history(sensor_id,asset_identity,ip,job_id,result,changes) VALUES($1,$2,$3,$4,$5,$6)`, sensorID, assetIdentity, x.Target, jobID, b, changes); err != nil {
 			return err
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO reconnaissance_results(job_id,target,result) VALUES($1,$2,$3)`, jobID, x.Target, b); err != nil {
@@ -574,7 +597,12 @@ func (s *Server) deleteReconCampaign(c *gin.Context) {
 }
 
 func (s *Server) assetReconHistory(c *gin.Context) {
-	rows, err := s.Repo.db.QueryContext(c, `SELECT job_id,result,changes,observed_at FROM asset_recon_history WHERE sensor_id=$1 AND ip=$2 ORDER BY observed_at DESC LIMIT 50`, c.Param("id"), c.Param("ip"))
+	identity, err := s.Repo.ResolveAssetIdentity(c, c.Param("id"), c.Param("ip"))
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	rows, err := s.Repo.db.QueryContext(c, `SELECT job_id,result,changes,observed_at FROM asset_recon_history WHERE sensor_id=$1 AND asset_identity=$2 ORDER BY observed_at DESC LIMIT 50`, c.Param("id"), identity)
 	if err != nil {
 		respondInternalError(c, err)
 		return
@@ -598,6 +626,7 @@ func (s *Server) assetReconHistory(c *gin.Context) {
 
 type AssetReconProfile struct {
 	SensorID       string
+	AssetIdentity  string
 	IP             string
 	Hostname       string
 	Vendor         string
@@ -612,7 +641,7 @@ type AssetReconProfile struct {
 }
 
 func (r *Repository) AssetReconProfiles(ctx context.Context) (map[string]AssetReconProfile, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at::text FROM asset_recon_profile`)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_identity,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at::text FROM asset_recon_profile`)
 	if err != nil {
 		return nil, err
 	}
@@ -620,10 +649,10 @@ func (r *Repository) AssetReconProfiles(ctx context.Context) (map[string]AssetRe
 	out := map[string]AssetReconProfile{}
 	for rows.Next() {
 		var x AssetReconProfile
-		if err := rows.Scan(&x.SensorID, &x.IP, &x.Hostname, &x.Vendor, &x.OS, &x.Model, &x.Firmware, &x.Serial, &x.OTIdentity, &x.Services, &x.Evidence, &x.LastProfiledAt); err != nil {
+		if err := rows.Scan(&x.SensorID, &x.AssetIdentity, &x.IP, &x.Hostname, &x.Vendor, &x.OS, &x.Model, &x.Firmware, &x.Serial, &x.OTIdentity, &x.Services, &x.Evidence, &x.LastProfiledAt); err != nil {
 			return nil, err
 		}
-		out[x.SensorID+"\x00"+x.IP] = x
+		out[x.SensorID+"\x00"+x.AssetIdentity] = x
 	}
 	return out, rows.Err()
 }

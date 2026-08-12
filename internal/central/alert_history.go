@@ -83,7 +83,8 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 		if count == 0 {
 			count = 1
 		}
-		rows, err := x.QueryContext(ctx, `
+		var wasInserted bool
+		err := x.QueryRowContext(ctx, `
 			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen,evidence)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
@@ -102,15 +103,10 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
 				evidence = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.evidence ELSE alert_history.evidence END
 			RETURNING (xmax = 0) AS inserted
-		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen, jsonObject(a.Evidence))
+		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen, jsonObject(a.Evidence)).Scan(&wasInserted)
 		if err != nil {
 			return newlyCreated, err
 		}
-		var wasInserted bool
-		if rows.Next() {
-			_ = rows.Scan(&wasInserted)
-		}
-		rows.Close()
 		if wasInserted {
 			newlyCreated = append(newlyCreated, AlertHistoryEntry{
 				SensorID: sensorID, AlertKey: a.ID, Type: a.Type, Severity: a.Severity,
@@ -409,4 +405,74 @@ func jsonObject(value interface{}) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+// ListAssetAlertHistory returns retained alerts that reference the current
+// stable identity of an asset. It resolves every IP alias owned by the
+// identity and matches only structured alert fields/evidence keys so Asset
+// 360 does not depend on the browser's truncated global alert list or on
+// substring matching (for example 10.1.1.1 accidentally matching
+// 10.1.1.10).
+func (r *Repository) ListAssetAlertHistory(ctx context.Context, sensorID, assetIP string, limit int) ([]AlertHistoryEntry, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 500
+	}
+	identity, err := r.ResolveAssetIdentity(ctx, sensorID, assetIP)
+	if err != nil {
+		return nil, err
+	}
+	aliases, err := r.AssetIPAliases(ctx, sensorID, identity)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(aliases)+1)
+	clean := make([]string, 0, len(aliases)+1)
+	for _, value := range append(aliases, assetIP) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		clean = append(clean, value)
+	}
+	if len(clean) == 0 {
+		return []AlertHistoryEntry{}, nil
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
+		FROM alert_history
+		WHERE sensor_id=$1 AND (
+			ip = ANY($2) OR
+			evidence->>'source_ip' = ANY($2) OR
+			evidence->>'destination_ip' = ANY($2) OR
+			evidence->>'target_ip' = ANY($2) OR
+			evidence->>'peer_ip' = ANY($2) OR
+			evidence->>'controller_ip' = ANY($2) OR
+			evidence->>'origin_ip' = ANY($2) OR
+			evidence->>'pivot_ip' = ANY($2) OR
+			evidence->>'latest_target' = ANY($2)
+		)
+		ORDER BY last_seen DESC, alert_key ASC
+		LIMIT $3`, sensorID, clean, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AlertHistoryEntry, 0)
+	now := time.Now()
+	for rows.Next() {
+		var e AlertHistoryEntry
+		var evidence []byte
+		if err := rows.Scan(&e.SensorID, &e.AlertKey, &e.Type, &e.Severity, &e.Message, &e.IP, &e.Status, &e.ApprovedBy, &e.ApprovedAt, &e.Count, &e.FirstSeen, &e.LastSeen, &evidence); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &e.Evidence)
+		e.Active = alertIsActive(e.Status, e.LastSeen, now)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

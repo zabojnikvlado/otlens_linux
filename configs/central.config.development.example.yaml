@@ -86,7 +86,11 @@ auth:
 # temporary SIEM/network failures, so SIEM availability does not affect Central.
 siem:
   enabled: false
-  # HTTP(S) endpoint accepting one JSON event per POST.
+  # HTTP(S) endpoint accepting one JSON event per POST. Redirects are rejected.
+  # Events carry X-OTLens-Event-ID and Idempotency-Key; receivers should
+  # deduplicate on that stable identifier because delivery is at-least-once.
+  # Temporarily disabling export_alerts/export_audit preserves already queued
+  # events; they resume delivery if that kind is enabled again.
   url: "https://siem.example.local/api/events"
   export_alerts: true
   export_audit: true
@@ -98,6 +102,8 @@ siem:
   bearer_token: ""
 
   # Request and retry settings. max_attempts: 0 means retry indefinitely.
+  # With a finite max_attempts, exhausted events remain in the SIEM queue as
+  # visible dead-letter rows until the queue is reset or configuration changes.
   timeout: 10s
   retry_interval: 15s
   batch_size: 100
@@ -199,6 +205,8 @@ notifications:
 # email delivery is configured; viewable from the Reports tab either way.
 # Uses notifications.email above for the actual SMTP connection when
 # recipients are set here — there's no separate SMTP config for reports.
+# Saved unsent reports are retried every 15 minutes with bounded backoff, so a
+# temporary SMTP outage does not strand the weekly artifact.
 # PDF download renders this exact HTML/CSS through Edge/Chrome/Chromium on
 # the Central host. Override browser discovery with OTLENS_CENTRAL_PDF_BROWSER.
 # Only if Central must run as root on Linux, OTLENS_CENTRAL_PDF_NO_SANDBOX=true

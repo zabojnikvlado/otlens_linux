@@ -89,6 +89,7 @@ func (e *Engine) ResetLearningState() {
 
 	e.ipVLANMutex.Lock()
 	e.ipVLAN = make(map[string]uint16)
+	e.ipVLANSeen = make(map[string]time.Time)
 	e.ipVLANMutex.Unlock()
 
 	e.lateralData.mutex.Lock()

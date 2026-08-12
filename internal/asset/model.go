@@ -67,6 +67,16 @@ type Asset struct {
 	// station) can change over its lifetime (DHCP renewal etc.).
 	Score int
 
+	// IPVerificationKnown/IPVerifiedByARP persist the provenance of the current
+	// MAC->IP binding. This matters across sensor restarts: a binding learned
+	// only from Ethernet+IP headers must remain movable until a real ARP
+	// self-announcement confirms it, while an ARP-confirmed binding must not be
+	// overwritten by a routed packet carrying the gateway MAC. Older snapshots
+	// predate these fields; Restore treats those conservatively as verified until
+	// fresh ARP evidence arrives.
+	IPVerificationKnown bool
+	IPVerifiedByARP     bool
+
 	// VLANID is the 802.1Q VLAN tag most recently observed for this
 	// device — 0 means untagged (no VLAN tag seen, or the network
 	// genuinely doesn't use VLANs). Drives the Topology tab's VLAN

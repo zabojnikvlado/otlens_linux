@@ -206,3 +206,145 @@ func TestBuiltInParameterAndSeverityPolicyAreOperatorOverrides(t *testing.T) {
 		t.Fatalf("severity reset did not restore product default: %#v", e.rules["builtin.brute_force_io"])
 	}
 }
+
+func TestAssetPolicyContextDoesNotContaminateLearnedOTSnapshot(t *testing.T) {
+	e := newBuiltinTestEngine()
+	level := 1.0
+	e.SetAssetPolicyContexts([]AssetPolicyContext{{IP: "10.0.0.20", Role: "plc", Zone: "cell-a", PurdueLevel: &level}})
+	if !e.isOTAsset("10.0.0.20") {
+		t.Fatal("explicit OT context was not effective")
+	}
+	if e.PolicyLearningSnapshot().OTAssets["10.0.0.20"] {
+		t.Fatal("operator-owned OT context leaked into persisted learned OT state")
+	}
+	e.SetAssetPolicyContexts(nil)
+	if e.isOTAsset("10.0.0.20") {
+		t.Fatal("removed operator context remained trusted through contaminated learned state")
+	}
+}
+
+func TestLearningResetKeepsExplicitContextSeparate(t *testing.T) {
+	e := newBuiltinTestEngine()
+	e.markOTAsset("10.0.0.20")
+	e.SetAssetPolicyContexts([]AssetPolicyContext{{IP: "10.0.0.20", Role: "enterprise workstation", Zone: "it"}})
+	if e.isOTAsset("10.0.0.20") {
+		t.Fatal("explicit enterprise context did not override inferred OT identity before reset")
+	}
+	e.resetPolicyLearningState()
+	if e.isOTAsset("10.0.0.20") {
+		t.Fatal("explicit enterprise context did not remain authoritative after learning reset")
+	}
+	if len(e.PolicyLearningSnapshot().OTAssets) != 0 {
+		t.Fatal("learning reset retained inferred OT state")
+	}
+}
+
+func TestManagedSegmentationConfigSurvivesSensorRestartSnapshot(t *testing.T) {
+	e := newBuiltinTestEngine()
+	e.UpdateSegmentationConfig(map[uint16]float64{10: 4, 20: 1}, 1.5)
+	snap := e.PolicyLearningSnapshot()
+	if !snap.ManagedSegmentation || snap.VLANLevels[20] != 1 || snap.MaxLevelJump != 1.5 {
+		t.Fatalf("managed segmentation snapshot incomplete: %#v", snap)
+	}
+	other := newBuiltinTestEngine()
+	other.RestorePolicyLearning(snap)
+	other.ipVLANMutex.RLock()
+	defer other.ipVLANMutex.RUnlock()
+	if !other.segmentationManaged || other.vlanLevels[10] != 4 || other.vlanLevels[20] != 1 || other.maxLevelJump != 1.5 {
+		t.Fatalf("managed segmentation config was not restored before capture: managed=%t levels=%#v jump=%v", other.segmentationManaged, other.vlanLevels, other.maxLevelJump)
+	}
+}
+
+func TestManagedSegmentationRejectsInvalidLevelsDefensively(t *testing.T) {
+	e := newBuiltinTestEngine()
+	e.UpdateSegmentationConfig(map[uint16]float64{10: 1, 4095: 2, 20: 2.25}, 99)
+	snap := e.PolicyLearningSnapshot()
+	if snap.VLANLevels[10] != 1 || len(snap.VLANLevels) != 1 {
+		t.Fatalf("invalid managed VLAN/Purdue entries were retained: %#v", snap.VLANLevels)
+	}
+	if snap.MaxLevelJump != 1 {
+		t.Fatalf("invalid max level jump was not reset: %v", snap.MaxLevelJump)
+	}
+}
+
+func TestPurdueFallbackDoesNotLearnInternetAddressAsLocalVLAN(t *testing.T) {
+	e := newBuiltinTestEngine()
+	e.UpdateSegmentationConfig(map[uint16]float64{10: 4, 20: 1}, 1)
+	e.handleSegmentation(core.Packet{SrcIP: "8.8.8.8", DstIP: "10.0.0.20", VLANID: 10, Timestamp: time.Now()})
+	e.ipVLANMutex.RLock()
+	defer e.ipVLANMutex.RUnlock()
+	if _, ok := e.ipVLAN["8.8.8.8"]; ok {
+		t.Fatal("routed Internet endpoint was incorrectly learned as a local VLAN member")
+	}
+}
+
+func TestUnmanagedSegmentationRestoresLocalSensorConfig(t *testing.T) {
+	logger.Log = zap.NewNop()
+	e := NewEngine(time.Minute, 3, false, nil, 100, true, map[uint16]float64{100: 4, 200: 1}, 2, true, time.Minute, 15, 15, true, 6, .15, 5*time.Second, time.Hour, 5000)
+	e.UpdateSegmentationConfig(map[uint16]float64{10: 5, 20: 1}, 1)
+	e.RestoreLocalSegmentationConfig()
+	e.ipVLANMutex.RLock()
+	defer e.ipVLANMutex.RUnlock()
+	if e.segmentationManaged {
+		t.Fatal("Central management was not released")
+	}
+	if !e.segmentationEnabled || e.vlanLevels[100] != 4 || e.vlanLevels[200] != 1 || len(e.vlanLevels) != 2 || e.maxLevelJump != 2 {
+		t.Fatalf("local segmentation config not restored: enabled=%t levels=%#v jump=%v", e.segmentationEnabled, e.vlanLevels, e.maxLevelJump)
+	}
+	if len(e.ipVLAN) != 0 || len(e.ipVLANSeen) != 0 {
+		t.Fatal("IP/VLAN observations from old managed policy were retained")
+	}
+}
+
+func TestRepeatedUnmanagedSegmentationSyncPreservesLocalVLANObservations(t *testing.T) {
+	logger.Log = zap.NewNop()
+	e := NewEngine(time.Minute, 3, false, nil, 100, true, map[uint16]float64{100: 4, 200: 1}, 2, true, time.Minute, 15, 15, true, 6, .15, 5*time.Second, time.Hour, 5000)
+	e.ipVLANMutex.Lock()
+	e.ipVLAN["10.0.0.10"] = 100
+	e.ipVLANSeen["10.0.0.10"] = time.Now()
+	e.ipVLANMutex.Unlock()
+	e.RestoreLocalSegmentationConfig()
+	e.ipVLANMutex.RLock()
+	defer e.ipVLANMutex.RUnlock()
+	if got := e.ipVLAN["10.0.0.10"]; got != 100 {
+		t.Fatalf("repeated managed=false sync cleared local VLAN observation: got %d", got)
+	}
+}
+
+func TestExplicitFieldDeviceRolesAreOT(t *testing.T) {
+	e := newBuiltinTestEngine()
+	for _, role := range []string{"sensor", "actuator", "instrument", "valve", "ot_asset"} {
+		e.SetAssetPolicyContexts([]AssetPolicyContext{{IP: "10.0.0.20", Role: role}})
+		if !e.isOTAsset("10.0.0.20") {
+			t.Fatalf("explicit field-device role %q was not classified as OT", role)
+		}
+	}
+}
+
+func TestPurdueFallbackLearnsOnlyARPConfirmedL2Membership(t *testing.T) {
+	e := newBuiltinTestEngine()
+	e.UpdateSegmentationConfig(map[uint16]float64{10: 4, 20: 1}, 1)
+	e.mutex.Lock()
+	e.knownMAC["10.0.10.5"] = "00:11:22:33:44:10"
+	e.knownMAC["10.0.20.5"] = "00:11:22:33:44:20"
+	e.mutex.Unlock()
+	now := time.Now()
+	// VLAN 10 leg: source host is local, destination L3 address is behind router.
+	e.handleSegmentation(core.Packet{SrcIP: "10.0.10.5", DstIP: "10.0.20.5", SrcMAC: "00:11:22:33:44:10", DstMAC: "00:aa:bb:cc:dd:ee", VLANID: 10, Timestamp: now})
+	e.ipVLANMutex.RLock()
+	_, srcOK := e.ipVLAN["10.0.10.5"]
+	_, dstPremature := e.ipVLAN["10.0.20.5"]
+	e.ipVLANMutex.RUnlock()
+	if !srcOK || dstPremature {
+		t.Fatalf("routed private endpoint was assigned to the wrong VLAN: src=%t dst=%t", srcOK, dstPremature)
+	}
+	// VLAN 20 leg: the destination is now directly observed at its own MAC.
+	e.handleSegmentation(core.Packet{SrcIP: "10.0.10.5", DstIP: "10.0.20.5", SrcMAC: "00:aa:bb:cc:dd:ef", DstMAC: "00:11:22:33:44:20", VLANID: 20, Timestamp: now.Add(time.Second)})
+	e.ipVLANMutex.RLock()
+	srcVLAN, srcOK := e.ipVLAN["10.0.10.5"]
+	dstVLAN, dstOK := e.ipVLAN["10.0.20.5"]
+	e.ipVLANMutex.RUnlock()
+	if !srcOK || !dstOK || srcVLAN != 10 || dstVLAN != 20 {
+		t.Fatalf("independent VLAN membership was not retained: src=%d/%t dst=%d/%t", srcVLAN, srcOK, dstVLAN, dstOK)
+	}
+}

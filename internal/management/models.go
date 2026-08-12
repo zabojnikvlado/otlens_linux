@@ -196,6 +196,17 @@ type AssetPolicyContext struct {
 	PurdueOverride *float64 `json:"purdue_override,omitempty"`
 }
 
+// SegmentationConfig is Central's authoritative Purdue/VLAN detection
+// configuration. It is returned on every sensor sync, not only as a one-shot
+// command, so a sensor restart cannot silently fall back to stale local YAML.
+type SegmentationConfig struct {
+	// Managed explicitly distinguishes "Central is authoritative with an empty
+	// map" from "Central is not managing segmentation; use local sensor YAML".
+	Managed      bool               `json:"managed"`
+	VLANLevels   map[uint16]float64 `json:"vlan_levels"`
+	MaxLevelJump float64            `json:"max_level_jump"`
+}
+
 type SyncResponse struct {
 	ConfigVersion      int64                `json:"config_version"`
 	RulesVersion       int64                `json:"rules_version"`
@@ -204,6 +215,7 @@ type SyncResponse struct {
 	ThreatIntelVersion int64                `json:"threat_intel_version,omitempty"`
 	ThreatIntel        *ThreatIntelSnapshot `json:"threat_intel,omitempty"`
 	AssetContexts      []AssetPolicyContext `json:"asset_contexts,omitempty"`
+	Segmentation       *SegmentationConfig  `json:"segmentation,omitempty"`
 }
 
 // FlowSyncState is runtime-only acknowledgement metadata for a telemetry

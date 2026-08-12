@@ -19,6 +19,8 @@ import (
 type Repository struct {
 	db                *sql.DB
 	siemAlertsEnabled bool
+	siemAuditEnabled  bool
+	siemSource        string
 }
 
 func OpenPostgres(dsn string) (*Repository, error) {
@@ -224,6 +226,7 @@ ALTER TABLE reconnaissance_jobs ADD COLUMN IF NOT EXISTS campaign_id TEXT REFERE
 CREATE TABLE IF NOT EXISTS asset_recon_history (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL DEFAULT '',
  ip TEXT NOT NULL,
  job_id TEXT NOT NULL REFERENCES reconnaissance_jobs(id) ON DELETE CASCADE,
  result JSONB NOT NULL,
@@ -231,8 +234,10 @@ CREATE TABLE IF NOT EXISTS asset_recon_history (
  observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_asset_recon_history_asset ON asset_recon_history(sensor_id,ip,observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_asset_recon_history_identity ON asset_recon_history(sensor_id,asset_identity,observed_at DESC);
 CREATE TABLE IF NOT EXISTS asset_recon_profile (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL DEFAULT '',
  ip TEXT NOT NULL,
  hostname TEXT NOT NULL DEFAULT '',
  vendor TEXT NOT NULL DEFAULT '',
@@ -244,12 +249,16 @@ CREATE TABLE IF NOT EXISTS asset_recon_profile (
  services JSONB NOT NULL DEFAULT '[]'::jsonb,
  evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
  last_profiled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
- PRIMARY KEY(sensor_id,ip)
+ PRIMARY KEY(sensor_id,asset_identity)
 );
 ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
 ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS firmware TEXT NOT NULL DEFAULT '';
 ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS serial TEXT NOT NULL DEFAULT '';
 ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS ot_identity JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_recon_history ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_asset_recon_profile_ip ON asset_recon_profile(sensor_id,ip);
+CREATE INDEX IF NOT EXISTS idx_asset_recon_history_identity ON asset_recon_history(sensor_id,asset_identity,observed_at DESC);
 CREATE TABLE IF NOT EXISTS reconnaissance_results (
  id BIGSERIAL PRIMARY KEY,
  job_id TEXT NOT NULL REFERENCES reconnaissance_jobs(id) ON DELETE CASCADE,
@@ -520,14 +529,16 @@ WHERE fc.sensor_id=history.sensor_id AND fc.flow_id=history.flow_id AND fc.last_
 CREATE TABLE IF NOT EXISTS asset_security_status (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
+ asset_identity TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('clean','suspected','infected','contained','recovered')),
  reason TEXT NOT NULL DEFAULT '',
  source TEXT NOT NULL DEFAULT 'manual',
  detected_at TIMESTAMPTZ,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  updated_by TEXT NOT NULL DEFAULT '',
- PRIMARY KEY(sensor_id,asset_ip)
+ PRIMARY KEY(sensor_id,asset_identity)
 );
+CREATE INDEX IF NOT EXISTS idx_asset_security_ip ON asset_security_status(sensor_id,asset_ip);
 CREATE TABLE IF NOT EXISTS malware_incidents (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -605,8 +616,32 @@ CREATE TABLE IF NOT EXISTS topology_nodes (
  packet_count BIGINT NOT NULL DEFAULT 0,
  first_seen TIMESTAMPTZ NOT NULL,
  last_seen TIMESTAMPTZ NOT NULL,
+ active BOOLEAN NOT NULL DEFAULT TRUE,
  PRIMARY KEY (sensor_id, ip)
 );
+-- Stable MAC-backed identity history. topology_nodes remains the current
+-- IP-indexed topology ledger needed to attach historical edges, but an IP may be
+-- reused by a different device over time. This companion table preserves both
+-- identities instead of overwriting the old MAC->IP relationship.
+CREATE TABLE IF NOT EXISTS asset_identity_history (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ hostname TEXT NOT NULL DEFAULT '',
+ vendor TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ protocols TEXT NOT NULL DEFAULT '',
+ confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+ score INTEGER NOT NULL DEFAULT 1,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packet_count BIGINT NOT NULL DEFAULT 0,
+ first_seen TIMESTAMPTZ NOT NULL,
+ last_seen TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(sensor_id,asset_identity,ip)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_identity_history_mac ON asset_identity_history(sensor_id,mac,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_asset_identity_history_ip ON asset_identity_history(sensor_id,ip,last_seen DESC);
 -- Durable, one-row-per-alert history, independent of sensor_telemetry.alerts
 -- (which is a single JSONB array per sensor, wholesale-overwritten on every
 -- sync — no per-alert timestamp to prune by). Upserted from that JSONB on
@@ -669,6 +704,9 @@ CREATE TABLE IF NOT EXISTS report_history (
  recipients TEXT NOT NULL DEFAULT '',
  email_sent BOOLEAN NOT NULL DEFAULT FALSE,
  email_error TEXT NOT NULL DEFAULT '',
+ email_attempts INTEGER NOT NULL DEFAULT 0,
+ last_email_attempt_at TIMESTAMPTZ,
+ next_email_attempt_at TIMESTAMPTZ,
  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(generated_at);
@@ -680,16 +718,18 @@ CREATE INDEX IF NOT EXISTS idx_report_history_generated_at ON report_history(gen
 CREATE TABLE IF NOT EXISTS asset_context (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
+ asset_identity TEXT NOT NULL,
  asset_role TEXT NOT NULL DEFAULT '',
  criticality TEXT NOT NULL DEFAULT '',
  zone TEXT NOT NULL DEFAULT '',
- purdue_override REAL,
+ purdue_override REAL CHECK(purdue_override IS NULL OR purdue_override IN (0,1,2,3,3.5,4,5)),
  is_attack_path_entry BOOLEAN NOT NULL DEFAULT FALSE,
  is_attack_path_target BOOLEAN NOT NULL DEFAULT FALSE,
  updated_by TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
- PRIMARY KEY(sensor_id,asset_ip)
+ PRIMARY KEY(sensor_id,asset_identity)
 );
+CREATE INDEX IF NOT EXISTS idx_asset_context_ip ON asset_context(sensor_id,asset_ip);
 CREATE INDEX IF NOT EXISTS idx_flow_observations_itot ON flow_observations(sensor_id,bucket_end,initiator_ip,responder_ip);
 CREATE TABLE IF NOT EXISTS imported_tags (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
@@ -717,9 +757,9 @@ CREATE TABLE IF NOT EXISTS asset_overrides (
 -- thing yet.
 CREATE TABLE IF NOT EXISTS vlan_config (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
- vlan_id INTEGER NOT NULL,
+ vlan_id INTEGER NOT NULL CHECK(vlan_id BETWEEN 0 AND 4094),
  name TEXT NOT NULL DEFAULT '',
- purdue_level REAL,
+ purdue_level REAL CHECK(purdue_level IS NULL OR purdue_level IN (0,1,2,3,3.5,4,5)),
  updated_by TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY (sensor_id, vlan_id)
@@ -732,7 +772,7 @@ CREATE TABLE IF NOT EXISTS vlan_config (
 -- detect.segmentation.maxleveljump in that sensor's local config file.
 CREATE TABLE IF NOT EXISTS segmentation_settings (
  sensor_id TEXT PRIMARY KEY REFERENCES sensors(id) ON DELETE CASCADE,
- max_level_jump REAL NOT NULL DEFAULT 1,
+ max_level_jump REAL NOT NULL DEFAULT 1 CHECK(max_level_jump > 0 AND max_level_jump <= 5),
  updated_by TEXT NOT NULL DEFAULT '',
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -785,12 +825,179 @@ CREATE TABLE IF NOT EXISTS segmentation_settings (
 		db.Close()
 		return nil, fmt.Errorf("record protected authentication defaults migration: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE report_history ADD COLUMN IF NOT EXISTS email_attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE report_history ADD COLUMN IF NOT EXISTS last_email_attempt_at TIMESTAMPTZ; ALTER TABLE report_history ADD COLUMN IF NOT EXISTS next_email_attempt_at TIMESTAMPTZ; CREATE INDEX IF NOT EXISTS idx_report_history_delivery_retry ON report_history(next_email_attempt_at) WHERE email_sent=FALSE AND recipients<>''; INSERT INTO schema_migrations(version,name) VALUES(9,'durable scheduled report delivery retries') ON CONFLICT(version) DO NOTHING`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply report delivery retry migration: %w", err)
+	}
+	if _, err := db.Exec(`
+ALTER TABLE asset_context ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_security_status ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_risk_exceptions ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+DELETE FROM vlan_config WHERE vlan_id < 0 OR vlan_id > 4094;
+UPDATE vlan_config SET purdue_level=NULL WHERE purdue_level IS NOT NULL AND purdue_level NOT IN (0,1,2,3,3.5,4,5);
+UPDATE asset_context SET purdue_override=NULL WHERE purdue_override IS NOT NULL AND purdue_override NOT IN (0,1,2,3,3.5,4,5);
+UPDATE segmentation_settings SET max_level_jump=1 WHERE max_level_jump<=0 OR max_level_jump>5;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='vlan_config_vlan_id_valid') THEN ALTER TABLE vlan_config ADD CONSTRAINT vlan_config_vlan_id_valid CHECK(vlan_id BETWEEN 0 AND 4094); END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='vlan_config_purdue_valid') THEN ALTER TABLE vlan_config ADD CONSTRAINT vlan_config_purdue_valid CHECK(purdue_level IS NULL OR purdue_level IN (0,1,2,3,3.5,4,5)); END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='asset_context_purdue_valid') THEN ALTER TABLE asset_context ADD CONSTRAINT asset_context_purdue_valid CHECK(purdue_override IS NULL OR purdue_override IN (0,1,2,3,3.5,4,5)); END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='segmentation_max_jump_valid') THEN ALTER TABLE segmentation_settings ADD CONSTRAINT segmentation_max_jump_valid CHECK(max_level_jump>0 AND max_level_jump<=5); END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS asset_identity_history (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ hostname TEXT NOT NULL DEFAULT '',
+ vendor TEXT NOT NULL DEFAULT '',
+ is_ot BOOLEAN NOT NULL DEFAULT FALSE,
+ protocols TEXT NOT NULL DEFAULT '',
+ confirmed BOOLEAN NOT NULL DEFAULT TRUE,
+ score INTEGER NOT NULL DEFAULT 1,
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ packet_count BIGINT NOT NULL DEFAULT 0,
+ first_seen TIMESTAMPTZ NOT NULL,
+ last_seen TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(sensor_id,asset_identity,ip)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_identity_history_mac ON asset_identity_history(sensor_id,mac,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_asset_identity_history_ip ON asset_identity_history(sensor_id,ip,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_asset_context_identity ON asset_context(sensor_id,asset_identity);
+CREATE INDEX IF NOT EXISTS idx_asset_security_identity ON asset_security_status(sensor_id,asset_identity);
+CREATE INDEX IF NOT EXISTS idx_asset_risk_exception_identity ON asset_risk_exceptions(sensor_id,asset_identity);
+INSERT INTO asset_identity_history(sensor_id,asset_identity,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen)
+SELECT sensor_id,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen
+FROM topology_nodes
+ON CONFLICT(sensor_id,asset_identity,ip) DO UPDATE SET
+ mac=EXCLUDED.mac,hostname=EXCLUDED.hostname,vendor=EXCLUDED.vendor,
+ is_ot=asset_identity_history.is_ot OR EXCLUDED.is_ot,
+ protocols=EXCLUDED.protocols,confirmed=EXCLUDED.confirmed,score=EXCLUDED.score,
+ vlan_id=EXCLUDED.vlan_id,packet_count=EXCLUDED.packet_count,
+ first_seen=LEAST(asset_identity_history.first_seen,EXCLUDED.first_seen),
+ last_seen=GREATEST(asset_identity_history.last_seen,EXCLUDED.last_seen);
+UPDATE asset_context c SET asset_identity=COALESCE((
+ SELECT CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||c.asset_ip END
+ FROM topology_nodes n WHERE n.sensor_id=c.sensor_id AND n.ip=c.asset_ip
+ ORDER BY n.last_seen DESC LIMIT 1
+),'ip:'||c.asset_ip) WHERE c.asset_identity='';
+UPDATE asset_security_status c SET asset_identity=COALESCE((
+ SELECT CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||c.asset_ip END
+ FROM topology_nodes n WHERE n.sensor_id=c.sensor_id AND n.ip=c.asset_ip
+ ORDER BY n.last_seen DESC LIMIT 1
+),'ip:'||c.asset_ip) WHERE c.asset_identity='';
+UPDATE asset_risk_exceptions c SET asset_identity=COALESCE((
+ SELECT CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||c.asset_ip END
+ FROM topology_nodes n WHERE n.sensor_id=c.sensor_id AND n.ip=c.asset_ip
+ ORDER BY n.last_seen DESC LIMIT 1
+),'ip:'||c.asset_ip) WHERE c.asset_identity='';
+INSERT INTO schema_migrations(version,name) VALUES(10,'stable asset identity and Purdue consistency') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply stable asset identity migration: %w", err)
+	}
+	if _, err := db.Exec(`
+ALTER TABLE topology_nodes ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- The primary-key conversion is intentionally one-shot. Re-dropping and
+-- recreating these keys on every Central startup would take unnecessary table
+-- locks even after migration 11 had already completed.
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=11) THEN
+  -- Reconstruct current-inventory membership from the latest full telemetry
+  -- snapshot. ALTER COLUMN's DEFAULT TRUE would otherwise mark every historical
+  -- topology IP as current immediately after upgrade until each sensor happened
+  -- to sync again.
+  UPDATE topology_nodes SET active=FALSE;
+  UPDATE topology_nodes n SET active=TRUE
+  FROM sensor_telemetry st,
+       LATERAL jsonb_array_elements(COALESCE(st.topology->'Nodes', st.topology->'nodes', '[]'::jsonb)) AS items(item)
+  WHERE n.sensor_id=st.sensor_id AND n.ip=COALESCE(item->>'IP', item->>'ip');
+
+  -- Operator-owned asset state is identity-owned, not IP-owned. An IP can be
+  -- reused by another MAC; keeping the old IP primary key would overwrite the
+  -- original device's context/status/risk exception as soon as the new device
+  -- was edited. Keep one current operator row per stable identity and retain
+  -- asset_ip only as the last-known/display address.
+  DELETE FROM asset_context a USING (
+   SELECT ctid,ROW_NUMBER() OVER(PARTITION BY sensor_id,asset_identity ORDER BY updated_at DESC,asset_ip ASC) rn FROM asset_context
+  ) r WHERE a.ctid=r.ctid AND r.rn>1;
+  DELETE FROM asset_security_status a USING (
+   SELECT ctid,ROW_NUMBER() OVER(PARTITION BY sensor_id,asset_identity ORDER BY updated_at DESC,asset_ip ASC) rn FROM asset_security_status
+  ) r WHERE a.ctid=r.ctid AND r.rn>1;
+  DELETE FROM asset_risk_exceptions a USING (
+   SELECT ctid,ROW_NUMBER() OVER(PARTITION BY sensor_id,asset_identity ORDER BY updated_at DESC,asset_ip ASC) rn FROM asset_risk_exceptions
+  ) r WHERE a.ctid=r.ctid AND r.rn>1;
+
+  ALTER TABLE asset_context DROP CONSTRAINT IF EXISTS asset_context_pkey;
+  ALTER TABLE asset_context ADD CONSTRAINT asset_context_pkey PRIMARY KEY(sensor_id,asset_identity);
+  ALTER TABLE asset_security_status DROP CONSTRAINT IF EXISTS asset_security_status_pkey;
+  ALTER TABLE asset_security_status ADD CONSTRAINT asset_security_status_pkey PRIMARY KEY(sensor_id,asset_identity);
+  ALTER TABLE asset_risk_exceptions DROP CONSTRAINT IF EXISTS asset_risk_exceptions_pkey;
+  ALTER TABLE asset_risk_exceptions ADD CONSTRAINT asset_risk_exceptions_pkey PRIMARY KEY(sensor_id,asset_identity);
+  INSERT INTO schema_migrations(version,name) VALUES(11,'active asset reconciliation and identity-owned operator state');
+ END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_asset_context_ip ON asset_context(sensor_id,asset_ip);
+CREATE INDEX IF NOT EXISTS idx_asset_security_ip ON asset_security_status(sensor_id,asset_ip);
+CREATE INDEX IF NOT EXISTS idx_asset_risk_exception_ip ON asset_risk_exceptions(sensor_id,asset_ip);
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply active asset identity migration: %w", err)
+	}
+
+	if _, err := db.Exec(`
+ALTER TABLE asset_recon_profile ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE asset_recon_history ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=12) THEN
+  -- Bind existing reconnaissance evidence to the device that owned the IP when
+  -- the evidence was observed. This prevents a later DHCP/IP reuse from
+  -- attaching an old device's OS/firmware/serial profile to the new occupant.
+  UPDATE asset_recon_profile p SET asset_identity=COALESCE((
+   SELECT h.asset_identity FROM asset_identity_history h
+   WHERE h.sensor_id=p.sensor_id AND h.ip=p.ip AND h.first_seen<=p.last_profiled_at
+   ORDER BY CASE WHEN p.last_profiled_at BETWEEN h.first_seen AND h.last_seen THEN 0 ELSE 1 END,
+            h.last_seen DESC LIMIT 1
+  ),(SELECT h.asset_identity FROM asset_identity_history h WHERE h.sensor_id=p.sensor_id AND h.ip=p.ip ORDER BY h.last_seen DESC LIMIT 1),'ip:'||p.ip)
+  WHERE p.asset_identity='';
+  UPDATE asset_recon_history p SET asset_identity=COALESCE((
+   SELECT h.asset_identity FROM asset_identity_history h
+   WHERE h.sensor_id=p.sensor_id AND h.ip=p.ip AND h.first_seen<=p.observed_at
+   ORDER BY CASE WHEN p.observed_at BETWEEN h.first_seen AND h.last_seen THEN 0 ELSE 1 END,
+            h.last_seen DESC LIMIT 1
+  ),(SELECT h.asset_identity FROM asset_identity_history h WHERE h.sensor_id=p.sensor_id AND h.ip=p.ip ORDER BY h.last_seen DESC LIMIT 1),'ip:'||p.ip)
+  WHERE p.asset_identity='';
+
+  -- A device may have been profiled at more than one DHCP address. Keep the
+  -- newest profile as the current profile; history retains every observation.
+  DELETE FROM asset_recon_profile p USING (
+   SELECT ctid,ROW_NUMBER() OVER(PARTITION BY sensor_id,asset_identity ORDER BY last_profiled_at DESC,ip ASC) rn
+   FROM asset_recon_profile
+  ) d WHERE p.ctid=d.ctid AND d.rn>1;
+  ALTER TABLE asset_recon_profile DROP CONSTRAINT IF EXISTS asset_recon_profile_pkey;
+  ALTER TABLE asset_recon_profile ADD CONSTRAINT asset_recon_profile_pkey PRIMARY KEY(sensor_id,asset_identity);
+  INSERT INTO schema_migrations(version,name) VALUES(12,'identity-owned reconnaissance profiles');
+ END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_asset_recon_profile_ip ON asset_recon_profile(sensor_id,ip);
+CREATE INDEX IF NOT EXISTS idx_asset_recon_history_identity ON asset_recon_history(sensor_id,asset_identity,observed_at DESC);
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply reconnaissance asset identity migration: %w", err)
+	}
 	return &Repository{db: db}, nil
 }
 func (r *Repository) Close() error { return r.db.Close() }
 
-func (r *Repository) ConfigureSIEM(alertsEnabled bool) {
+func (r *Repository) ConfigureSIEM(alertsEnabled, auditEnabled bool, source string) {
 	r.siemAlertsEnabled = alertsEnabled
+	r.siemAuditEnabled = auditEnabled
+	r.siemSource = strings.TrimSpace(source)
+	if r.siemSource == "" {
+		r.siemSource = "otlens-central"
+	}
 }
 
 func (r *Repository) RegisterSensor(ctx context.Context, s management.SensorRegistration) error {
@@ -1230,16 +1437,28 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONF
 			if id == "" {
 				continue
 			}
-			count := fmt.Sprint(firstValue(alert, "Count", "count"))
-			lastSeen := fmt.Sprint(firstValue(alert, "LastSeen", "last_seen"))
-			status := fmt.Sprint(firstValue(alert, "Status", "status"))
-			eventKey := fmt.Sprintf("alert:%s:%s:%s:%s:%s", x.SensorID, id, count, lastSeen, status)
+			// Hash the complete alert snapshot, not just Count/LastSeen/Status.
+			// Evidence, severity or message can legitimately change without those
+			// three fields changing; the old key silently suppressed such exports.
+			alertPayload, marshalErr := json.Marshal(alert)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			versionHash := sha256.Sum256(alertPayload)
+			eventKey := fmt.Sprintf("alert:%s:%s:%x", x.SensorID, id, versionHash[:])
+			eventTime := siemAlertEventTime(alert, x.CapturedAt)
+			source := r.siemSource
+			if source == "" {
+				source = "otlens-central"
+			}
 			envelope := map[string]interface{}{
-				"source":     "otlens-central",
-				"kind":       "alert",
-				"event_time": x.CapturedAt,
-				"sensor_id":  x.SensorID,
-				"alert":      alert,
+				"schema_version": "otlens.siem.v1",
+				"event_id":       eventKey,
+				"source":         source,
+				"kind":           "alert",
+				"event_time":     eventTime,
+				"sensor_id":      x.SensorID,
+				"alert":          alert,
 			}
 			payload, marshalErr := json.Marshal(envelope)
 			if marshalErr != nil {
@@ -1276,6 +1495,31 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONF
 		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
 			return nil, fmt.Errorf("persist topology edges: %w", err)
+		}
+
+		// asset.confirm / asset.delete remain pending across command pulls until
+		// this authoritative full asset snapshot proves that the requested state
+		// actually exists on the sensor. This prevents a dropped /sync response or
+		// a process crash between pull and ApplyCommand from losing the action.
+		presentMACs := make([]string, 0, len(graph.Nodes))
+		confirmedMACs := make([]string, 0, len(graph.Nodes))
+		for _, node := range graph.Nodes {
+			mac := strings.ToLower(strings.TrimSpace(node.MAC))
+			if mac == "" {
+				continue
+			}
+			presentMACs = append(presentMACs, mac)
+			if node.Confirmed {
+				confirmedMACs = append(confirmedMACs, mac)
+			}
+		}
+		if len(confirmedMACs) > 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='asset.confirm' AND delivered_at IS NULL AND lower(target)=ANY($2::text[])`, x.SensorID, confirmedMACs); err != nil {
+				return nil, fmt.Errorf("acknowledge asset confirm commands: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='asset.delete' AND delivered_at IS NULL AND NOT(lower(target)=ANY($2::text[]))`, x.SensorID, presentMACs); err != nil {
+			return nil, fmt.Errorf("acknowledge asset delete commands: %w", err)
 		}
 	}
 	if err := persistDNSObservations(ctx, tx, x.SensorID, x.DNSObservations); err != nil {
@@ -1446,11 +1690,14 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 			return nil, err
 		}
 		out = append(out, c)
-		// sensor.learning.complete is intentionally NOT acknowledged merely
-		// because the sensor downloaded it. It is idempotent and stays pending
-		// until telemetry proves that every enabled baseline is monitoring.
-		// This closes the pull/apply crash window and makes completion durable.
-		if c.Type != "sensor.learning.complete" {
+		// State-changing commands whose success is visible in telemetry are not
+		// acknowledged merely because the sensor downloaded them. They are
+		// idempotently replayed until a later telemetry snapshot proves the desired
+		// state. This closes the pull/apply/network-crash window for learning and
+		// asset confirm/delete operations.
+		switch c.Type {
+		case "sensor.learning.complete", "asset.confirm", "asset.delete":
+		default:
 			ids = append(ids, c.ID)
 		}
 	}
@@ -1479,11 +1726,67 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 	return out, nil
 }
 
+func siemAlertEventTime(alert map[string]interface{}, fallback time.Time) time.Time {
+	for _, key := range []string{"LastSeen", "last_seen", "FirstSeen", "first_seen"} {
+		value, ok := alert[key]
+		if !ok {
+			continue
+		}
+		switch x := value.(type) {
+		case string:
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(x)); err == nil {
+				return parsed.UTC()
+			}
+		case time.Time:
+			if !x.IsZero() {
+				return x.UTC()
+			}
+		}
+	}
+	if fallback.IsZero() {
+		return time.Now().UTC()
+	}
+	return fallback.UTC()
+}
+
 type SIEMOutboxEvent struct {
 	ID       int64
+	EventKey string
 	Kind     string
 	Payload  json.RawMessage
 	Attempts int
+}
+
+type SIEMQueueStats struct {
+	Queued          int64      `json:"queued"`
+	Ready           int64      `json:"ready"`
+	Failed          int64      `json:"failed"`
+	Exhausted       int64      `json:"exhausted"`
+	OldestCreatedAt *time.Time `json:"oldest_created_at,omitempty"`
+}
+
+// GetSIEMQueueStats makes delivery failures observable instead of silently
+// leaving max-attempt-exhausted events in the outbox forever. Exhausted rows
+// are retained as a dead-letter queue until an operator resets/reconfigures
+// SIEM; they are never reported as delivered.
+func (r *Repository) GetSIEMQueueStats(ctx context.Context, maxAttempts int) (SIEMQueueStats, error) {
+	var out SIEMQueueStats
+	var oldest sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE next_attempt_at <= NOW() AND ($1 <= 0 OR attempts < $1)),
+		       COUNT(*) FILTER (WHERE last_error <> ''),
+		       COUNT(*) FILTER (WHERE $1 > 0 AND attempts >= $1),
+		       MIN(created_at)
+		FROM siem_outbox`, maxAttempts).Scan(&out.Queued, &out.Ready, &out.Failed, &out.Exhausted, &oldest)
+	if err != nil {
+		return SIEMQueueStats{}, err
+	}
+	if oldest.Valid {
+		t := oldest.Time.UTC()
+		out.OldestCreatedAt = &t
+	}
+	return out, nil
 }
 
 func (r *Repository) EnqueueSIEM(ctx context.Context, eventKey, kind string, payload interface{}) error {
@@ -1495,15 +1798,31 @@ func (r *Repository) EnqueueSIEM(ctx context.Context, eventKey, kind string, pay
 	return err
 }
 
-func (r *Repository) PendingSIEM(ctx context.Context, limit, maxAttempts int) ([]SIEMOutboxEvent, error) {
+func (r *Repository) PendingSIEM(ctx context.Context, limit, maxAttempts int, exportAlerts, exportAudit bool) ([]SIEMOutboxEvent, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	query := `SELECT id,kind,payload,attempts FROM siem_outbox WHERE delivered_at IS NULL AND next_attempt_at <= NOW()`
+	enabledKinds := make([]string, 0, 2)
+	if exportAlerts {
+		enabledKinds = append(enabledKinds, "alert")
+	}
+	if exportAudit {
+		enabledKinds = append(enabledKinds, "audit")
+	}
+	if len(enabledKinds) == 0 {
+		return nil, nil
+	}
+	query := `SELECT id,event_key,kind,payload,attempts FROM siem_outbox WHERE delivered_at IS NULL AND next_attempt_at <= NOW()`
 	args := []interface{}{}
+	if len(enabledKinds) == 1 {
+		args = append(args, enabledKinds[0])
+		query += ` AND kind = $` + fmt.Sprint(len(args))
+	} else {
+		query += ` AND kind IN ('alert','audit')`
+	}
 	if maxAttempts > 0 {
-		query += ` AND attempts < $1`
 		args = append(args, maxAttempts)
+		query += ` AND attempts < $` + fmt.Sprint(len(args))
 	}
 	query += ` ORDER BY id LIMIT $` + fmt.Sprint(len(args)+1)
 	args = append(args, limit)
@@ -1515,7 +1834,7 @@ func (r *Repository) PendingSIEM(ctx context.Context, limit, maxAttempts int) ([
 	var out []SIEMOutboxEvent
 	for rows.Next() {
 		var e SIEMOutboxEvent
-		if err := rows.Scan(&e.ID, &e.Kind, &e.Payload, &e.Attempts); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventKey, &e.Kind, &e.Payload, &e.Attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -1524,7 +1843,10 @@ func (r *Repository) PendingSIEM(ctx context.Context, limit, maxAttempts int) ([
 }
 
 func (r *Repository) MarkSIEMDelivered(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE siem_outbox SET delivered_at=NOW(),last_error='' WHERE id=$1`, id)
+	// siem_outbox is a delivery queue, not history. Audit history lives in
+	// audit_log and alerts in alert_history; retaining delivered queue rows only
+	// causes unbounded growth. Delete an acknowledged row immediately.
+	_, err := r.db.ExecContext(ctx, `DELETE FROM siem_outbox WHERE id=$1`, id)
 	return err
 }
 
@@ -1631,7 +1953,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 	// never part of a Central data reset.
 	switch operation {
 	case "telemetry", "database":
-		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_metrics, protocol_observations, dns_observations, smb_observations, flow_counters, flow_observations, topology_edges, topology_nodes, asset_risk, asset_risk_history RESTART IDENTITY`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE sensor_telemetry, sensor_metrics, protocol_observations, dns_observations, smb_observations, flow_counters, flow_observations, topology_edges, topology_nodes, asset_identity_history, asset_risk, asset_risk_history RESTART IDENTITY`)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NULL,last_sync_success_at=NULL,pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=0,sync_status='reset'`)
 		}
@@ -1667,7 +1989,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 			sensor_telemetry, sensor_metrics,
 			protocol_observations, dns_observations, smb_observations,
 			flow_counters, flow_observations,
-			topology_edges, topology_nodes,
+			topology_edges, topology_nodes, asset_identity_history,
 			alert_history, asset_risk, asset_risk_history,
 			asset_security_status, vulnerability_findings,
 			analysis_jobs, siem_outbox, report_history,
@@ -1737,6 +2059,7 @@ func (r *Repository) ResetSensors(ctx context.Context, operation string, sensorI
 			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_identity_history WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM asset_risk WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM asset_risk_history WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM sensor_telemetry WHERE sensor_id=ANY($1::text[])`,
@@ -1780,6 +2103,7 @@ func (r *Repository) ResetSensors(ctx context.Context, operation string, sensorI
 			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_identity_history WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM asset_risk WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM asset_risk_history WHERE sensor_id=ANY($1::text[])`,
 			`UPDATE sensor_telemetry SET topology='{"Nodes":[],"Edges":[],"HoneypotThreshold":10}'::jsonb,udp_conversations='[]'::jsonb,updated_at=NOW() WHERE sensor_id=ANY($1::text[])`,
@@ -1815,6 +2139,7 @@ func (r *Repository) ResetSensors(ctx context.Context, operation string, sensorI
 			`DELETE FROM flow_observations WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_edges WHERE sensor_id=ANY($1::text[])`,
 			`DELETE FROM topology_nodes WHERE sensor_id=ANY($1::text[])`,
+			`DELETE FROM asset_identity_history WHERE sensor_id=ANY($1::text[])`,
 		} {
 			if err = exec(q); err != nil {
 				break
@@ -1880,17 +2205,78 @@ func (r *Repository) AnalysisPathsForSensors(ctx context.Context, sensorIDs []st
 }
 
 func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (BackupRecord, error) {
+	// A core snapshot spans many tables. Read them under one repeatable-read
+	// transaction so a concurrent telemetry sync cannot make the export contain
+	// sensors from one point in time and alerts/incidents from another.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return BackupRecord{}, err
+	}
+	defer tx.Rollback()
+	generatedAt := time.Now().UTC()
 	payload := map[string]json.RawMessage{}
+	manifest, err := json.Marshal(map[string]interface{}{
+		"format":         "otlens-central-core-snapshot",
+		"schema_version": 2,
+		"generated_at":   generatedAt,
+		"scope": []string{
+			"sites", "safe sensor enrollment metadata", "managed rules and assignments", "latest sensor telemetry",
+			"asset identity and operator-owned asset/Purdue policy", "alert history", "managed incidents and incident events/comments", "correlation rules", "report history", "pending SIEM outbox",
+		},
+		"excluded": []string{
+			"user password hashes and sessions", "sensor auth-token hashes", "reconnaissance credentials",
+			"high-volume DNS/SMB/protocol/flow observation history", "uploaded PCAP file contents",
+		},
+		"note": "This JSON is an operational/core snapshot, not a full PostgreSQL dump. Use pg_dump for full database backup/restore.",
+	})
+	if err != nil {
+		return BackupRecord{}, err
+	}
+	payload["_manifest"] = manifest
 	queries := map[string]string{
-		"sites":            `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sites ORDER BY id) t`,
-		"sensors":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensors ORDER BY id) t`,
-		"rule_sets":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_sets ORDER BY id) t`,
-		"sensor_rule_sets": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_rule_sets ORDER BY sensor_id) t`,
-		"sensor_telemetry": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
+		"sites": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sites ORDER BY id) t`,
+		// Never export auth_token_hash in a downloadable JSON snapshot. The
+		// enrollment identity/status metadata is useful operationally; the bearer
+		// verifier is authentication material and belongs only in a real protected
+		// PostgreSQL backup.
+		"sensors": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
+			SELECT id,name,site_id,status,version,hostname,certificate_fingerprint,auth_token_rotated_at,
+			       go_version,libpcap_version,gopacket_version,capture_backend,capture_interface,capture_snaplen,
+			       capture_promiscuous,last_heartbeat_at,last_sync_attempt_at,last_sync_success_at,last_data_received_at,
+			       sync_status,pending_records,sync_failures,last_sync_error,sync_sequence,last_seen
+			FROM sensors ORDER BY id
+		) t`,
+		"rule_sets":              `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_sets ORDER BY id) t`,
+		"sensor_rule_sets":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_rule_sets ORDER BY sensor_id) t`,
+		"sensor_telemetry":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
+		"asset_identity_history": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_identity_history ORDER BY sensor_id,asset_identity,last_seen) t`,
+		"asset_context":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_context ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"asset_overrides":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_overrides ORDER BY sensor_id,mac) t`,
+		"vlan_config":            `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vlan_config ORDER BY sensor_id,vlan_id) t`,
+		"segmentation_settings":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM segmentation_settings ORDER BY sensor_id) t`,
+		"asset_security_status":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_security_status ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"asset_risk_exceptions":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_risk_exceptions ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"vulnerability_findings": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vulnerability_findings ORDER BY sensor_id,asset_identity,cve_id) t`,
+		"alert_history":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM alert_history ORDER BY sensor_id,alert_key) t`,
+		"incidents":              `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incidents ORDER BY id) t`,
+		"incident_events":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incident_events ORDER BY id) t`,
+		"incident_comments": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
+			SELECT * FROM incident_comments ORDER BY id
+		) t`,
+		"correlation_rules": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
+			SELECT * FROM correlation_rules ORDER BY id
+		) t`,
+		"report_history": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
+			SELECT * FROM report_history ORDER BY generated_at,id
+		) t`,
+		"siem_outbox": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
+			SELECT id,event_key,kind,payload,created_at,next_attempt_at,attempts,last_error
+			FROM siem_outbox WHERE delivered_at IS NULL ORDER BY id
+		) t`,
 	}
 	for key, q := range queries {
 		var raw []byte
-		if err := r.db.QueryRowContext(ctx, q).Scan(&raw); err != nil {
+		if err := tx.QueryRowContext(ctx, q).Scan(&raw); err != nil {
 			return BackupRecord{}, err
 		}
 		payload[key] = raw
@@ -1901,13 +2287,16 @@ func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (
 	}
 	sum := fmt.Sprintf("%x", sha256.Sum256(data))
 	if name == "" {
-		name = "central-" + time.Now().UTC().Format("20060102-150405")
+		name = "central-core-" + generatedAt.Format("20060102-150405")
 	}
-	_, err = r.db.ExecContext(ctx, `INSERT INTO system_backups(id,kind,name,payload,size_bytes,sha256) VALUES($1,'central',$2,$3,$4,$5)`, id, name, data, len(data), sum)
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_backups(id,kind,name,payload,size_bytes,sha256,created_at) VALUES($1,'central',$2,$3,$4,$5,$6)`, id, name, data, len(data), sum, generatedAt)
 	if err != nil {
 		return BackupRecord{}, err
 	}
-	return BackupRecord{ID: id, Kind: "central", Name: name, SizeBytes: int64(len(data)), SHA256: sum, CreatedAt: time.Now().UTC()}, nil
+	if err := tx.Commit(); err != nil {
+		return BackupRecord{}, err
+	}
+	return BackupRecord{ID: id, Kind: "central", Name: name, SizeBytes: int64(len(data)), SHA256: sum, CreatedAt: generatedAt}, nil
 }
 
 func (r *Repository) ListBackups(ctx context.Context) ([]BackupRecord, error) {
@@ -1932,7 +2321,13 @@ func (r *Repository) DeleteBackup(ctx context.Context, id string) error {
 }
 func (r *Repository) BackupPayload(ctx context.Context, id string) ([]byte, string, error) {
 	var b []byte
-	var name string
-	err := r.db.QueryRowContext(ctx, `SELECT payload,name FROM system_backups WHERE id=$1`, id).Scan(&b, &name)
-	return b, name, err
+	var name, expected string
+	if err := r.db.QueryRowContext(ctx, `SELECT payload,name,sha256 FROM system_backups WHERE id=$1`, id).Scan(&b, &name, &expected); err != nil {
+		return nil, "", err
+	}
+	actual := fmt.Sprintf("%x", sha256.Sum256(b))
+	if !strings.EqualFold(strings.TrimSpace(expected), actual) {
+		return nil, "", fmt.Errorf("backup integrity check failed for %s", id)
+	}
+	return b, name, nil
 }

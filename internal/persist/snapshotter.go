@@ -9,7 +9,9 @@ package persist
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,11 +106,29 @@ func NewSnapshotter(
 	retention time.Duration,
 ) (*Snapshotter, error) {
 
+	absolutePath := path
+	if resolved, resolveErr := filepath.Abs(path); resolveErr == nil {
+		absolutePath = resolved
+	}
+	existedBeforeOpen := false
+	var existingSize int64
+	if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
+		existedBeforeOpen = true
+		existingSize = info.Size()
+	}
+
 	db, err := Open(path)
 
 	if err != nil {
 		return nil, err
 	}
+	logger.Log.Info("Sensor persistence database opened",
+		zap.String("database", absolutePath),
+		zap.Bool("existed_before_start", existedBeforeOpen),
+		zap.Int64("size_bytes_before_start", existingSize),
+		zap.Duration("flush_interval", interval),
+		zap.Duration("retention", retention),
+	)
 
 	for _, bucket := range allBuckets {
 
@@ -139,68 +159,84 @@ func NewSnapshotter(
 // engines. Call once at startup, before the engines' Start().
 func (s *Snapshotter) Restore() error {
 
-	assets, err := loadKeyed[*asset.Asset](s.db, bucketAssets)
+	// Alerts are intentionally restored first. Older builds aborted the entire
+	// restore on the first unrelated corrupt/incompatible bucket (assets, flows,
+	// baseline, ...), which could leave a perfectly healthy persisted alert set
+	// empty after an upgrade. Restoring the security queue first makes that
+	// failure mode impossible unless the alert bucket itself is unreadable.
+	databasePath := s.db.path
+	if absolutePath, absErr := filepath.Abs(databasePath); absErr == nil {
+		databasePath = absolutePath
+	}
+	alerts, err := loadKeyed[*detect.Alert](s.db, bucketAlerts)
+	if err != nil {
+		return fmt.Errorf("restore alerts from %s: %w", databasePath, err)
+	}
+	s.detectEngine.RestoreAlerts(alerts)
+	alertSynced, alertDirty, alertUnreviewed := 0, 0, 0
+	for _, alert := range alerts {
+		if alert == nil {
+			continue
+		}
+		if alert.Synced {
+			alertSynced++
+		} else {
+			alertDirty++
+		}
+		if alert.Status == "" || alert.Status == detect.AlertStatusNew {
+			alertUnreviewed++
+		}
+	}
+	logger.Log.Info(
+		"Restored persisted alerts from disk",
+		zap.String("database", databasePath),
+		zap.Int("alerts", len(alerts)),
+		zap.Int("alerts_synced", alertSynced),
+		zap.Int("alerts_dirty", alertDirty),
+		zap.Int("alerts_unreviewed", alertUnreviewed),
+		zap.Duration("retention", s.retention),
+	)
 
+	assets, err := loadKeyed[*asset.Asset](s.db, bucketAssets)
 	if err != nil {
 		return err
 	}
-
 	s.assetEngine.Restore(assets)
 
 	flows, err := loadKeyed[*flow.Flow](s.db, bucketFlows)
-
 	if err != nil {
 		return err
 	}
-
 	s.flowEngine.Restore(flows)
 
 	tags, err := loadKeyed[*store.Tag](s.db, bucketTags)
-
 	if err != nil {
 		return err
 	}
-
 	s.storeEngine.RestoreTags(tags)
 
 	var baseline detect.BaselineSnapshot
-
 	if err := loadBlob(s.db, bucketMeta, blobKeyBaseline, &baseline); err != nil {
 		return err
 	}
-
 	s.detectEngine.RestoreBaseline(baseline)
 
-	alerts, err := loadKeyed[*detect.Alert](s.db, bucketAlerts)
-
-	if err != nil {
-		return err
-	}
-
-	s.detectEngine.RestoreAlerts(alerts)
-
 	rules, err := loadKeyed[*detect.Rule](s.db, bucketRules)
-
 	if err != nil {
 		return err
 	}
-
 	s.detectEngine.RestoreRules(rules)
 
 	var changes []store.ValueChange
-
 	if err := loadBlob(s.db, bucketMeta, blobKeyTagChanges, &changes); err != nil {
 		return err
 	}
-
 	s.storeEngine.RestoreValueChanges(changes)
 
 	var events []store.ControlEvent
-
 	if err := loadBlob(s.db, bucketMeta, blobKeyTagEvents, &events); err != nil {
 		return err
 	}
-
 	s.storeEngine.RestoreControlEvents(events)
 
 	var behavior behaviorbaseline.Snapshot
@@ -236,11 +272,9 @@ func (s *Snapshotter) Restore() error {
 	}
 
 	var knownMAC map[string]string
-
 	if err := loadBlob(s.db, bucketMeta, blobKeyKnownMAC, &knownMAC); err != nil {
 		return err
 	}
-
 	if knownMAC != nil {
 		s.detectEngine.RestoreKnownMAC(knownMAC)
 	}
@@ -253,10 +287,15 @@ func (s *Snapshotter) Restore() error {
 
 	logger.Log.Info(
 		"Restored persisted state from disk",
+		zap.String("database", databasePath),
 		zap.Int("assets", len(assets)),
 		zap.Int("flows", len(flows)),
 		zap.Int("tags", len(tags)),
 		zap.Int("alerts", len(alerts)),
+		zap.Int("alerts_synced", alertSynced),
+		zap.Int("alerts_dirty", alertDirty),
+		zap.Int("alerts_unreviewed", alertUnreviewed),
+		zap.Duration("retention", s.retention),
 	)
 
 	return nil
@@ -546,9 +585,51 @@ func (s *Snapshotter) Reset(operation string) error {
 func (s *Snapshotter) Backup(directory, name string) (string, error) {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
-	if name == "" {
-		name = "sensor-" + time.Now().UTC().Format("20060102-150405")
+	// A requested backup must represent the current in-memory sensor state, not
+	// merely whatever the periodic flusher happened to write up to one interval
+	// ago. Flush while holding the same I/O lock, then snapshot SQLite.
+	if err := s.flushLocked(); err != nil {
+		return "", fmt.Errorf("flush before backup: %w", err)
+	}
+	name = sanitizeBackupName(name)
+	if name == "" || strings.EqualFold(name, "auto") {
+		name = "sensor-" + time.Now().UTC().Format("20060102-150405.000000000")
 	}
 	path := filepath.Join(directory, name+".sqlite")
+	// VACUUM INTO intentionally refuses to overwrite an existing file. Preserve
+	// every backup instead of making a repeated custom name fail unexpectedly.
+	if _, err := os.Stat(path); err == nil {
+		name = name + "-" + time.Now().UTC().Format("150405.000000000")
+		path = filepath.Join(directory, name+".sqlite")
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
 	return path, s.db.Backup(path)
+}
+
+// sanitizeBackupName keeps operator-provided names inside the configured
+// backups directory. Sensor backup names arrive over a management command, so
+// allowing path separators or ".." would turn a cosmetic label into an
+// arbitrary filesystem write primitive on the sensor host.
+func sanitizeBackupName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+		if b.Len() >= 80 {
+			break
+		}
+	}
+	out := strings.Trim(b.String(), ".")
+	if out == "" || out == ".." {
+		return ""
+	}
+	return out
 }

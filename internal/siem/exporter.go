@@ -5,11 +5,11 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,7 +28,6 @@ type Config struct {
 	RetryInterval      time.Duration
 	BatchSize          int
 	MaxAttempts        int
-	Source             string
 	InsecureSkipVerify bool
 	CACertFile         string
 	ClientCertFile     string
@@ -49,6 +48,10 @@ func New(cfg Config, repo *central.Repository) (*Exporter, error) {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, fmt.Errorf("SIEM URL is empty")
 	}
+	parsedURL, err := url.Parse(cfg.URL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return nil, fmt.Errorf("SIEM URL must be an absolute http(s) URL")
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
@@ -58,7 +61,7 @@ func New(cfg Config, repo *central.Repository) (*Exporter, error) {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100
 	}
-	tlsCfg := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify, ServerName: cfg.ServerName}
+	tlsCfg := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify, ServerName: cfg.ServerName, MinVersion: tls.VersionTLS12}
 	if cfg.CACertFile != "" {
 		pem, err := os.ReadFile(cfg.CACertFile)
 		if err != nil {
@@ -89,6 +92,10 @@ func New(cfg Config, repo *central.Repository) (*Exporter, error) {
 		client: &http.Client{
 			Timeout:   cfg.Timeout,
 			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			// Never allow a 301/302/303 to turn a POST export into a GET and
+			// then report success with the event body silently discarded. SIEM
+			// endpoints must be configured to their final ingestion URL.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}, nil
 }
@@ -113,7 +120,7 @@ func (e *Exporter) Run(ctx context.Context) {
 
 func (e *Exporter) flush(ctx context.Context) {
 	for {
-		events, err := e.repo.PendingSIEM(ctx, e.cfg.BatchSize, e.cfg.MaxAttempts)
+		events, err := e.repo.PendingSIEM(ctx, e.cfg.BatchSize, e.cfg.MaxAttempts, e.cfg.ExportAlerts, e.cfg.ExportAudit)
 		if err != nil {
 			log.Printf("SIEM outbox read failed: %v", err)
 			return
@@ -122,18 +129,14 @@ func (e *Exporter) flush(ctx context.Context) {
 			return
 		}
 		for _, event := range events {
-			if (event.Kind == "alert" && !e.cfg.ExportAlerts) || (event.Kind == "audit" && !e.cfg.ExportAudit) {
-				if err := e.repo.MarkSIEMDelivered(ctx, event.ID); err != nil {
-					log.Printf("SIEM outbox skip acknowledgement failed: %v", err)
-				}
-				continue
-			}
-			if err := e.post(ctx, event.Payload); err != nil {
+			if err := e.post(ctx, event.EventKey, event.Payload); err != nil {
 				backoff := e.cfg.RetryInterval * time.Duration(1+event.Attempts)
 				if backoff > 10*time.Minute {
 					backoff = 10 * time.Minute
 				}
-				_ = e.repo.MarkSIEMFailed(ctx, event.ID, backoff, err.Error())
+				if markErr := e.repo.MarkSIEMFailed(ctx, event.ID, backoff, err.Error()); markErr != nil {
+					log.Printf("SIEM outbox failure acknowledgement failed id=%d: %v", event.ID, markErr)
+				}
 				log.Printf("SIEM export failed kind=%s id=%d attempt=%d: %v", event.Kind, event.ID, event.Attempts+1, err)
 				continue
 			}
@@ -147,16 +150,11 @@ func (e *Exporter) flush(ctx context.Context) {
 	}
 }
 
-func (e *Exporter) post(ctx context.Context, body []byte) error {
-	if e.cfg.Source != "" {
-		var envelope map[string]interface{}
-		if json.Unmarshal(body, &envelope) == nil {
-			envelope["source"] = e.cfg.Source
-			if updated, err := json.Marshal(envelope); err == nil {
-				body = updated
-			}
-		}
-	}
+func (e *Exporter) post(ctx context.Context, eventKey string, body []byte) error {
+	// The payload is immutable once it enters the outbox. In particular, do not
+	// rewrite source here from current runtime config: an event accepted by the
+	// receiver and retried after a Central config change must retain identical
+	// semantics under the same idempotency key.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -168,6 +166,14 @@ func (e *Exporter) post(ctx context.Context, body []byte) error {
 	}
 	for key, value := range e.cfg.Headers {
 		req.Header.Set(key, value)
+	}
+	if strings.TrimSpace(eventKey) != "" {
+		// Delivery is intentionally at-least-once: if the receiver accepted an
+		// event but Central lost the acknowledgement, a retry can occur. Keep
+		// this canonical header after operator-supplied headers so it cannot be
+		// accidentally overwritten by a static configured value.
+		req.Header.Set("X-OTLens-Event-ID", eventKey)
+		req.Header.Set("Idempotency-Key", eventKey)
 	}
 	resp, err := e.client.Do(req)
 	if err != nil {

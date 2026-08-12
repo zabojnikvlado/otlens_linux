@@ -80,15 +80,21 @@ type Engine struct {
 	honeypotThreshold int
 
 	// segmentationEnabled/vlanLevels/maxLevelJump — see
-	// config.SensorConfig.Detect.Segmentation and segmentation.go.
-	// Read-only after construction, plus ipVLAN (mutable, its own
-	// lock) tracking the last VLAN observed per IP.
-	segmentationEnabled bool
-	vlanLevels          map[uint16]float64
-	maxLevelJump        float64
-	segmentationPolicy  []SegmentationPolicyRule
-	ipVLANMutex         sync.RWMutex
-	ipVLAN              map[string]uint16
+	// config.SensorConfig.Detect.Segmentation and segmentation.go. Central may
+	// replace the local defaults at runtime; segmentationManaged records that
+	// such an authoritative Central snapshot has been applied so it can be
+	// restored from SQLite before capture starts after a sensor restart.
+	segmentationEnabled      bool
+	segmentationManaged      bool
+	vlanLevels               map[uint16]float64
+	maxLevelJump             float64
+	localSegmentationEnabled bool
+	localVLANLevels          map[uint16]float64
+	localMaxLevelJump        float64
+	segmentationPolicy       []SegmentationPolicyRule
+	ipVLANMutex              sync.RWMutex
+	ipVLAN                   map[string]uint16
+	ipVLANSeen               map[string]time.Time
 
 	// reconnaissanceEnabled/reconWindow/hostScanThreshold/
 	// portScanThreshold — see config.SensorConfig.Detect.
@@ -215,6 +221,10 @@ func NewEngine(
 	if vlanLevels == nil {
 		vlanLevels = make(map[uint16]float64)
 	}
+	localVLANLevels := make(map[uint16]float64, len(vlanLevels))
+	for vlan, level := range vlanLevels {
+		localVLANLevels[vlan] = level
+	}
 
 	if maxLevelJump <= 0 {
 		maxLevelJump = 1
@@ -241,10 +251,14 @@ func NewEngine(
 		deceptionScores:   deceptionScores,
 		honeypotThreshold: honeypotThreshold,
 
-		segmentationEnabled: segmentationEnabled,
-		vlanLevels:          vlanLevels,
-		maxLevelJump:        maxLevelJump,
-		ipVLAN:              make(map[string]uint16),
+		segmentationEnabled:      segmentationEnabled,
+		vlanLevels:               localVLANLevels,
+		maxLevelJump:             maxLevelJump,
+		localSegmentationEnabled: segmentationEnabled,
+		localVLANLevels:          localVLANLevels,
+		localMaxLevelJump:        maxLevelJump,
+		ipVLAN:                   make(map[string]uint16),
+		ipVLANSeen:               make(map[string]time.Time),
 
 		reconnaissanceEnabled: reconnaissanceEnabled,
 		reconWindow:           reconWindow,

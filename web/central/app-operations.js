@@ -70,7 +70,7 @@ async function refreshDomains(domains,force=false){
   if(ok('/assets'))assets=list('/assets');if(ok('/asset-security-status'))assetSecurity=list('/asset-security-status');if(ok('/devices'))devices=list('/devices');
   if(ok('/vulnerabilities')&&results['/vulnerabilities'].value&&typeof results['/vulnerabilities'].value==='object')vulnerabilities=results['/vulnerabilities'].value.Advisories||[];
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
-  if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object')alertStats=results['/alerts/stats'].value;
+  if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object'){alertStats=results['/alerts/stats'].value;if(typeof renderAlertBadge==='function')renderAlertBadge();}
   if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
   if(ok('/incidents/dashboard')&&results['/incidents/dashboard'].value&&typeof results['/incidents/dashboard'].value==='object')incidentDashboard=results['/incidents/dashboard'].value;
   if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');

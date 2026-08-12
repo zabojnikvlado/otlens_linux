@@ -98,6 +98,12 @@ func (e *Engine) Update(
 	vlanID uint16,
 ) {
 
+	canonical, ok := canonicalMAC(mac)
+	if !ok || isMulticastMAC(canonical) {
+		return
+	}
+	mac = canonical
+
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
@@ -137,6 +143,9 @@ func (e *Engine) Update(
 			Confirmed: confirmed,
 
 			FromAnalysis: fromAnalysis,
+
+			IPVerificationKnown: true,
+			IPVerifiedByARP:     fromARP,
 
 			VLANID: vlanID,
 		}
@@ -187,6 +196,8 @@ func (e *Engine) Update(
 		if fromARP {
 
 			asset.IP = ip
+			asset.IPVerificationKnown = true
+			asset.IPVerifiedByARP = true
 			e.arpVerified[mac] = true
 
 		} else if !e.arpVerified[mac] {
@@ -260,14 +271,9 @@ func (e *Engine) Count() int {
 // Update, this doesn't bump PacketCount/LastSeen — it's replacing the
 // map contents with known-good data, not observing new traffic.
 //
-// Every restored asset is forced to Confirmed: true, regardless of
-// its persisted value. This matters for the upgrade path: state
-// persisted before the Confirmed field existed deserializes with Go's
-// zero value (false) for it, which would otherwise flag every
-// already-known device as newly unconfirmed the first time this
-// runs against old data — restored assets are, by definition, ones
-// this process already knew about before, so they should never need
-// re-confirming.
+// Confirmed is preserved exactly as persisted. An unreviewed asset is a
+// security workflow state and must not silently become trusted merely because
+// the sensor restarted.
 //
 // Score is also recomputed against the current config on every
 // restore, not just trusted as-persisted — see the loop body.
@@ -279,8 +285,23 @@ func (e *Engine) Restore(assets []*Asset) {
 	// Restore is a replacement operation, not a merge. Reset paths call
 	// Restore(nil), so retaining the previous map here made every reset a no-op.
 	e.assets = make(map[string]*Asset, len(assets))
+	// Rebuild the ARP trust guard as well. Without this, a restored asset could
+	// have its persisted IP replaced by the first routed/non-ARP observation
+	// seen after restart, even though before restart that same MAC/IP was
+	// protected by arpVerified. A later real ARP observation is still allowed
+	// to move the asset to a new DHCP/static address.
+	e.arpVerified = make(map[string]bool, len(assets))
 
 	for _, a := range assets {
+		if a == nil {
+			continue
+		}
+		mac, ok := canonicalMAC(a.MAC)
+		if !ok || isMulticastMAC(mac) {
+			continue
+		}
+		a.MAC = mac
+		a.ID = mac
 
 		// Recompute against the *current* config.Deception.Stations,
 		// not whatever Score happened to be persisted — otherwise a
@@ -296,6 +317,16 @@ func (e *Engine) Restore(assets []*Asset) {
 		}
 
 		e.assets[a.MAC] = a
+		if a.MAC != "" && a.IP != "" {
+			if a.IPVerificationKnown {
+				e.arpVerified[a.MAC] = a.IPVerifiedByARP
+			} else {
+				// Compatibility with v24 snapshots written before binding provenance
+				// was persisted. Preserve the previous conservative restart behavior
+				// rather than risking a routed packet reassigning a gateway asset.
+				e.arpVerified[a.MAC] = true
+			}
+		}
 	}
 }
 
@@ -326,6 +357,7 @@ func (e *Engine) Prune(maxAge time.Duration) int {
 
 		if a.LastSeen.Before(cutoff) {
 			delete(e.assets, mac)
+			delete(e.arpVerified, mac)
 			removed++
 		}
 	}
@@ -339,6 +371,11 @@ func (e *Engine) Prune(maxAge time.Duration) int {
 // exists.
 func (e *Engine) Delete(mac string) bool {
 
+	canonical, ok := canonicalMAC(mac)
+	if !ok {
+		return false
+	}
+	mac = canonical
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
@@ -347,6 +384,8 @@ func (e *Engine) Delete(mac string) bool {
 	}
 
 	delete(e.assets, mac)
+	delete(e.arpVerified, mac)
+	delete(e.knownFromBaseline, mac)
 
 	return true
 }
@@ -356,6 +395,11 @@ func (e *Engine) Delete(mac string) bool {
 // map — see GetAll's doc comment for why that matters.
 func (e *Engine) Get(mac string) *Asset {
 
+	canonical, ok := canonicalMAC(mac)
+	if !ok {
+		return nil
+	}
+	mac = canonical
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
 
@@ -375,6 +419,11 @@ func (e *Engine) Get(mac string) *Asset {
 // Returns false if no asset with that MAC exists.
 func (e *Engine) Confirm(mac string) bool {
 
+	canonical, ok := canonicalMAC(mac)
+	if !ok {
+		return false
+	}
+	mac = canonical
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
@@ -411,6 +460,9 @@ func (e *Engine) Clear() {
 	defer e.mutex.Unlock()
 
 	e.assets = make(map[string]*Asset)
+	e.arpVerified = make(map[string]bool)
+	e.knownFromBaseline = make(map[string]bool)
+	e.baselineEstablished = false
 }
 
 // Start subscribes directly to parsed packets and learns assets from
@@ -491,6 +543,11 @@ func (e *Engine) handleHostname(obs hostname.Observation) {
 	if obs.MAC == "" || obs.Hostname == "" {
 		return
 	}
+	mac, ok := canonicalMAC(obs.MAC)
+	if !ok {
+		return
+	}
+	obs.MAC = mac
 
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
@@ -546,7 +603,9 @@ func (e *Engine) handleBaselineComplete(bc core.BaselineComplete) {
 	defer e.mutex.Unlock()
 
 	for _, mac := range bc.LearnedAssetMACs {
-		e.knownFromBaseline[mac] = true
+		if canonical, ok := canonicalMAC(mac); ok {
+			e.knownFromBaseline[canonical] = true
+		}
 	}
 
 	e.baselineEstablished = true
@@ -628,6 +687,14 @@ func (e *Engine) handle(packet core.Packet) {
 	for mac, obs := range byMAC {
 		e.Update(obs.ip, mac, "", packet.Timestamp, obs.fromARP, packet.FromAnalysis, packet.VLANID)
 	}
+}
+
+func canonicalMAC(mac string) (string, bool) {
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 {
+		return "", false
+	}
+	return hw.String(), true
 }
 
 // isMulticastMAC reports whether a MAC address is a multicast or

@@ -17,6 +17,7 @@ import (
 
 type AssetContext struct {
 	SensorID       string    `json:"sensor_id"`
+	AssetIdentity  string    `json:"asset_identity,omitempty"`
 	AssetIP        string    `json:"asset_ip"`
 	AssetRole      string    `json:"asset_role"`
 	Criticality    string    `json:"criticality"`
@@ -78,14 +79,45 @@ type ITOTPathResponse struct {
 }
 
 func (r *Repository) SetAssetContext(ctx context.Context, v AssetContext) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO asset_context(sensor_id,asset_ip,asset_role,criticality,zone,purdue_override,is_attack_path_entry,is_attack_path_target,updated_by,updated_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET asset_role=EXCLUDED.asset_role,criticality=EXCLUDED.criticality,zone=EXCLUDED.zone,purdue_override=EXCLUDED.purdue_override,is_attack_path_entry=EXCLUDED.is_attack_path_entry,is_attack_path_target=EXCLUDED.is_attack_path_target,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,
-		v.SensorID, v.AssetIP, v.AssetRole, v.Criticality, v.Zone, v.PurdueOverride, v.IsEntryPoint, v.IsTarget, v.UpdatedBy)
+	identity := strings.TrimSpace(v.AssetIdentity)
+	if identity == "" {
+		resolved, err := r.ResolveAssetIdentity(ctx, v.SensorID, v.AssetIP)
+		if err != nil {
+			return err
+		}
+		identity = resolved
+	} else {
+		// Registry edits carry the stable identity explicitly. This prevents an
+		// orphaned context from being reassigned to a different device that later
+		// reused its old IP. Only identities already known to this sensor (or the
+		// existing context row itself) may be addressed this way.
+		if !strings.HasPrefix(identity, "mac:") && !strings.HasPrefix(identity, "ip:") {
+			return fmt.Errorf("invalid asset identity")
+		}
+		var exists bool
+		if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM asset_identity_history WHERE sensor_id=$1 AND asset_identity=$2) OR EXISTS(SELECT 1 FROM asset_context WHERE sensor_id=$1 AND asset_identity=$2)`, v.SensorID, identity).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("asset identity not found")
+		}
+		if current, ok, err := r.CurrentAssetIP(ctx, v.SensorID, identity); err != nil {
+			return err
+		} else if ok {
+			v.AssetIP = current
+		}
+	}
+	v.AssetIdentity = identity
+	_, err := r.db.ExecContext(ctx, `INSERT INTO asset_context(sensor_id,asset_identity,asset_ip,asset_role,criticality,zone,purdue_override,is_attack_path_entry,is_attack_path_target,updated_by,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW()) ON CONFLICT(sensor_id,asset_identity) DO UPDATE SET asset_ip=EXCLUDED.asset_ip,asset_role=EXCLUDED.asset_role,criticality=EXCLUDED.criticality,zone=EXCLUDED.zone,purdue_override=EXCLUDED.purdue_override,is_attack_path_entry=EXCLUDED.is_attack_path_entry,is_attack_path_target=EXCLUDED.is_attack_path_target,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,
+		v.SensorID, identity, v.AssetIP, v.AssetRole, v.Criticality, v.Zone, v.PurdueOverride, v.IsEntryPoint, v.IsTarget, v.UpdatedBy)
 	return err
 }
 
+// ListAssetContexts returns contexts keyed by stable asset identity. Legacy
+// IP-only rows are normalized in memory so every caller uses one key model.
 func (r *Repository) ListAssetContexts(ctx context.Context, sensorID string) (map[string]AssetContext, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_ip,asset_role,criticality,zone,purdue_override,is_attack_path_entry,is_attack_path_target,updated_by,updated_at FROM asset_context WHERE sensor_id=$1`, sensorID)
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_identity,asset_ip,asset_role,criticality,zone,purdue_override,is_attack_path_entry,is_attack_path_target,updated_by,updated_at FROM asset_context WHERE ($1='' OR sensor_id=$1) ORDER BY updated_at DESC`, sensorID)
 	if err != nil {
 		return nil, err
 	}
@@ -94,20 +126,54 @@ func (r *Repository) ListAssetContexts(ctx context.Context, sensorID string) (ma
 	for rows.Next() {
 		var v AssetContext
 		var p sql.NullFloat64
-		if err := rows.Scan(&v.SensorID, &v.AssetIP, &v.AssetRole, &v.Criticality, &v.Zone, &p, &v.IsEntryPoint, &v.IsTarget, &v.UpdatedBy, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.SensorID, &v.AssetIdentity, &v.AssetIP, &v.AssetRole, &v.Criticality, &v.Zone, &p, &v.IsEntryPoint, &v.IsTarget, &v.UpdatedBy, &v.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if v.AssetIdentity == "" {
+			v.AssetIdentity = canonicalAssetIdentity("", v.AssetIP)
 		}
 		if p.Valid {
 			x := p.Float64
 			v.PurdueOverride = &x
 		}
-		out[v.AssetIP] = v
+		key := v.AssetIdentity
+		if sensorID == "" {
+			key = v.SensorID + "\x00" + v.AssetIdentity
+		}
+		if _, exists := out[key]; !exists {
+			out[key] = v
+		}
 	}
 	return out, rows.Err()
 }
 
+// ResolvedAssetContexts maps stable operator context back onto each asset's
+// current IP for the sensor detection engine. An orphaned preserved context is
+// not sent merely because another future device reuses its old IP.
+func (r *Repository) ResolvedAssetContexts(ctx context.Context, sensorID string) ([]AssetContext, error) {
+	contexts, err := r.ListAssetContexts(ctx, sensorID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AssetContext, 0, len(contexts))
+	for _, v := range contexts {
+		identity := v.AssetIdentity
+		ip, ok, err := r.CurrentAssetIP(ctx, v.SensorID, identity)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		v.AssetIP = ip
+		v.AssetIdentity = identity
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 func (r *Repository) buildITOTNodes(ctx context.Context, sensorID string) (map[string]ITOTNode, error) {
-	persisted, err := r.ListTopologyNodes(ctx, sensorID)
+	persisted, err := r.ListCurrentTopologyNodes(ctx, sensorID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +208,7 @@ func (r *Repository) buildITOTNodes(ctx context.Context, sensorID string) (map[s
 	vlanRows.Close()
 	out := map[string]ITOTNode{}
 	for _, n := range persisted {
-		c := contexts[n.IP]
+		c := contexts[n.Identity()]
 		v := vlans[n.VLANID]
 		level, source := v.level, "vlan_config"
 		if c.PurdueOverride != nil {
@@ -152,17 +218,34 @@ func (r *Repository) buildITOTNodes(ctx context.Context, sensorID string) (map[s
 		if level == nil {
 			source = "unclassified"
 		}
+		effectiveOT := n.IsOT
+		// Explicit operator context is authoritative over the historical OR-sticky
+		// discovery flag. This keeps Central attack-path semantics aligned with
+		// the sensor policy engine when an asset is deliberately reclassified.
+		if c.AssetRole != "" || c.PurdueOverride != nil {
+			effectiveOT = roleIsOT(c.AssetRole) || (c.PurdueOverride != nil && *c.PurdueOverride <= 3)
+		}
 		role := c.AssetRole
 		if role == "" {
-			role = inferAssetRole(n.IsOT, splitProtocols(n.Protocols))
+			role = inferAssetRole(effectiveOT, splitProtocols(n.Protocols))
 		}
 		zone := c.Zone
 		if zone == "" {
 			zone = v.name
 		}
-		out[n.IP] = ITOTNode{IP: n.IP, Hostname: n.Hostname, Vendor: n.Vendor, VLANID: n.VLANID, IsOT: n.IsOT, Protocols: splitProtocols(n.Protocols), AssetRole: role, Criticality: c.Criticality, Zone: zone, PurdueLevel: level, PurdueSource: source, IsEntryPoint: c.IsEntryPoint, IsTarget: c.IsTarget}
+		out[n.IP] = ITOTNode{IP: n.IP, Hostname: n.Hostname, Vendor: n.Vendor, VLANID: n.VLANID, IsOT: effectiveOT, Protocols: splitProtocols(n.Protocols), AssetRole: role, Criticality: c.Criticality, Zone: zone, PurdueLevel: level, PurdueSource: source, IsEntryPoint: c.IsEntryPoint, IsTarget: c.IsTarget}
 	}
 	return out, nil
+}
+
+func roleIsOT(role string) bool {
+	role = strings.ToLower(role)
+	return role == "ot" || role == "ot_asset" || strings.Contains(role, "ot asset") ||
+		strings.Contains(role, "plc") || strings.Contains(role, "rtu") || strings.Contains(role, "controller") ||
+		strings.Contains(role, "ied") || strings.Contains(role, "drive") || strings.Contains(role, "field") ||
+		strings.Contains(role, "sensor") || strings.Contains(role, "actuator") || strings.Contains(role, "instrument") || strings.Contains(role, "valve") ||
+		strings.Contains(role, "hmi") || strings.Contains(role, "scada") || strings.Contains(role, "historian") ||
+		strings.Contains(role, "engineering") || strings.Contains(role, "operator") || strings.Contains(role, "safety")
 }
 
 func inferAssetRole(isOT bool, protocols []string) string {
@@ -354,6 +437,7 @@ func (r *Repository) FindObservedITOTPaths(ctx context.Context, sensorID, source
 
 func (s *Server) setAssetContext(c *gin.Context) {
 	var req struct {
+		AssetIdentity  string   `json:"asset_identity"`
 		AssetRole      string   `json:"asset_role"`
 		Criticality    string   `json:"criticality"`
 		Zone           string   `json:"zone"`
@@ -365,7 +449,16 @@ func (s *Server) setAssetContext(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	v := AssetContext{SensorID: c.Param("id"), AssetIP: c.Param("ip"), AssetRole: strings.TrimSpace(req.AssetRole), Criticality: strings.TrimSpace(req.Criticality), Zone: strings.TrimSpace(req.Zone), PurdueOverride: req.PurdueOverride, IsEntryPoint: req.IsEntryPoint, IsTarget: req.IsTarget, UpdatedBy: identityFromContext(c).Username}
+	if err := validatePurdueLevel(req.PurdueOverride); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	criticality := strings.ToLower(strings.TrimSpace(req.Criticality))
+	if criticality != "" && criticality != "low" && criticality != "medium" && criticality != "high" && criticality != "critical" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "criticality must be low, medium, high, critical, or empty"})
+		return
+	}
+	v := AssetContext{SensorID: c.Param("id"), AssetIdentity: strings.TrimSpace(req.AssetIdentity), AssetIP: c.Param("ip"), AssetRole: strings.TrimSpace(req.AssetRole), Criticality: criticality, Zone: strings.TrimSpace(req.Zone), PurdueOverride: req.PurdueOverride, IsEntryPoint: req.IsEntryPoint, IsTarget: req.IsTarget, UpdatedBy: identityFromContext(c).Username}
 	if err := s.Repo.SetAssetContext(c, v); err != nil {
 		respondInternalError(c, err)
 		return
@@ -374,13 +467,23 @@ func (s *Server) setAssetContext(c *gin.Context) {
 	c.JSON(200, v)
 }
 func (s *Server) assetContexts(c *gin.Context) {
-	v, e := s.Repo.ListAssetContexts(c, c.Query("sensor_id"))
+	// The operator registry must retain orphaned/offline context rows so an
+	// analyst can still review or edit them. Only the sensor sync path filters
+	// to currently resolved identities; doing that here made a preserved Purdue
+	// override appear to vanish as soon as the asset was absent from inventory.
+	items, e := s.Repo.ListAssetContexts(c, c.Query("sensor_id"))
 	if e != nil {
 		respondInternalError(c, e)
 		return
 	}
-	out := make([]AssetContext, 0, len(v))
-	for _, x := range v {
+	out := make([]AssetContext, 0, len(items))
+	for _, x := range items {
+		if ip, ok, err := s.Repo.CurrentAssetIP(c, x.SensorID, x.AssetIdentity); err != nil {
+			respondInternalError(c, err)
+			return
+		} else if ok {
+			x.AssetIP = ip
+		}
 		out = append(out, x)
 	}
 	c.JSON(200, out)

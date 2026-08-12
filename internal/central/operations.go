@@ -41,7 +41,10 @@ func endpointControls() []EndpointControl {
 		{"POST", "/v1/reports/generate", ActionDataManagement, "action", true},
 		{"POST", "/v1/rules/import", ActionRuleManage, "action", true},
 		{"POST", "/v1/analysis/jobs", ActionAnalysisManage, "action", true},
+		{"GET", "/v1/data/backups", ViewDashboard, "view", true},
 		{"POST", "/v1/data/backups", ActionDataManagement, "action", true},
+		{"GET", "/v1/data/backups/:backup/download", ActionDataManagement, "action", true},
+		{"DELETE", "/v1/data/backups/:backup", ActionDataManagement, "action", true},
 		{"POST", "/v1/data/reset", ActionDataManagement, "action", true},
 		{"POST", "/v1/sensors/:id/learning/complete", ActionDataManagement, "action", true},
 		{"POST", "/v1/users", ActionUsersRolesManage, "action", true},
@@ -89,6 +92,7 @@ func (s *Server) diagnosticsBundle(c *gin.Context) {
 	sensors, sensorErr := s.Repo.ListSensors(c)
 	audit, auditErr := s.Repo.ListAuditLogFiltered(c, AuditFilter{Limit: 250})
 	schemaVersion := s.Repo.SchemaVersion(c)
+	siemQueue, siemQueueErr := s.Repo.GetSIEMQueueStats(c, s.SIEMMaxAttempts)
 
 	manifest := gin.H{
 		"generated_at":       time.Now().UTC(),
@@ -104,17 +108,42 @@ func (s *Server) diagnosticsBundle(c *gin.Context) {
 	if auditErr != nil {
 		errs = append(errs, "audit: "+auditErr.Error())
 	}
+	if siemQueueErr != nil {
+		errs = append(errs, "siem queue: "+siemQueueErr.Error())
+	} else {
+		manifest["siem_queue"] = siemQueue
+	}
 	manifest["errors"] = errs
 
-	_ = zipJSON(zw, "manifest.json", manifest)
+	if err := zipJSON(zw, "manifest.json", manifest); err != nil {
+		_ = zw.Close()
+		respondInternalError(c, fmt.Errorf("write diagnostics manifest: %w", err))
+		return
+	}
 	if sensorErr == nil {
-		_ = zipJSON(zw, "sensors.json", sensors)
+		if err := zipJSON(zw, "sensors.json", sensors); err != nil {
+			_ = zw.Close()
+			respondInternalError(c, fmt.Errorf("write diagnostics sensors: %w", err))
+			return
+		}
 	}
 	if auditErr == nil {
-		_ = zipJSON(zw, "recent-audit.json", audit)
+		if err := zipJSON(zw, "recent-audit.json", audit); err != nil {
+			_ = zw.Close()
+			respondInternalError(c, fmt.Errorf("write diagnostics audit: %w", err))
+			return
+		}
 	}
-	_ = zipJSON(zw, "permission-audit.json", gin.H{"endpoints": endpointControls()})
-	_ = zipJSON(zw, "runtime-config-redacted.json", s.RuntimeConfig)
+	if err := zipJSON(zw, "permission-audit.json", gin.H{"endpoints": endpointControls()}); err != nil {
+		_ = zw.Close()
+		respondInternalError(c, fmt.Errorf("write diagnostics permission audit: %w", err))
+		return
+	}
+	if err := zipJSON(zw, "runtime-config-redacted.json", s.RuntimeConfig); err != nil {
+		_ = zw.Close()
+		respondInternalError(c, fmt.Errorf("write diagnostics runtime config: %w", err))
+		return
+	}
 	if err := zw.Close(); err != nil {
 		respondInternalError(c, err)
 		return

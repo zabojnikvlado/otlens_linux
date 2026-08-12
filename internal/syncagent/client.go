@@ -306,7 +306,7 @@ func (c *Client) Heartbeat(ctx context.Context, h management.Heartbeat) error {
 	}
 	return nil
 }
-func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error, applyThreatIntel func(management.ThreatIntelSnapshot) error, applyAssetContexts func([]management.AssetPolicyContext) error) ([]management.Command, error) {
+func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error, applyThreatIntel func(management.ThreatIntelSnapshot) error, applyAssetContexts func([]management.AssetPolicyContext) error, applySegmentation func(management.SegmentationConfig) error) ([]management.Command, error) {
 	syncURL := fmt.Sprintf("%s/v1/sensors/%s/sync?threat_intel_version=%d", strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.SensorID, c.threatIntelVersion)
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, syncURL, nil)
 	if e != nil {
@@ -356,6 +356,11 @@ func (c *Client) PullRules(ctx context.Context, apply func([]*detect.Rule) error
 	}
 	if applyAssetContexts != nil {
 		if e := applyAssetContexts(out.AssetContexts); e != nil {
+			return nil, e
+		}
+	}
+	if applySegmentation != nil && out.Segmentation != nil {
+		if e := applySegmentation(*out.Segmentation); e != nil {
 			return nil, e
 		}
 	}
