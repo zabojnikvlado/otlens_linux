@@ -94,7 +94,7 @@ async function refreshDomains(domains,force=false){
   const ok=path=>results[path]?.status==='fulfilled';
   const list=path=>ok(path)&&Array.isArray(results[path].value)?results[path].value:[];
   if(topo.status==='fulfilled'&&topo.value&&!topo.value.unchanged){const v=topo.value.value;graph=(v&&Array.isArray(v.Nodes)&&Array.isArray(v.Edges))?v:{Nodes:[],Edges:[],HoneypotThreshold:100}}
-  if(ok('/assets'))assets=list('/assets');if(ok('/asset-security-status')){assetSecurity=list('/asset-security-status');assetSecurityLoaded=true}if(ok('/devices'))devices=list('/devices');
+  if(ok('/assets'))assets=list('/assets');if(ok('/asset-security-status')){assetSecurity=list('/asset-security-status');assetSecurityLoaded=true}if(ok('/devices'))devices=list('/devices');if(ok('/device-categories'))deviceCategories=list('/device-categories');
   if(ok('/vulnerabilities')&&results['/vulnerabilities'].value&&typeof results['/vulnerabilities'].value==='object')vulnerabilities=results['/vulnerabilities'].value.Advisories||[];
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
   if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object'){alertStats=results['/alerts/stats'].value;if(typeof renderAlertBadge==='function')renderAlertBadge();}
@@ -102,7 +102,15 @@ async function refreshDomains(domains,force=false){
   if(ok('/incidents/dashboard')&&results['/incidents/dashboard'].value&&typeof results['/incidents/dashboard'].value==='object')incidentDashboard=results['/incidents/dashboard'].value;
   if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');
   if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object'){behaviorOverview=results['/behavior-overview'].value;behaviorOverviewLoaded=true}
-  if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-observations?limit=1000'))smbObservations=list('/smb-observations?limit=1000');if(ok('/reports'))reports=list('/reports');
+  // Dashboard/topology UDP endpoints are fetched through DOMAIN_PATHS just like
+  // every other domain, but they still need to be copied into the live UI
+  // state before renderDashboard()/renderUDP() run. The legacy
+  // views/operations.js had these assignments; the bundled app-operations.js
+  // accidentally lost them during the split, leaving udpTelemetry at its
+  // initial empty object even when /v1/udp-telemetry returned real counters.
+  if(ok('/udp-conversations?active=true'))udpConversations=list('/udp-conversations?active=true');
+  if(ok('/udp-telemetry')&&results['/udp-telemetry'].value&&typeof results['/udp-telemetry'].value==='object')udpTelemetry=results['/udp-telemetry'].value;
+  if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-stats')&&results['/smb-stats'].value&&typeof results['/smb-stats'].value==='object')smbStats=results['/smb-stats'].value;if(ok('/reports'))reports=list('/reports');
   if(ok('/rules'))rules=list('/rules').map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,SeverityOverride:x.SeverityOverride??x.severity_override??false,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Schedule:x.Schedule||x.schedule||'always',Detector:x.Detector||x.detector,MITRETactics:x.MITRETactics||x.mitre_tactics||[],MITRETechniques:x.MITRETechniques||x.mitre_techniques||[],Prerequisites:x.Prerequisites||x.prerequisites||[],Protocols:x.Protocols||x.protocols||[],Parameters:x.Parameters||x.parameters||{},AlertType:x.AlertType||x.alert_type,Field:x.Field||x.field,Value:x.Value||x.value}));
   if(ok('/baseline'))baselines=list('/baseline');if(ok('/analysis/jobs'))analysisJobs=list('/analysis/jobs');if(ok('/data/backups'))backups=list('/data/backups');if(ok('/reconnaissance/jobs'))reconnaissanceJobs=list('/reconnaissance/jobs');
   if(ok('/settings')&&typeof results['/settings'].value==='object')settings=results['/settings'].value;if(ok('/dashboard/trends')&&typeof results['/dashboard/trends'].value==='object')trends=results['/dashboard/trends'].value;if(ok('/audit'))audit=list('/audit');
@@ -118,7 +126,7 @@ async function refreshDomains(domains,force=false){
   const rejected=paths.map(path=>results[path]?.status==='rejected'?{path,reason:results[path].reason}:null).filter(Boolean);if(topo.status==='rejected')rejected.push({path:'/topology',reason:topo.reason});
   if(!rejected.length)setAPIConnection(true);else{console.error('Central API refresh failures:',rejected);const unauthorized=rejected.every(x=>x.reason?.status===401);setAPIConnection(false,unauthorized?'authentication required':`partial: ${rejected.map(x=>x.path).join(', ')}`);if(unauthorized){showLogin();const el=document.getElementById('login-error');if(el)el.textContent='Your session expired. Please sign in again.'}}
 }
-async function refreshView(tab=activeTab(),force=false){return refreshDomains([tab],force)}
+async function refreshView(tab=activeTab(),force=false){await refreshDomains([tab],force);if(['communication','assettraffic','networktraffic','protocolanalytics'].includes(tab)&&typeof loadTrafficAnalyticsTab==='function')await loadTrafficAnalyticsTab(tab)}
 async function refreshActiveView(force=false){return refreshView(activeTab(),force)}
 // Compatibility entry point for older handlers: now refreshes only the active view.
 async function refreshAll(){return refreshActiveView(true)}
@@ -171,7 +179,7 @@ function stopPolling(){
   if(pollTimer){clearInterval(pollTimer);pollTimer=null}
 }
 
-const TAB_LABELS={dashboard:'Dashboard',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',nba:'Behavior Findings',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
+const TAB_LABELS={dashboard:'Dashboard',communication:'Communication Analysis',assettraffic:'Asset Traffic',networktraffic:'Network / Zone Traffic',protocolanalytics:'Protocol Analytics',threatintel:'Threat Intelligence',dns:'DNS Explorer',smb:'SMB Explorer',topology:'Topology',purdue:'Purdue',segmentation:'Segmentation',assets:'Assets',devices:'Devices',vulnerabilities:'Vulnerabilities',tags:'OT Tags',rules:'Rules',alerts:'Alerts',nba:'Behavior Findings',incidents:'Incidents',sensors:'Sensors',health:'Healthcheck',analysis:'Analysis',users:'Users',settings:'Settings',data:'Data Management',audit:'Audit log',reports:'Reports'};
 const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete:'Confirm/delete assets',alert_confirm_approve:'Confirm/approve alerts',rule_manage:'Create/edit/delete rules',analysis_manage:'Upload/delete PCAP analysis',data_management:'Backups, resets & learning',users_roles_manage:'Manage users & roles'};
 
 // applyNavFiltering hides tab buttons the current role can't view (server
@@ -180,7 +188,7 @@ const ACTION_LABELS={sensor_start_stop:'Start/stop sensors',asset_confirm_delete
 // The Users tab is a first-class view permission. Management controls inside
 // it are separately gated by users_roles_manage, while self-service password
 // change remains available to any role allowed to view the Users tab.
-const TAB_PERMISSION_ALIAS={health:'sensors',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts'};
+const TAB_PERMISSION_ALIAS={health:'sensors',threatintel:'alerts',dns:'alerts',udp:'alerts',smb:'alerts',nba:'alerts',communication:'dashboard',assettraffic:'dashboard',networktraffic:'dashboard',protocolanalytics:'dashboard'};
 function applyNavFiltering(){
   document.querySelectorAll('.tab').forEach(btn=>{
     const tab=btn.dataset.tab;

@@ -205,7 +205,7 @@ func (m *Manager) Observe(packet core.Packet) (*Conversation, bool) {
 }
 
 func (m *Manager) ObserveWithContext(packet core.Packet) (*Conversation, ParseContext, bool) {
-	if packet.L4Protocol != "UDP" {
+	if !m.countPacketTelemetry(packet) {
 		return nil, ParseContext{}, false
 	}
 	now := packet.Timestamp
@@ -264,14 +264,37 @@ func (m *Manager) ObserveWithContext(packet core.Packet) (*Conversation, ParseCo
 	conversation.lastDirection = direction
 	conversation.lastPacketAt = now
 	conversation.Protocol = classifyProtocol(packet.SrcPort, packet.DstPort)
-	m.stats.packets.Add(1)
-	m.stats.bytes.Add(uint64(size))
-	m.protocolPackets.add(conversation.Protocol)
 
 	context := m.contextFor(conversation, key, packet, now)
 	context.Direction = direction
 	context.RTTMillis = rttMillis
 	return cloneConversation(conversation), context, true
+}
+
+// ObserveTelemetryOnly records packet/byte/protocol counters without retaining
+// a conversation. It is used when conversation tracking is explicitly disabled:
+// the operator may choose not to keep the 4-tuple table, but Dashboard traffic
+// telemetry must still reflect UDP packets that the sensor actually observes.
+func (m *Manager) ObserveTelemetryOnly(packet core.Packet) bool {
+	return m.countPacketTelemetry(packet)
+}
+
+// countPacketTelemetry is deliberately independent of conversation admission.
+// Every UDP packet reaching the engine contributes to traffic telemetry even if
+// the conversation table is disabled, at capacity, or the per-conversation
+// packet retention ceiling has already been reached.
+func (m *Manager) countPacketTelemetry(packet core.Packet) bool {
+	if packet.L4Protocol != "UDP" {
+		return false
+	}
+	size := packet.Length
+	if size < 0 {
+		size = 0
+	}
+	m.stats.packets.Add(1)
+	m.stats.bytes.Add(uint64(size))
+	m.protocolPackets.add(classifyProtocol(packet.SrcPort, packet.DstPort))
+	return true
 }
 
 func (m *Manager) Get(key Key) (*Conversation, bool) {
@@ -331,17 +354,18 @@ func (m *Manager) Telemetry(now time.Time, unmatchedResponses, requestTimeouts u
 	}
 	stats := m.Stats()
 	return Telemetry{
-		UDPConversationsActive:       active,
-		UDPConversationsCreatedTotal: stats.Created,
-		UDPConversationsExpiredTotal: stats.Expired,
-		UDPConversationsEvictedTotal: stats.Evicted,
-		UDPPacketsTotal:              stats.TotalPackets,
-		UDPBytesTotal:                stats.TotalBytes,
-		UDPProtocolPacketsTotal:      m.protocolPackets.snapshot(),
-		UDPUnmatchedResponsesTotal:   unmatchedResponses,
-		UDPRequestTimeoutsTotal:      requestTimeouts,
-		UDPAverageDuration:           averageDuration,
-		UDPAverageRTT:                averageRTTMillis,
+		UDPConversationTrackingEnabled: !m.config.Disabled,
+		UDPConversationsActive:         active,
+		UDPConversationsCreatedTotal:   stats.Created,
+		UDPConversationsExpiredTotal:   stats.Expired,
+		UDPConversationsEvictedTotal:   stats.Evicted,
+		UDPPacketsTotal:                stats.TotalPackets,
+		UDPBytesTotal:                  stats.TotalBytes,
+		UDPProtocolPacketsTotal:        m.protocolPackets.snapshot(),
+		UDPUnmatchedResponsesTotal:     unmatchedResponses,
+		UDPRequestTimeoutsTotal:        requestTimeouts,
+		UDPAverageDuration:             averageDuration,
+		UDPAverageRTT:                  averageRTTMillis,
 	}
 }
 

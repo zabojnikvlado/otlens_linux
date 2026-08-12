@@ -20,9 +20,28 @@ function renderAssets(){
   updateBulk();
 }
 const deviceCategoryFilter=new Set();
+const BUILTIN_DEVICE_CATEGORIES=['IT','OT','Workstation','Server','Engineering Workstation','HMI/SCADA','PLC/RTU','Historian','Network','Security Appliance','Virtualization','Storage/NAS','Printer','Mobile','IoT','Rogue/Unknown'];
+function deviceCategoryCatalogue(){
+  const source=Array.isArray(deviceCategories)&&deviceCategories.length?deviceCategories:BUILTIN_DEVICE_CATEGORIES.map(name=>({name,built_in:true}));
+  const seen=new Set(),out=[];
+  for(const row of source){
+    const name=String(typeof row==='string'?row:(row.name??row.Name??'')).trim();if(!name||seen.has(name.toLowerCase()))continue;seen.add(name.toLowerCase());
+    out.push({name,built_in:typeof row==='string'?BUILTIN_DEVICE_CATEGORIES.includes(name):Boolean(row.built_in??row.BuiltIn)});
+  }
+  return out;
+}
+function renderDeviceCategoryManager(){
+  const select=document.getElementById('devices-category-manage');if(!select)return;
+  const current=select.value,categories=deviceCategoryCatalogue();
+  select.innerHTML=categories.map(c=>`<option value="${esc(c.name)}" data-built-in="${c.built_in?'1':'0'}">${esc(c.name)}${c.built_in?' · built-in':''}</option>`).join('');
+  if(current&&categories.some(c=>c.name===current))select.value=current;
+  const selected=categories.find(c=>c.name===select.value);
+  const del=document.getElementById('devices-category-delete');if(del){del.disabled=!can('asset_confirm_delete')||!selected||selected.built_in;del.title=selected?.built_in?'Built-in categories are protected and cannot be deleted.':''}
+}
 function syncImportAndPurdueSensorLists(){for(const id of ['tags-import-sensor','purdue-sensor']){const sel=document.getElementById(id);if(!sel)continue;const current=sel.value;sel.innerHTML=sensors.map(x=>`<option value="${esc(x.ID||x.id)}">${esc(x.Name||x.name||x.ID||x.id)}</option>`).join('');if(current&&[...sel.options].some(o=>o.value===current))sel.value=current}}
 function renderDevices(){
   syncImportAndPurdueSensorLists();
+  renderDeviceCategoryManager();
   const sel=document.getElementById('devices-import-sensor');
   if(sel&&sel.dataset.populated!==String(sensors.length)){
     sel.innerHTML=sensors.map(s=>`<option value="${esc(s.ID||s.id)}">${esc(s.Name||s.name||s.ID||s.id)}</option>`).join('');
@@ -45,13 +64,13 @@ document.getElementById('devices-category-chips').addEventListener('click',e=>{
   if(deviceCategoryFilter.has(cat))deviceCategoryFilter.delete(cat);else deviceCategoryFilter.add(cat);
   renderDevices();
 });
-const DEVICE_CATEGORIES=['IT','OT','Workstation','Server','Engineering Workstation','HMI/SCADA','PLC/RTU','Historian','Network','Security Appliance','Virtualization','Storage/NAS','Printer','Mobile','IoT','Rogue/Unknown'];
 let categoryEditTarget=null;
 function openDeviceCategoryEditor(cell){
   categoryEditTarget={sensor:cell.dataset.sensor,mac:cell.dataset.mac};
   const select=document.getElementById('device-category-select'),current=cell.textContent.trim();
-  select.innerHTML=DEVICE_CATEGORIES.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');
-  if(!DEVICE_CATEGORIES.includes(current))select.insertAdjacentHTML('beforeend',`<option value="${esc(current)}">${esc(current)}</option>`);
+  const categories=deviceCategoryCatalogue().map(c=>c.name);
+  select.innerHTML=categories.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');
+  if(!categories.includes(current))select.insertAdjacentHTML('beforeend',`<option value="${esc(current)}">${esc(current)}</option>`);
   select.value=current;document.getElementById('device-category-modal').hidden=false;select.focus();
 }
 document.querySelector('#table-devices tbody').addEventListener('click',e=>{const cell=e.target.closest('.device-category');if(cell&&can('asset_confirm_delete'))openDeviceCategoryEditor(cell)});
@@ -60,6 +79,19 @@ async function saveDeviceCategory(){
   try{await api(`/sensors/${encodeURIComponent(categoryEditTarget.sensor)}/assets/${encodeURIComponent(categoryEditTarget.mac)}/category`,{method:'POST',body:JSON.stringify({category:next})});document.getElementById('device-category-modal').hidden=true;categoryEditTarget=null;refreshAll()}catch(err){document.getElementById('device-category-error').textContent=`Failed to set category: ${err.message}`}
 }
 document.getElementById('device-category-save').onclick=saveDeviceCategory;document.getElementById('device-category-cancel').onclick=()=>document.getElementById('device-category-modal').hidden=true;document.getElementById('device-category-modal-close').onclick=()=>document.getElementById('device-category-modal').hidden=true;
+document.getElementById('devices-category-manage')?.addEventListener('change',renderDeviceCategoryManager);
+document.getElementById('devices-category-add')?.addEventListener('click',async()=>{
+  if(!can('asset_confirm_delete'))return;
+  const name=prompt('New device category name:');if(name===null||!name.trim())return;
+  try{await api('/device-categories',{method:'POST',body:JSON.stringify({name:name.trim()})});await refreshAll()}catch(err){alert(`Add category failed: ${err.parsed?.error||err.message}`)}
+});
+document.getElementById('devices-category-delete')?.addEventListener('click',async()=>{
+  if(!can('asset_confirm_delete'))return;
+  const select=document.getElementById('devices-category-manage'),name=select?.value;if(!name)return;
+  const category=deviceCategoryCatalogue().find(c=>c.name===name);if(category?.built_in){alert('Built-in categories cannot be deleted.');return}
+  if(!confirm(`Delete device category "${name}"? Devices using it will return to automatic classification.`))return;
+  try{const result=await api('/device-categories',{method:'DELETE',body:JSON.stringify({name})});await refreshAll();if(Number(result?.cleared_assignments||0)>0)alert(`Category deleted. ${result.cleared_assignments} device(s) returned to automatic classification.`)}catch(err){alert(`Delete category failed: ${err.parsed?.error||err.message}`)}
+});
 document.getElementById('devices-import-file').addEventListener('change',async e=>{
   const file=e.target.files[0];if(!file)return;
   const sensorID=document.getElementById('devices-import-sensor').value;

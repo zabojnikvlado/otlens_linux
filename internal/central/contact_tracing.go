@@ -198,7 +198,19 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 				o.packets, o.bytes, o.packetsAToB, o.packetsBToA, o.bytesAToB, o.bytesBToA, e.VLANID, e.IsOT,
 			))
 		}
-		query := `INSERT INTO flow_observations(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`
+
+		// Resolve identity at the event timestamp inside the same set-based INSERT.
+		// This avoids both an N+1 application lookup and a broad UPDATE over every
+		// flow minute between the oldest/newest observation in the sync. When an IP
+		// has overlapping owners, preserve ip:<IP> instead of choosing a random MAC.
+		query := `INSERT INTO flow_observations(
+ sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_identity,dst_identity,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot)
+SELECT v.sensor_id,v.flow_id,v.bucket_start,v.bucket_end,v.src_ip,v.dst_ip,
+ COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.src_ip END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id AND b.ip=v.src_ip AND b.valid_from<=v.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start)),'ip:'||v.src_ip),
+ COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.dst_ip END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id AND b.ip=v.dst_ip AND b.valid_from<=v.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start)),'ip:'||v.dst_ip),
+ v.src_port,v.dst_port,v.protocol,v.initiator_ip,v.responder_ip,v.initiator_port,v.responder_port,v.packets,v.bytes,v.packets_a_to_b,v.packets_b_to_a,v.bytes_a_to_b,v.bytes_b_to_a,v.vlan_id,v.is_ot
+FROM (VALUES ` + strings.Join(values, ",") + `) AS v(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot)
+ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET src_identity=EXCLUDED.src_identity,dst_identity=EXCLUDED.dst_identity,packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`
 		if _, err := x.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}

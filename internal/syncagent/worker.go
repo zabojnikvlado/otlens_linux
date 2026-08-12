@@ -191,7 +191,9 @@ func (w *Worker) sync(ctx context.Context) {
 	}
 
 	if w.Snapshot != nil {
+		snapshotStarted := time.Now()
 		snapshot, err := w.Snapshot()
+		snapshotDuration := time.Since(snapshotStarted)
 		if err != nil {
 			w.markFailure(err)
 			log.Printf("OTLens telemetry snapshot failed: %v", err)
@@ -200,6 +202,9 @@ func (w *Worker) sync(ctx context.Context) {
 		snapshot.SensorID = w.Client.cfg.SensorID
 		if snapshot.CapturedAt.IsZero() {
 			snapshot.CapturedAt = time.Now().UTC()
+		}
+		if snapshotDuration >= 2*time.Second {
+			log.Printf("OTLens telemetry snapshot slow: duration=%s topology_bytes=%d alerts_bytes=%d dns_bytes=%d smb_bytes=%d protocol_bytes=%d", snapshotDuration, len(snapshot.Topology), len(snapshot.Alerts), len(snapshot.DNSObservations), len(snapshot.SMBObservations), len(snapshot.ProtocolObservations))
 		}
 		w.mu.Lock()
 		nextSequence := w.sequence + 1
@@ -219,12 +224,16 @@ func (w *Worker) sync(ctx context.Context) {
 		var uploadErr error
 		telemetryTimeout := w.Client.TelemetryTimeout()
 		w.markAttempt()
+		uploadStarted := time.Now()
 		for attempt := 1; attempt <= 3; attempt++ {
 			requestCtx, cancel := context.WithTimeout(ctx, telemetryTimeout)
 			_, uploadErr = w.Client.PushTelemetry(requestCtx, snapshot)
 			cancel()
 			if uploadErr == nil {
 				w.markSuccess(nextSequence)
+				if d := time.Since(uploadStarted); d >= 2*time.Second {
+					log.Printf("OTLens telemetry upload completed slowly: duration=%s payload_bytes=%d topology_bytes=%d alerts_bytes=%d", d, len(payload), len(snapshot.Topology), len(snapshot.Alerts))
+				}
 				if w.Detect != nil && len(snapshot.Alerts) > 0 {
 					var sent []*detect.Alert
 					if json.Unmarshal(snapshot.Alerts, &sent) == nil {

@@ -220,8 +220,9 @@ func main() {
 				tcpPacketPercent = float64(tcpSegmentDelta) * 100 / float64(packetDelta)
 			}
 			previousMetricAt, previousPackets, previousBytes, previousTCPSegments = now, packets, bytes, tcp.SegmentsSeen
+			udpStats := application.UDPConversations.Stats()
 			return map[string]interface{}{
-				"schema_version": 4,
+				"schema_version": 5,
 				"system": map[string]interface{}{
 					"goroutines": runtime.NumGoroutine(), "memory_alloc_bytes": mem.Alloc,
 					"memory_sys_bytes": mem.Sys, "heap_objects": mem.HeapObjects,
@@ -230,6 +231,16 @@ func main() {
 					"running": captureRunning, "packets_per_second": packetsPerSecond, "bytes_per_second": bytesPerSecond,
 					"packets_total": packets, "bytes_total": bytes,
 					"kernel_drops_total": 0, "interface_drops_total": 0, "drop_rate_percent": 0,
+				},
+				"udp_pipeline": map[string]interface{}{
+					"conversation_tracking_enabled": cfg.Capture.UDPConversations.Enabled,
+					"active_conversations":          udpStats.Active,
+					"packets_total":                 udpStats.TotalPackets,
+					"bytes_total":                   udpStats.TotalBytes,
+					"conversations_created_total":   udpStats.Created,
+					"conversations_expired_total":   udpStats.Expired,
+					"conversations_evicted_total":   udpStats.Evicted,
+					"packets_dropped_from_tracking": udpStats.Dropped,
 				},
 				"tcp_reassembly": map[string]interface{}{
 					"enabled": tcp.Enabled, "running": tcp.Running,

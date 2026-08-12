@@ -1,13 +1,14 @@
 document.querySelector('.tabs').onclick=e=>{const b=e.target.closest('.tab');if(!b)return;const tab=b.dataset.tab;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));document.getElementById('view-'+tab).classList.add('active');if(tab==='topology'&&network)setTimeout(()=>network.redraw(),30);refreshView(tab).catch(err=>console.error('view refresh',tab,err));if(tab==='purdue')loadPurdueArchitecture();if(tab==='segmentation')loadSegmentation();if(tab==='dns')loadDNS();if(tab==='smb')loadSMB();if(tab==='threatintel')loadThreatIntelManagement();if(tab==='health')loadHealthcheck()};
 const PURDUE_COLORS={'5':['#475569','#94a3b8'],'4':['#2563eb','#60a5fa'],'3.5':['#7c3aed','#a78bfa'],'3':['#0891b2','#22d3ee'],'2':['#d97706','#fbbf24'],'1':['#16a34a','#4ade80'],'0':['#dc2626','#fb7185'],'?':['#64748b','#94a3b8']};
 function nodePurdueLevel(n){const v=n.PurdueLevel??n.purdue_level??n.PurdueOverride;return v==null?'?':String(v)}
-function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false,level=nodePurdueLevel(n),pc=PURDUE_COLORS[level]||PURDUE_COLORS['?'],base=topologyColourMode==='purdue'?{background:pc[0],border:pc[1]}:{background:n.IsOT?'#3fbfb0':'#64748b',border:n.IsOT?'#2a7d74':'#334155'};return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}
+function node(n){const threshold=Number(n.HoneypotThreshold??graph.HoneypotThreshold??100),score=Number(n.Score??1),honey=n.IsHoneypot===true||score>=threshold,bad=n.Confirmed===false,level=nodePurdueLevel(n),category=String(n.Category||'IT'),pc=PURDUE_COLORS[level]||PURDUE_COLORS['?'],base=topologyColourMode==='purdue'?{background:pc[0],border:pc[1]}:{background:n.IsOT?'#3fbfb0':'#64748b',border:n.IsOT?'#2a7d74':'#334155'};return{id:n.ID,label:n.Hostname||n.IP||n.MAC,title:`Sensor: ${n.SensorID}
 IP: ${n.IP}
 MAC: ${n.MAC}
 Vendor: ${n.Vendor||'—'}
+Category: ${category}
 Purdue: ${level==='?'?'Unclassified':'Level '+level}
 Deception score: ${score}/100${honey?' (honeypot)':''}
-Protocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:honey?{background:'#a855f7',border:'#7c3aed'}:bad?{background:'#e85d4c',border:'#ff9f95'}:base,size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${n.SensorID}`.toLowerCase(),_vlan:Number(n.VLANID||0),_purdue:level}}
+Protocols: ${(n.Protocols||[]).join(', ')||'—'}`,font:{color:'#ffffff',strokeWidth:2,strokeColor:'#0b1220'},color:honey?{background:'#a855f7',border:'#7c3aed'}:bad?{background:'#e85d4c',border:'#ff9f95'}:base,size:honey?24:n.IsOT?22:16,_search:`${n.IP} ${n.MAC} ${n.Hostname} ${category} ${n.SensorID}`.toLowerCase(),_vlan:Number(n.VLANID||0),_purdue:level,_category:category}}
 function topologyHash(value){
   let h=2166136261;
   for(const ch of String(value)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}
@@ -125,6 +126,7 @@ function renderTopology(){
     rememberTopologyPositions();
   }
   renderVlanFilter();
+  renderTopologyCategoryFilter();
   applyVlanFilter();
   applySearch();
 }
@@ -145,9 +147,17 @@ function renderVlanFilter(){
     return `<label class="vlan-chip ${off?'off':''}" data-vlan="${v}"><input type="checkbox" ${off?'':'checked'}> ${esc(vlanLabel(v))}</label>`;
   }).join('');
 }
+function renderTopologyCategoryFilter(){
+  const select=document.getElementById('topology-category-filter');if(!select||!nodesDS)return;
+  const current=select.value;
+  const categories=[...new Set(nodesDS.get().map(n=>String(n._category||'IT')).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  select.innerHTML='<option value="">All categories</option>'+categories.map(category=>`<option value="${esc(category)}">${esc(category)}</option>`).join('');
+  if(current&&categories.includes(current))select.value=current;
+}
 function applyVlanFilter(){
   if(!nodesDS)return;
-  const updates=nodesDS.get().filter(n=>Boolean(n.hidden)!==hiddenVlans.has(n._vlan??0)).map(n=>({id:n.id,hidden:hiddenVlans.has(n._vlan??0)}));
+  const category=document.getElementById('topology-category-filter')?.value||'';
+  const updates=nodesDS.get().map(n=>({node:n,hidden:hiddenVlans.has(n._vlan??0)||(category!==''&&String(n._category||'IT')!==category)})).filter(x=>Boolean(x.node.hidden)!==x.hidden).map(x=>({id:x.node.id,hidden:x.hidden}));
   if(updates.length)nodesDS.update(updates);
 }
 document.getElementById('vlan-filter-list').addEventListener('click',e=>{
@@ -162,4 +172,5 @@ document.getElementById('vlan-filter-list').addEventListener('click',e=>{
 });
 document.getElementById('vlan-filter-all').onclick=()=>{hiddenVlans.clear();renderVlanFilter();applyVlanFilter()};
 document.getElementById('vlan-filter-none').onclick=()=>{if(!nodesDS)return;nodesDS.get().forEach(n=>hiddenVlans.add(n._vlan??0));renderVlanFilter();applyVlanFilter()};
+document.getElementById('topology-category-filter')?.addEventListener('change',applyVlanFilter);
 document.getElementById('topology-search-input').oninput=applySearch;document.getElementById('topology-search-clear').onclick=()=>{document.getElementById('topology-search-input').value='';applySearch()};

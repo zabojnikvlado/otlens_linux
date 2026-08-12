@@ -813,6 +813,10 @@ func (e *Engine) GetAll() []*Asset {
 	for _, asset := range e.assets {
 
 		clone := *asset
+		// Address bindings are a slice and therefore require a deep copy. A
+		// shallow struct copy would share the live backing array with packet
+		// capture while topology/telemetry marshals the snapshot.
+		clone.Addresses = append([]AddressBinding(nil), asset.Addresses...)
 
 		result = append(
 			result,

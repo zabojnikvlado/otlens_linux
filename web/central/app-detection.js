@@ -70,7 +70,7 @@ document.getElementById('incident-modal-close').onclick=()=>{document.getElement
 function jsonList(v){if(Array.isArray(v))return v;try{return JSON.parse(v||'[]')}catch(_){return[]}}
 function threatForDNS(d){const q=String(d.query_name||'').toLowerCase();return alerts.some(a=>['malicious_domain','c2_correlated'].includes(String(a.Type))&&(String(a.Message||'').toLowerCase().includes(q)||a.IP===d.client_ip))}
 function smbRisk(x){return !!(x.IsAdminShare||x.IsExecutable||x.IsScript||x.NamedPipe||x.is_admin_share||x.is_executable||x.is_script||x.named_pipe)}
-const EXPLORER_QUERY_LIMIT=5000;
+const EXPLORER_QUERY_LIMIT=5000,SMB_EXPLORER_QUERY_LIMIT=1000;
 let dnsExplorerObservations=[],smbExplorerObservations=[];
 let dnsQueryTimer=null,smbQueryTimer=null,dnsLoadSequence=0,smbLoadSequence=0;
 const dnsKnownSensors=new Set();
@@ -115,16 +115,22 @@ function openDNSDetail(id){const d=dnsExplorerObservations.find(x=>String(x.id)=
 document.querySelector('#table-dns tbody').addEventListener('click',e=>{const row=e.target.closest('.dns-row');if(row)openDNSDetail(row.dataset.id)});document.getElementById('dns-detail-close').onclick=()=>document.getElementById('dns-detail-modal').hidden=true;
 
 async function loadSMB(){
-  const sequence=++smbLoadSequence,params=new URLSearchParams({limit:String(EXPLORER_QUERY_LIMIT)});
+  const sequence=++smbLoadSequence,params=new URLSearchParams({limit:String(SMB_EXPLORER_QUERY_LIMIT),include_transport:'true'});
   const search=(document.getElementById('smb-filter')?.value||'').trim();
   if(search)params.set('search',search);
-  const count=document.getElementById('smb-count');if(count)count.textContent='Loading SMB observations…';
+  const count=document.getElementById('smb-count');if(count)count.textContent='Loading SMB evidence…';
   try{
     const rows=await api('/smb-observations?'+params.toString());
     if(sequence!==smbLoadSequence)return;
     smbExplorerObservations=Array.isArray(rows)?rows:[];
     renderSMB();
-  }catch(e){if(sequence===smbLoadSequence){console.error('smb observations',e);if(count)count.textContent='SMB load failed'}}
+  }catch(e){
+    if(sequence!==smbLoadSequence)return;
+    console.error('smb observations',e);
+    const requestID=e?.parsed?.request_id?` · request ${e.parsed.request_id}`:'';const msg=(e?.parsed?.error||e?.body||e?.message||String(e))+requestID;
+    if(count)count.textContent=`SMB load failed · ${String(msg).slice(0,180)}`;
+    const body=document.querySelector('#table-smb tbody');if(body)body.innerHTML=`<tr><td colspan="10" class="empty-dashboard">SMB evidence could not be loaded: ${esc(String(msg).slice(0,300))}</td></tr>`;
+  }
 }
 function scheduleSMBLoad(){
   clearTimeout(smbQueryTimer);
@@ -134,10 +140,18 @@ function scheduleSMBLoad(){
 function renderSMB(){
   const q=(document.getElementById('smb-filter')?.value||'').trim().toLowerCase(),mode=document.getElementById('smb-risk')?.value||'';
   const rows=smbExplorerObservations.filter(x=>(!q||JSON.stringify(x).toLowerCase().includes(q))&&(!mode||(mode==='risk'&&smbRisk(x))||(mode==='encrypted'&&(x.IsEncrypted||x.is_encrypted))));
-  const limited=smbExplorerObservations.length>=EXPLORER_QUERY_LIMIT;
-  document.getElementById('smb-count').textContent=`${rows.length.toLocaleString()} observations${limited?' · view capped at 5,000 matches; refine search for older retained data':''}`;
+  const limited=smbExplorerObservations.length>=SMB_EXPLORER_QUERY_LIMIT;
+  const decoded=rows.filter(x=>(x.evidence_source||'decoded')==='decoded').length,transport=rows.length-decoded;
+  document.getElementById('smb-count').textContent=`${rows.length.toLocaleString()} SMB evidence rows · ${decoded.toLocaleString()} decoded · ${transport.toLocaleString()} transport-only${limited?' · view capped at 1,000 matches; refine search for older retained data':''}`;
   const body=document.querySelector('#table-smb tbody');if(!body)return;
-  body.innerHTML=rows.map(x=>{const flags=[(x.IsAdminShare||x.is_admin_share)?'ADMIN SHARE':'',(x.IsExecutable||x.is_executable)?'EXECUTABLE':'',(x.IsScript||x.is_script)?'SCRIPT':'',(x.IsEncrypted||x.is_encrypted)?'ENCRYPTED':''].filter(Boolean);return `<tr class="clickable-row smb-detail-row ${smbRisk(x)?'row-threat':''}" data-index="${smbExplorerObservations.indexOf(x)}"><td>${time(x.Timestamp||x.timestamp)}</td><td>${esc(x.sensor_id)}</td><td>${esc(x.ClientIP||x.client_ip)} → ${esc(x.ServerIP||x.server_ip)}</td><td>${esc(x.Command||x.command)}</td><td>${esc(x.ShareName||x.share_name||'—')}</td><td>${esc(x.FileName||x.file_name||x.NamedPipe||x.named_pipe||'—')}</td><td>${esc(x.Bytes||x.bytes||0)}</td><td>${esc(x.Status||x.status||'—')}</td><td>${flags.map(f=>`<span class="pill severity-${f==='ENCRYPTED'?'medium':'high'}">${esc(f)}</span>`).join(' ')||'—'}</td></tr>`}).join('');
+  body.innerHTML=rows.map(x=>{
+    const source=x.evidence_source||'decoded',transportOnly=source==='transport';
+    const flags=[transportOnly?'TRANSPORT ONLY':'',(x.IsAdminShare||x.is_admin_share)?'ADMIN SHARE':'',(x.IsExecutable||x.is_executable)?'EXECUTABLE':'',(x.IsScript||x.is_script)?'SCRIPT':'',(x.IsEncrypted||x.is_encrypted)?'ENCRYPTED':''].filter(Boolean);
+    const observed=x.last_seen||x.LastSeen||x.Timestamp||x.timestamp;
+    const command=transportOnly?'TCP/445 session':(x.Command||x.command||'—');
+    const bytes=x.Bytes??x.bytes??0;
+    return `<tr class="clickable-row smb-detail-row ${smbRisk(x)?'row-threat':''}" data-index="${smbExplorerObservations.indexOf(x)}"><td>${time(observed)}</td><td>${esc(x.sensor_id)}</td><td>${esc(x.ClientIP||x.client_ip)} → ${esc(x.ServerIP||x.server_ip)}</td><td>${esc(source==='transport'?'Transport':'Decoded SMB')}</td><td>${esc(command)}</td><td>${esc(x.ShareName||x.share_name||'—')}</td><td>${esc(x.FileName||x.file_name||x.NamedPipe||x.named_pipe||'—')}</td><td>${esc(bytes)}</td><td>${esc(x.Status||x.status||'—')}</td><td>${flags.map(f=>`<span class="pill severity-${f==='ENCRYPTED'||f==='TRANSPORT ONLY'?'medium':'high'}">${esc(f)}</span>`).join(' ')||'—'}</td></tr>`;
+  }).join('');
   window.OTDataTables?.refresh('table-smb');
 }
 async function loadThreatIntelManagement(){try{const [sources,indicators]=await Promise.all([api('/threat-intel/sources'),api('/threat-intel/indicators?limit=10000')]);threatIntelSources=Array.isArray(sources)?sources:[];threatIntelIndicators=Array.isArray(indicators)?indicators:[];renderThreatIntel()}catch(e){console.error('load threat intel management',e)}}
@@ -386,7 +400,7 @@ function renderDashboard(){
   const tiHits=openAlerts.filter(a=>['malicious_ip','malicious_domain'].includes(String(a.Type))).length;
   const c2lm=openAlerts.filter(a=>['c2_correlated','c2_beacon','lateral_movement'].includes(String(a.Type))).length;
   const otAnomaly=openAlerts.filter(a=>['ot_value_anomaly','unexpected_write'].includes(String(a.Type))).length;
-  const smbRiskCount=(smbObservations||[]).filter(smbRisk).length;
+  const smbRiskCount=Number(smbStats?.risk_activity||0);
   document.getElementById('dashboard-ti').textContent=tiHits;
   document.getElementById('dashboard-c2lm').textContent=c2lm;
   document.getElementById('dashboard-ot-anomaly').textContent=otAnomaly;
@@ -416,6 +430,10 @@ function renderDashboard(){
   // A browser-side delta made the first refresh look like zero even when the
   // sensor had already observed substantial UDP traffic.
   if(udpPacketEl)udpPacketEl.textContent=Number(udp.udp_packets_total||0).toLocaleString();
+  const udpDiag=udpTelemetry?.diagnostics||{},udpFallback=Number(udpDiag.flow_fallback_sensors||0),udpDisabled=Number(udpDiag.tracking_disabled_sensors||0);
+  const udpPacketDetail=document.getElementById('dashboard-udp-packets-detail'),udpActiveDetail=document.getElementById('dashboard-udp-active-detail');
+  if(udpPacketDetail)udpPacketDetail.textContent=udpFallback>0?'Observed via flow fallback':'Since sensor start';
+  if(udpActiveDetail)udpActiveDetail.textContent=udpDisabled>0?'Conversation retention disabled on sensor':'Currently active';
   const profiled=(assets||[]).filter(a=>a.LastProfiledAt||a.ReconHostname||a.ReconVendor||a.ReconOS).length, unknownIdentity=(assets||[]).filter(a=>!(a.Hostname||a.ReconHostname)||!(a.Vendor||a.ReconVendor)||!a.ReconOS).length, reconActive=(reconnaissanceJobs||[]).filter(j=>['queued','running'].includes(j.status)).length;
   const dp=document.getElementById('dashboard-profiled');if(dp)dp.textContent=profiled;const du=document.getElementById('dashboard-unknown-identity');if(du)du.textContent=unknownIdentity;const dj=document.getElementById('dashboard-recon-jobs');if(dj)dj.textContent=reconActive;
 

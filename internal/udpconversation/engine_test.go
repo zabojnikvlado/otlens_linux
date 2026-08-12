@@ -49,7 +49,18 @@ func TestDisabledEngineStillForwardsPacketWithoutTracking(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("disabled engine stopped the UDP parser pipeline")
 	}
-	if engine.Stats().Active != 0 {
-		t.Fatalf("disabled engine tracked conversations: %#v", engine.Stats())
+	stats := engine.Stats()
+	if stats.Active != 0 {
+		t.Fatalf("disabled engine tracked conversations: %#v", stats)
+	}
+	if stats.TotalPackets != 1 || stats.TotalBytes != 10 {
+		t.Fatalf("disabled engine lost UDP traffic telemetry: %#v", stats)
+	}
+	telemetry := engine.Manager().Telemetry(time.Now(), 0, 0, 0)
+	if telemetry.UDPConversationTrackingEnabled {
+		t.Fatal("disabled conversation tracker reported itself enabled")
+	}
+	if telemetry.UDPProtocolPacketsTotal["dns"] != 1 {
+		t.Fatalf("disabled engine protocol telemetry = %#v", telemetry.UDPProtocolPacketsTotal)
 	}
 }

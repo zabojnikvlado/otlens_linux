@@ -18,19 +18,43 @@ func persistProtocolObservations(ctx context.Context, tx *sql.Tx, sensorID strin
 	if err := json.Unmarshal(raw, &observations); err != nil {
 		return err
 	}
+
+	// ProtocolEngine keeps a bounded observation buffer (up to 10,000 rows).
+	// Per-row INSERTs made a routine 5-second sync perform ten thousand DB round
+	// trips. Batch them so Central can acknowledge telemetry promptly.
+	const writeBatch = 1000
+	type row struct {
+		o     protocolobs.Observation
+		attrs []byte
+	}
+	valid := make([]row, 0, len(observations))
 	for _, o := range observations {
-		if strings.TrimSpace(o.Protocol) == "" {
-			continue
-		}
-		at := o.Timestamp
-		if at.IsZero() {
+		if strings.TrimSpace(o.Protocol) == "" || o.Timestamp.IsZero() {
 			continue
 		}
 		attrs, _ := json.Marshal(o.Attributes)
-		_, err := tx.ExecContext(ctx, `INSERT INTO protocol_observations(sensor_id,observed_at,protocol,transport,src_ip,dst_ip,src_port,dst_port,operation,host,resource,username,status,summary,encrypted,from_analysis,conversation_id,flow_id,direction,rtt_millis,attributes)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-ON CONFLICT DO NOTHING`, sensorID, at, strings.ToLower(o.Protocol), o.Transport, o.SrcIP, o.DstIP, o.SrcPort, o.DstPort, o.Operation, o.Host, o.Resource, o.Username, o.Status, o.Summary, o.Encrypted, o.FromAnalysis, o.ConversationID, o.FlowID, o.Direction, o.RTTMillis, attrs)
-		if err != nil {
+		valid = append(valid, row{o: o, attrs: attrs})
+	}
+	for start := 0; start < len(valid); start += writeBatch {
+		end := start + writeBatch
+		if end > len(valid) {
+			end = len(valid)
+		}
+		args := make([]interface{}, 0, (end-start)*21)
+		values := make([]string, 0, end-start)
+		for _, item := range valid[start:end] {
+			o := item.o
+			values = append(values, appendSQLTuple(&args,
+				sensorID, o.Timestamp, strings.ToLower(o.Protocol), o.Transport, o.SrcIP, o.DstIP, o.SrcPort, o.DstPort,
+				o.Operation, o.Host, o.Resource, o.Username, o.Status, o.Summary, o.Encrypted, o.FromAnalysis,
+				o.ConversationID, o.FlowID, o.Direction, o.RTTMillis, item.attrs,
+			))
+		}
+		if len(values) == 0 {
+			continue
+		}
+		q := `INSERT INTO protocol_observations(sensor_id,observed_at,protocol,transport,src_ip,dst_ip,src_port,dst_port,operation,host,resource,username,status,summary,encrypted,from_analysis,conversation_id,flow_id,direction,rtt_millis,attributes) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT DO NOTHING`
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
 	}

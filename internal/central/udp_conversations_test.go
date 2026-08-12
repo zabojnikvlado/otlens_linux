@@ -64,3 +64,28 @@ func TestPresentUDPConversationTimedOutWins(t *testing.T) {
 		t.Fatalf("status = %q, want timed_out", result.Status)
 	}
 }
+
+func TestUDPTopologyFallbackFindsLiveTraffic(t *testing.T) {
+	capturedAt := time.Date(2026, 8, 12, 8, 0, 0, 0, time.UTC)
+	raw := []byte(`{"Edges":[
+		{"Protocol":"UDP","SrcPort":53000,"DstPort":53,"Packets":12,"LastSeen":"2026-08-12T07:59:50Z"},
+		{"Protocol":"UDP","SrcPort":40000,"DstPort":123,"Packets":3,"LastSeen":"2026-08-12T07:59:40Z"},
+		{"Protocol":"TCP","SrcPort":443,"DstPort":50000,"Packets":99,"LastSeen":"2026-08-12T07:59:55Z"}
+	]}`)
+	got := udpTopologyFallback(raw, capturedAt)
+	if got.Active != 2 || got.Packets != 15 {
+		t.Fatalf("unexpected fallback totals: %#v", got)
+	}
+	if got.ProtocolPackets["dns"] != 12 || got.ProtocolPackets["ntp"] != 3 {
+		t.Fatalf("unexpected fallback protocols: %#v", got.ProtocolPackets)
+	}
+}
+
+func TestUDPTopologyFallbackExcludesStaleFromActive(t *testing.T) {
+	capturedAt := time.Date(2026, 8, 12, 8, 0, 0, 0, time.UTC)
+	raw := []byte(`{"Edges":[{"Protocol":"UDP","SrcPort":1,"DstPort":2,"Packets":7,"LastSeen":"2026-08-12T07:50:00Z"}]}`)
+	got := udpTopologyFallback(raw, capturedAt)
+	if got.Active != 0 || got.Packets != 7 || got.ProtocolPackets["udp"] != 7 {
+		t.Fatalf("unexpected stale fallback: %#v", got)
+	}
+}

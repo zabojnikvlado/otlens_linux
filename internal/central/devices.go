@@ -2,10 +2,14 @@ package central
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Coarse categories emitted by automatic classification. Manual inventory
@@ -23,6 +27,39 @@ var assetCategories = []string{
 	"HMI/SCADA", "PLC/RTU", "Historian", "Network", "Security Appliance",
 	"Virtualization", "Storage/NAS", "Printer", "Mobile", "IoT",
 	"Rogue/Unknown",
+}
+
+// AssetCategory is one operator-selectable device category. Built-in
+// categories seed every Central installation and cannot be deleted; operators
+// can add/remove custom categories through the Device classification tab.
+type AssetCategory struct {
+	Name      string    `json:"name"`
+	BuiltIn   bool      `json:"built_in"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
+var (
+	ErrBuiltInAssetCategory = errors.New("built-in asset category cannot be deleted")
+	ErrInvalidAssetCategory = errors.New("invalid asset category")
+	ErrAssetCategoryExists  = errors.New("asset category already exists")
+)
+
+func validateAssetCategoryName(category string) (string, error) {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return "", fmt.Errorf("%w: category is required", ErrInvalidAssetCategory)
+	}
+	if !utf8.ValidString(category) {
+		return "", fmt.Errorf("%w: category must be valid UTF-8", ErrInvalidAssetCategory)
+	}
+	if utf8.RuneCountInString(category) > 64 {
+		return "", fmt.Errorf("%w: category must be at most 64 characters", ErrInvalidAssetCategory)
+	}
+	if strings.IndexFunc(category, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%w: category must not contain control characters", ErrInvalidAssetCategory)
+	}
+	return category, nil
 }
 
 // mobileVendorHints/networkVendorHints are substring matches against
@@ -57,6 +94,107 @@ func normalizeAssetCategory(category string) (string, bool) {
 func validAssetCategory(category string) bool {
 	_, ok := normalizeAssetCategory(category)
 	return ok
+}
+
+// NormalizeAssetCategory resolves an operator supplied name to the canonical
+// spelling stored in the category catalogue. Matching is case-insensitive so
+// CSV imports remain friendly while the value persisted on the asset remains
+// stable and display-ready.
+func (r *Repository) NormalizeAssetCategory(ctx context.Context, category string) (string, bool, error) {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return "", false, nil
+	}
+	var canonical string
+	err := r.db.QueryRowContext(ctx, `SELECT name FROM asset_categories WHERE lower(name)=lower($1) LIMIT 1`, category).Scan(&canonical)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return canonical, true, nil
+}
+
+func (r *Repository) ListAssetCategories(ctx context.Context) ([]AssetCategory, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT name,built_in,created_by,created_at
+		FROM asset_categories
+		ORDER BY built_in DESC, lower(name), name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AssetCategory, 0)
+	for rows.Next() {
+		var category AssetCategory
+		if err := rows.Scan(&category.Name, &category.BuiltIn, &category.CreatedBy, &category.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, category)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) AddAssetCategory(ctx context.Context, name, actor string) (AssetCategory, error) {
+	name, err := validateAssetCategoryName(name)
+	if err != nil {
+		return AssetCategory{}, err
+	}
+	var category AssetCategory
+	err = r.db.QueryRowContext(ctx, `
+		INSERT INTO asset_categories(name,built_in,created_by,created_at)
+		VALUES($1,FALSE,$2,NOW())
+		ON CONFLICT DO NOTHING
+		RETURNING name,built_in,created_by,created_at`, name, actor,
+	).Scan(&category.Name, &category.BuiltIn, &category.CreatedBy, &category.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssetCategory{}, fmt.Errorf("%w: %q", ErrAssetCategoryExists, name)
+	}
+	return category, err
+}
+
+// DeleteAssetCategory removes a custom category and safely clears that
+// category override from any assigned devices. Their optional friendly name is
+// preserved, and classification falls back to the automatic IT/OT/vendor
+// logic until an operator assigns another category.
+func (r *Repository) DeleteAssetCategory(ctx context.Context, name, actor string) (int64, error) {
+	name = strings.TrimSpace(name)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var canonical string
+	var builtIn bool
+	err = tx.QueryRowContext(ctx, `SELECT name,built_in FROM asset_categories WHERE lower(name)=lower($1) LIMIT 1 FOR UPDATE`, name).Scan(&canonical, &builtIn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if builtIn {
+		return 0, ErrBuiltInAssetCategory
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE asset_overrides
+		SET category='', updated_by=$2, updated_at=NOW()
+		WHERE lower(category)=lower($1)`, canonical, actor)
+	if err != nil {
+		return 0, err
+	}
+	cleared, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM asset_categories WHERE name=$1`, canonical); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return cleared, nil
 }
 
 var networkVendorHints = []string{
@@ -111,9 +249,13 @@ func (r *Repository) SetAssetCategory(ctx context.Context, sensorID, mac, catego
 	if err != nil {
 		return err
 	}
-	category, ok := normalizeAssetCategory(category)
+	requestedCategory := strings.TrimSpace(category)
+	category, ok, err := r.NormalizeAssetCategory(ctx, requestedCategory)
+	if err != nil {
+		return err
+	}
 	if !ok {
-		return fmt.Errorf("invalid asset category %q", category)
+		return fmt.Errorf("%w %q", ErrInvalidAssetCategory, requestedCategory)
 	}
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO asset_overrides(sensor_id, mac, category, name, updated_by, updated_at)
@@ -157,6 +299,25 @@ func (r *Repository) ImportAssetOverrides(ctx context.Context, sensorID string, 
 	// Treat a bulk inventory import as one operator action. A database error in
 	// the middle must not leave a half-applied asset list that the UI reports as
 	// failed and the analyst then retries against an unknown partial state.
+	categoryRows, err := r.db.QueryContext(ctx, `SELECT name FROM asset_categories`)
+	if err != nil {
+		return 0, err
+	}
+	categories := make(map[string]string)
+	for categoryRows.Next() {
+		var name string
+		if err := categoryRows.Scan(&name); err != nil {
+			categoryRows.Close()
+			return 0, err
+		}
+		categories[strings.ToLower(name)] = name
+	}
+	if err := categoryRows.Err(); err != nil {
+		categoryRows.Close()
+		return 0, err
+	}
+	categoryRows.Close()
+
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -169,7 +330,7 @@ func (r *Repository) ImportAssetOverrides(ctx context.Context, sensorID string, 
 		if err != nil {
 			continue
 		}
-		category, ok := normalizeAssetCategory(row.Category)
+		category, ok := categories[strings.ToLower(strings.TrimSpace(row.Category))]
 		if !ok {
 			continue
 		}

@@ -206,15 +206,24 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 	protocolPackets := map[string]uint64{}
 	var rttTotal, durationWeighted float64
 	var rttSamples, durationWeight uint64
+	var fallbackSensors, disabledTrackingSensors int
 	for _, snapshot := range snapshots {
+		activeBefore := totals["udp_conversations_active"]
+		packetsBefore := totals["udp_packets_total"]
+		protocolPacketBefore := sumUDPProtocolPackets(protocolPackets)
+
 		// RawMessage keeps the endpoint backward compatible with older sensors
 		// that only sent numeric fields while allowing newer sensors to include
-		// nested cumulative protocol counters. Unmarshalling directly into
-		// map[string]float64 would reject the entire snapshot as soon as the
-		// nested field is present.
+		// nested cumulative protocol counters and tracking state.
 		var telemetry map[string]json.RawMessage
 		if json.Unmarshal(snapshot.UDPTelemetry, &telemetry) == nil {
 			var activeConversations uint64
+			if raw, ok := telemetry["udp_conversation_tracking_enabled"]; ok {
+				var enabled bool
+				if json.Unmarshal(raw, &enabled) == nil && !enabled {
+					disabledTrackingSensors++
+				}
+			}
 			if raw, ok := telemetry["udp_conversations_active"]; ok {
 				var value float64
 				if json.Unmarshal(raw, &value) == nil && value > 0 {
@@ -263,6 +272,36 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 		for _, conversation := range conversations {
 			protocols[strings.ToLower(conversation.Protocol)]++
 		}
+
+		// A sensor can see and detect UDP even when conversation retention is
+		// disabled, when an older binary predates the counters, or when its
+		// conversation tracker has been reset. The topology snapshot is produced
+		// independently by the flow engine, so use its current UDP edges as a
+		// conservative compatibility fallback instead of rendering impossible
+		// all-zero UDP KPIs next to live "New UDP communication" alerts.
+		fallback := udpTopologyFallback(snapshot.Topology, snapshot.CapturedAt)
+		usedFallback := false
+		if totals["udp_conversations_active"] == activeBefore {
+			if len(conversations) > 0 {
+				totals["udp_conversations_active"] += float64(len(conversations))
+			} else if fallback.Active > 0 {
+				totals["udp_conversations_active"] += float64(fallback.Active)
+				usedFallback = true
+			}
+		}
+		if totals["udp_packets_total"] == packetsBefore && fallback.Packets > 0 {
+			totals["udp_packets_total"] += float64(fallback.Packets)
+			usedFallback = true
+		}
+		if sumUDPProtocolPackets(protocolPackets) == protocolPacketBefore && len(fallback.ProtocolPackets) > 0 {
+			for protocol, packets := range fallback.ProtocolPackets {
+				protocolPackets[protocol] += packets
+			}
+			usedFallback = true
+		}
+		if usedFallback {
+			fallbackSensors++
+		}
 	}
 	if rttSamples > 0 {
 		totals["udp_average_rtt"] = rttTotal / float64(rttSamples)
@@ -284,7 +323,93 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 			topProtocol, topCount = protocol, count
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"totals": totals, "protocols": protocols, "protocol_packets": protocolPackets, "top_protocol": topProtocol})
+	c.JSON(http.StatusOK, gin.H{
+		"totals":           totals,
+		"protocols":        protocols,
+		"protocol_packets": protocolPackets,
+		"top_protocol":     topProtocol,
+		"diagnostics": gin.H{
+			"flow_fallback_sensors":     fallbackSensors,
+			"tracking_disabled_sensors": disabledTrackingSensors,
+		},
+	})
+}
+
+type udpTopologyFallbackStats struct {
+	Active          uint64
+	Packets         uint64
+	ProtocolPackets map[string]uint64
+}
+
+func udpTopologyFallback(raw json.RawMessage, capturedAt time.Time) udpTopologyFallbackStats {
+	result := udpTopologyFallbackStats{ProtocolPackets: map[string]uint64{}}
+	if len(raw) == 0 {
+		return result
+	}
+	var graph struct {
+		Edges []struct {
+			Protocol string
+			SrcPort  uint16
+			DstPort  uint16
+			Packets  uint64
+			LastSeen time.Time
+		}
+	}
+	if json.Unmarshal(raw, &graph) != nil {
+		return result
+	}
+	if capturedAt.IsZero() {
+		capturedAt = time.Now().UTC()
+	}
+	activeCutoff := capturedAt.Add(-2 * time.Minute)
+	for _, edge := range graph.Edges {
+		if !strings.EqualFold(strings.TrimSpace(edge.Protocol), "UDP") {
+			continue
+		}
+		packets := edge.Packets
+		if packets == 0 {
+			packets = 1
+		}
+		result.Packets += packets
+		protocol := classifyUDPPorts(edge.SrcPort, edge.DstPort)
+		result.ProtocolPackets[protocol] += packets
+		if edge.LastSeen.IsZero() || !edge.LastSeen.Before(activeCutoff) {
+			result.Active++
+		}
+	}
+	return result
+}
+
+func sumUDPProtocolPackets(values map[string]uint64) uint64 {
+	var total uint64
+	for _, count := range values {
+		total += count
+	}
+	return total
+}
+
+func classifyUDPPorts(source, destination uint16) string {
+	for _, port := range []uint16{source, destination} {
+		switch port {
+		case 53:
+			return "dns"
+		case 67, 68:
+			return "dhcp"
+		case 123:
+			return "ntp"
+		case 161, 162:
+			return "snmp"
+		case 5060:
+			return "sip"
+		case 443, 5684:
+			return "dtls"
+		case 1194:
+			return "openvpn"
+		case 6969:
+			return "bittorrent"
+		}
+	}
+	return "udp"
 }
 
 func matchUDPConversation(c *gin.Context, conversation udpconversation.Conversation) bool {

@@ -79,27 +79,51 @@ func (e *Engine) parseStreamChunk(c core.TCPStreamChunk) []Observation {
 	e.mu.Lock()
 	b := append(e.streamBuffers[k], c.Data...)
 	resynced := false
-	if c.GapBefore > 0 {
-		// A capture gap invalidates any partial NBSS frame. Search for the next
-		// plausible NBSS+SMB signature instead of poisoning the stream forever.
-		b = resyncSMB(b)
-		resynced = true
+	if c.GapBefore > 0 || c.Midstream {
+		// Mid-stream capture and explicit reassembly gaps are both unsafe framing
+		// boundaries. SMB3 encrypted payload bytes can contain arbitrary zeroes;
+		// treating one of those as a NetBIOS length header can otherwise make the
+		// parser wait forever for a bogus multi-megabyte frame.
+		if rb, ok := resyncSMB(b); ok {
+			b = rb
+			resynced = true
+		}
 	}
 	if len(b) > 8<<20 {
-		b = b[len(b)-(8<<20):]
+		if rb, ok := resyncSMB(b[len(b)-(8<<20):]); ok {
+			b = rb
+		} else {
+			b = b[len(b)-7:]
+		}
+		resynced = true
 	}
 	var records [][]byte
-	for len(b) >= 4 {
-		n := int(b[1])<<16 | int(b[2])<<8 | int(b[3])
-		if b[0] != 0 || n <= 0 {
-			b = b[1:]
-			continue
+	for {
+		if len(b) < 8 {
+			break
 		}
-		if n > 8<<20 {
+		if !validSMBFramePrefix(b) {
+			if rb, ok := resyncSMB(b[1:]); ok {
+				b = rb
+				resynced = true
+				continue
+			}
+			// Keep only enough tail bytes to recognize a framing header/signature
+			// once the next TCP chunk arrives.
+			if len(b) > 7 {
+				b = b[len(b)-7:]
+			}
+			break
+		}
+		n := int(b[1])<<16 | int(b[2])<<8 | int(b[3])
+		if n < 4 || n > 8<<20 {
 			b = b[1:]
+			resynced = true
 			continue
 		}
 		if len(b) < 4+n {
+			// The signature has already been validated, so waiting for this frame is
+			// safe and cannot be caused by an arbitrary zero inside ciphertext.
 			break
 		}
 		records = append(records, append([]byte(nil), b[4:4+n]...))
@@ -119,19 +143,25 @@ func (e *Engine) parseStreamChunk(c core.TCPStreamChunk) []Observation {
 	}
 	return out
 }
-func resyncSMB(b []byte) []byte {
+
+func validSMBFramePrefix(b []byte) bool {
+	if len(b) < 8 || b[0] != 0 {
+		return false
+	}
+	return string(b[4:8]) == "\xfeSMB" || string(b[4:8]) == "\xfdSMB"
+}
+
+func resyncSMB(b []byte) ([]byte, bool) {
 	for i := 0; i+8 <= len(b); i++ {
-		if b[i] == 0 && (string(b[i+4:i+8]) == "\xfeSMB" || string(b[i+4:i+8]) == "\xfdSMB") {
-			n := int(b[i+1])<<16 | int(b[i+2])<<8 | int(b[i+3])
-			if n > 0 && n <= 8<<20 {
-				return b[i:]
-			}
+		if !validSMBFramePrefix(b[i:]) {
+			continue
+		}
+		n := int(b[i+1])<<16 | int(b[i+2])<<8 | int(b[i+3])
+		if n >= 4 && n <= 8<<20 {
+			return b[i:], true
 		}
 	}
-	if len(b) > 7 {
-		return b[len(b)-7:]
-	}
-	return b
+	return b, false
 }
 
 func (e *Engine) GetObservations() []Observation {

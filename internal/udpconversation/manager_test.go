@@ -167,6 +167,22 @@ func TestTelemetry(t *testing.T) {
 	}
 }
 
+func TestTelemetryCountsPacketsBeyondConversationRetentionCeiling(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 10, MaxPacketsPerConversation: 1})
+	now := time.Now()
+	packet := udpPacket("10.0.0.1", 53000, "10.0.0.53", 53, 64, now)
+	manager.Observe(packet)
+	manager.Observe(udpPacket("10.0.0.1", 53000, "10.0.0.53", 53, 64, now.Add(time.Millisecond)))
+	stats := manager.Stats()
+	if stats.TotalPackets != 2 || stats.TotalBytes != 128 {
+		t.Fatalf("traffic telemetry followed retention ceiling: %#v", stats)
+	}
+	conversation, ok := manager.Get(NewKey(packet.SrcIP, packet.SrcPort, packet.DstIP, packet.DstPort))
+	if !ok || conversation.Packets != 1 {
+		t.Fatalf("conversation retention ceiling was not preserved: %#v", conversation)
+	}
+}
+
 func TestProtocolTelemetrySurvivesConversationExpiry(t *testing.T) {
 	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 10, MaxPacketsPerConversation: 10, IdleTimeout: time.Second})
 	start := time.Unix(20_000, 0).UTC()

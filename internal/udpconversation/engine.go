@@ -77,6 +77,10 @@ func (e *Engine) Start() {
 
 func (e *Engine) process(packet core.Packet) {
 	if e.manager.config.Disabled {
+		// Disabling conversation retention must not make actual UDP traffic
+		// disappear from operational telemetry. Keep only lightweight cumulative
+		// counters and forward the packet without a conversation context.
+		e.manager.ObserveTelemetryOnly(packet)
 		e.bus.Publish(core.Event{
 			Type:      core.EventUDPConversationPacket,
 			Timestamp: packet.Timestamp,

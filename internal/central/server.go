@@ -296,6 +296,9 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.DELETE("/sensors/:id", requireAction(ActionSensorStartStop), s.deleteSensor)
 	api.GET("/assets", requireView(ViewAssets), s.assets)
 	api.GET("/devices", requireView(ViewAssets), s.devices)
+	api.GET("/device-categories", requireView(ViewAssets), s.listDeviceCategories)
+	api.POST("/device-categories", requireAction(ActionAssetConfirmDelete), s.addDeviceCategory)
+	api.DELETE("/device-categories", requireAction(ActionAssetConfirmDelete), s.deleteDeviceCategory)
 	api.POST("/sensors/:id/assets/:mac/category", requireAction(ActionAssetConfirmDelete), s.setDeviceCategory)
 	api.POST("/sensors/:id/devices/import", requireAction(ActionAssetConfirmDelete), s.importDeviceList)
 	api.POST("/sensors/:id/tags/import", requireAction(ActionDataManagement), s.importTagList)
@@ -322,6 +325,7 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/tags", requireView(ViewTags), s.tags)
 	api.GET("/dns-observations", requireView(ViewAlerts), s.dnsObservations)
 	api.GET("/smb-observations", requireView(ViewAlerts), s.smbObservations)
+	api.GET("/smb-stats", requireView(ViewDashboard), s.smbStats)
 	api.GET("/protocol-observations", requireView(ViewAlerts), s.protocolObservations)
 	api.GET("/udp-conversations", requireView(ViewAlerts), s.udpConversations)
 	api.GET("/udp-conversations/:id", requireView(ViewAlerts), s.udpConversation)
@@ -367,6 +371,11 @@ func (s *Server) WebRouter() *gin.Engine {
 	api.GET("/baseline", behaviorReadAccess(), s.baseline)
 	api.POST("/sensors/:id/baseline/candidates/promote", requireAction(ActionAlertConfirmApprove), s.promoteBaselineCandidate)
 	api.POST("/sensors/:id/learning/complete", requireAction(ActionDataManagement), s.completeSensorLearning)
+	api.GET("/analytics/options", requireView(ViewDashboard), s.analyticsOptions)
+	api.GET("/analytics/communication", requireView(ViewDashboard), s.communicationAnalytics)
+	api.GET("/analytics/asset-traffic", requireView(ViewDashboard), s.assetTrafficAnalytics)
+	api.GET("/analytics/network-traffic", requireView(ViewDashboard), s.networkTrafficAnalytics)
+	api.GET("/analytics/protocol-traffic", requireView(ViewDashboard), s.protocolTrafficAnalytics)
 	api.GET("/dashboard/trends", requireView(ViewDashboard), s.dashboardTrends)
 	api.GET("/reports", requireView(ViewDashboard), s.listReports)
 	api.GET("/reports/:id", requireView(ViewDashboard), s.getReport)
@@ -731,16 +740,77 @@ func (s *Server) setDeviceCategory(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !validAssetCategory(strings.TrimSpace(req.Category)) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid category"})
-		return
-	}
 	if err := s.Repo.SetAssetCategory(c, sensorID, mac, req.Category, req.Name, identityFromContext(c).Username); err != nil {
+		if errors.Is(err, ErrInvalidAssetCategory) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}
+	s.invalidateTopologyCache()
 	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device category set: %s (%s) -> %s", mac, sensorID, req.Category), sensorID)
 	c.Status(http.StatusOK)
+}
+
+func (s *Server) listDeviceCategories(c *gin.Context) {
+	categories, err := s.Repo.ListAssetCategories(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, categories)
+}
+
+func (s *Server) addDeviceCategory(c *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "category name is required"})
+		return
+	}
+	category, err := s.Repo.AddAssetCategory(c, req.Name, identityFromContext(c).Username)
+	if err != nil {
+		if errors.Is(err, ErrInvalidAssetCategory) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrAssetCategoryExists) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		respondInternalError(c, err)
+		return
+	}
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device category added: %s", category.Name), "")
+	c.JSON(http.StatusCreated, category)
+}
+
+func (s *Server) deleteDeviceCategory(c *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "category name is required"})
+		return
+	}
+	name := req.Name
+	cleared, err := s.Repo.DeleteAssetCategory(c, name, identityFromContext(c).Username)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "device category not found"})
+		case errors.Is(err, ErrBuiltInAssetCategory):
+			c.JSON(http.StatusConflict, gin.H{"error": "built-in categories cannot be deleted"})
+		default:
+			respondInternalError(c, err)
+		}
+		return
+	}
+	s.invalidateTopologyCache()
+	s.logAudit(c, identityFromContext(c).Username, fmt.Sprintf("device category deleted: %s", name), "")
+	c.JSON(http.StatusOK, gin.H{"deleted": name, "cleared_assignments": cleared})
 }
 
 // importDeviceList is the Devices tab's "Import asset list" CSV upload
@@ -1273,6 +1343,7 @@ type topologyNode struct {
 	SensorID          string `json:"SensorID"`
 	HoneypotThreshold int    `json:"HoneypotThreshold"`
 	IsHoneypot        bool   `json:"IsHoneypot"`
+	Category          string `json:"Category"`
 }
 
 type topologyEdge struct {
@@ -1301,6 +1372,27 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 		if json.Unmarshal(row.Topology, &graph) != nil {
 			continue
 		}
+		overrides, err := s.Repo.ListAssetOverrides(c, row.SensorID)
+		if err != nil {
+			return nil, err
+		}
+		contexts, err := s.Repo.ListAssetContexts(c, row.SensorID)
+		if err != nil {
+			return nil, err
+		}
+		categoryFor := func(ip, mac, vendor string, isOT, confirmed bool) string {
+			identity := canonicalAssetIdentity(mac, ip)
+			if ac, ok := contexts[identity]; ok && (ac.AssetRole != "" || ac.PurdueOverride != nil) {
+				isOT = roleIsOT(ac.AssetRole) || (ac.PurdueOverride != nil && *ac.PurdueOverride <= 3)
+			}
+			category := classifyDeviceCategory(vendor, isOT, confirmed)
+			if normalized, err := normalizeAssetMAC(mac); err == nil {
+				if override, ok := overrides[normalized]; ok && strings.TrimSpace(override.Category) != "" {
+					category = override.Category
+				}
+			}
+			return category
+		}
 		sensorThreshold := graph.HoneypotThreshold
 		if sensorThreshold <= 0 {
 			sensorThreshold = 100
@@ -1317,6 +1409,7 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 				SensorID:          row.SensorID,
 				HoneypotThreshold: sensorThreshold,
 				IsHoneypot:        n.Score >= sensorThreshold,
+				Category:          categoryFor(n.IP, n.MAC, n.Vendor, n.IsOT, n.Confirmed),
 			})
 		}
 		// Nodes, same durability problem edges had: the live snapshot only
@@ -1364,6 +1457,7 @@ func (s *Server) buildTopologyResponse(c *gin.Context) ([]byte, error) {
 				SensorID:          row.SensorID,
 				HoneypotThreshold: sensorThreshold,
 				IsHoneypot:        ledgerNode.Score >= sensorThreshold,
+				Category:          categoryFor(ledgerNode.IP, ledgerNode.MAC, ledgerNode.Vendor, ledgerNode.IsOT, ledgerNode.Confirmed),
 			})
 		}
 		// Edges are drawn from the durable per-sensor ledger (topology_edges),
@@ -1503,11 +1597,11 @@ func aggregateEdges(flows []topology.Edge) []aggregatedEdge {
 }
 
 // topologyFingerprint hashes every sensor's telemetry sequence number into
-// a single stable string. It changes if and only if at least one sensor
-// has posted new telemetry since the last call — this is what lets
-// s.topology skip the expensive rebuild (and lets the browser skip
-// re-downloading/re-rendering) when nothing changed in the database.
-func topologyFingerprint(seqBySensor map[string]int64) string {
+// a single stable string. It changes when sensor telemetry changes or when an
+// operator changes a device category/name override — both affect the topology
+// response. This is what lets s.topology skip the expensive rebuild (and lets
+// the browser skip re-downloading/re-rendering) when nothing relevant changed.
+func topologyFingerprint(seqBySensor map[string]int64, operatorFingerprint string) string {
 	ids := make([]string, 0, len(seqBySensor))
 	for id := range seqBySensor {
 		ids = append(ids, id)
@@ -1517,6 +1611,7 @@ func topologyFingerprint(seqBySensor map[string]int64) string {
 	for _, id := range ids {
 		fmt.Fprintf(h, "%s=%d;", id, seqBySensor[id])
 	}
+	fmt.Fprintf(h, "operator=%s;", operatorFingerprint)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -1526,7 +1621,12 @@ func (s *Server) topology(c *gin.Context) {
 		respondInternalError(c, err)
 		return
 	}
-	fingerprint := topologyFingerprint(seq)
+	operatorFingerprint, err := s.Repo.TopologyOperatorFingerprint(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	fingerprint := topologyFingerprint(seq, operatorFingerprint)
 
 	s.topoCache.mu.Lock()
 	cacheHit := s.topoCache.body != nil && s.topoCache.fingerprint == fingerprint
@@ -3746,6 +3846,15 @@ func (s *Server) dnsObservations(c *gin.Context) {
 	c.JSON(http.StatusOK, rows)
 }
 
+func (s *Server) smbStats(c *gin.Context) {
+	stats, err := s.Repo.SMBDashboardStats(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
 func (s *Server) smbObservations(c *gin.Context) {
 	limit := 500
 	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
@@ -3753,7 +3862,11 @@ func (s *Server) smbObservations(c *gin.Context) {
 			limit = n
 		}
 	}
-	rows, err := s.Repo.ListSMBObservations(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), strings.TrimSpace(c.Query("search")), limit)
+	includeTransport := false
+	if raw := strings.TrimSpace(c.Query("include_transport")); raw != "" {
+		includeTransport = raw == "1" || strings.EqualFold(raw, "true") || strings.EqualFold(raw, "yes")
+	}
+	rows, err := s.Repo.ListSMBEvidence(c, strings.TrimSpace(c.Query("sensor_id")), strings.TrimSpace(c.Query("client_ip")), strings.TrimSpace(c.Query("server_ip")), strings.TrimSpace(c.Query("artifact")), strings.TrimSpace(c.Query("search")), limit, includeTransport)
 	if err != nil {
 		respondInternalError(c, err)
 		return

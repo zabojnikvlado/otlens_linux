@@ -13,13 +13,13 @@ const connectionState={api:'unknown',apiText:'',live:'idle',liveSince:0,lastEven
 const DOMAIN_TTL_MS=15000;
 const domainLoadedAt=new Map(),pendingLoads=new Map();
 const DOMAIN_PATHS={
-  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/incidents','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs'],
+  dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/incidents','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-stats','/reconnaissance/jobs'],
   assets:['/assets','/asset-security-status','/asset-risk'],devices:['/devices'],
   vulnerabilities:['/vulnerabilities'],tags:['/tags','/tags/changes','/tags/events','/sensors'],
-  sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/alerts/stats','/dns-observations?limit=1000','/smb-observations?limit=1000'],
+  sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/alerts/stats','/dns-observations?limit=1000'],
   incidents:['/incidents','/correlation-rules'],rules:['/rules','/sensors'],reports:['/reports'],
   analysis:['/analysis/jobs','/sensors'],data:['/data/backups','/sensors'],users:[],settings:['/settings'],audit:['/audit'],
-  topology:[],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],smb:['/smb-observations?limit=1000'],threatintel:[]
+  topology:[],purdue:['/assets'],segmentation:['/sensors'],dns:['/dns-observations?limit=1000'],smb:[],threatintel:[]
 };
 function activeTab(){return document.querySelector('.tab.active')?.dataset.tab||'dashboard'}
 function loadPath(path){if(pendingLoads.has(path))return pendingLoads.get(path);const q=api(path).finally(()=>pendingLoads.delete(path));pendingLoads.set(path,q);return q}
@@ -73,14 +73,16 @@ function setAPIConnection(ok,text=''){
 function markLiveEvent(){connectionState.lastEventAt=Date.now();renderConnectionState()}
 
 function liveToast(event){
+  // Toast popups are intentionally reserved for incident activity. Alerts and
+  // other live events still refresh their views and remain available in the
+  // notification center, but they do not interrupt the operator with a popup.
+  if(!event||!String(event.type||'').startsWith('incident.'))return;
   const stack=document.getElementById('live-toast-stack');if(!stack)return;
-  const quiet=new Set(['stream.ready','sensor.health','telemetry.updated','asset-risk.changed','incidents.changed']);
-  if(quiet.has(event.type))return;
   const item=document.createElement('button');item.type='button';item.className='live-toast';
   const sev=String(event.severity||'info').toLowerCase();item.dataset.severity=sev;
-  const title=event.type==='alert.created'?'New alert':event.type==='incident.updated'?'Incident updated':event.type==='incident.comment'?'Incident comment':event.type==='discovery.completed'?'Discovery finished':event.type==='sensor.registered'?'Sensor enrolled':'Live update';
+  const title=event.type==='incident.comment'?'Incident comment':'Incident updated';
   item.innerHTML=`<strong>${esc(title)}</strong><span>${esc(event.message||event.type)}</span><small>${esc(event.sensor_id||event.entity_id||'Central')}</small>`;
-  item.onclick=()=>{if(event.type.startsWith('incident'))document.querySelector('[data-tab="incidents"]')?.click();else if(event.type==='alert.created')document.querySelector('[data-tab="alerts"]')?.click();else if(event.type==='discovery.completed')document.querySelector('[data-tab="assets"]')?.click();item.remove()};
+  item.onclick=()=>{document.querySelector('[data-tab="incidents"]')?.click();item.remove()};
   stack.prepend(item);while(stack.children.length>5)stack.lastElementChild.remove();setTimeout(()=>item.remove(),8000);
 }
 function liveEventDomains(type){

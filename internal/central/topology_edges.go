@@ -343,22 +343,6 @@ func upsertTopologyNodes(ctx context.Context, x execer, sensorID string, nodes [
 				sensorID, identity, ip, n.MAC, n.Hostname, n.Vendor, n.IsOT, protocols, n.Confirmed, n.Score, n.VLANID, n.PacketCount, fs, ls); err != nil {
 				return err
 			}
-			// Promote provisional ip:<addr> operator state once this snapshot proves
-			// an unambiguous MAC owner. Existing MAC-owned state wins on collision.
-			if !conflict && strings.HasPrefix(identity, "mac:") {
-				oldIdentity := canonicalAssetIdentity("", ip)
-				for _, table := range []string{"asset_context", "asset_security_status", "asset_risk_exceptions", "asset_recon_profile"} {
-					q := fmt.Sprintf("UPDATE %s SET asset_identity=$3 WHERE sensor_id=$1 AND asset_identity=$2 AND NOT EXISTS (SELECT 1 FROM %s x WHERE x.sensor_id=$1 AND x.asset_identity=$3)", table, table)
-					if _, err := x.ExecContext(ctx, q, sensorID, oldIdentity, identity); err != nil {
-						return err
-					}
-					q = fmt.Sprintf("DELETE FROM %s WHERE sensor_id=$1 AND asset_identity=$2 AND EXISTS (SELECT 1 FROM %s x WHERE x.sensor_id=$1 AND x.asset_identity=$3)", table, table)
-					if _, err := x.ExecContext(ctx, q, sensorID, oldIdentity, identity); err != nil {
-						return err
-					}
-				}
-			}
-
 			prov := "topology"
 			if n.IPVerifiedByARP {
 				prov = "arp"
@@ -374,6 +358,40 @@ func upsertTopologyNodes(ctx context.Context, x execer, sensorID string, nodes [
 			}
 		}
 	}
+
+	// Promote provisional ip:<addr> operator state in a fixed number of SQL
+	// statements per snapshot, not eight statements per asset. The previous
+	// per-node loop made telemetry ingestion scale linearly in database round
+	// trips and was especially painful on a restored sensor with hundreds of
+	// assets. Only active, unambiguous MAC-backed rows participate.
+	for _, table := range []string{"asset_context", "asset_security_status", "asset_risk_exceptions", "asset_recon_profile"} {
+		// DISTINCT ON picks at most one provisional row for each target MAC
+		// identity. Without this, two historical ip:<addr> rows that now map to
+		// the same multi-address NIC could be updated to the same unique key in
+		// one statement.
+		q := fmt.Sprintf(`WITH candidates AS (
+			SELECT DISTINCT ON (t.sensor_id, 'mac:' || lower(n.mac))
+			       t.ctid AS row_id, 'mac:' || lower(n.mac) AS target_identity
+			FROM %s AS t
+			JOIN topology_nodes AS n ON n.sensor_id=t.sensor_id
+			WHERE t.sensor_id=$1 AND n.active=TRUE AND n.identity_conflict=FALSE AND n.mac<>''
+			  AND t.asset_identity='ip:' || n.ip
+			  AND NOT EXISTS (SELECT 1 FROM %s AS existing WHERE existing.sensor_id=t.sensor_id AND existing.asset_identity='mac:' || lower(n.mac))
+			ORDER BY t.sensor_id, 'mac:' || lower(n.mac), n.last_seen DESC, n.ip
+		)
+		UPDATE %s AS t SET asset_identity=c.target_identity FROM candidates AS c WHERE t.ctid=c.row_id`, table, table, table)
+		if _, err := x.ExecContext(ctx, q, sensorID); err != nil {
+			return err
+		}
+		q = fmt.Sprintf(`DELETE FROM %s AS t USING topology_nodes AS n
+			WHERE t.sensor_id=$1 AND n.sensor_id=t.sensor_id AND n.active=TRUE AND n.identity_conflict=FALSE
+			  AND n.mac<>'' AND t.asset_identity='ip:' || n.ip
+			  AND EXISTS (SELECT 1 FROM %s AS existing WHERE existing.sensor_id=t.sensor_id AND existing.asset_identity='mac:' || lower(n.mac))`, table, table)
+		if _, err := x.ExecContext(ctx, q, sensorID); err != nil {
+			return err
+		}
+	}
+
 	// Complete topology snapshots close only bindings not represented anymore.
 	if _, err := x.ExecContext(ctx, `UPDATE asset_ip_binding_history SET valid_to=$2 WHERE sensor_id=$1 AND valid_to IS NULL AND snapshot_seen_at<$2`, sensorID, snapshotAt); err != nil {
 		return err

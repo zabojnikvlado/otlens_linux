@@ -759,6 +759,28 @@ CREATE TABLE IF NOT EXISTS imported_tags (
  imported_by TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(sensor_id, tag_key)
 );
+-- Operator-managed device category catalogue. Built-in rows preserve the
+-- existing classification vocabulary; custom rows are added from the Device
+-- classification tab and can then be assigned to any asset override.
+CREATE TABLE IF NOT EXISTS asset_categories (
+ name TEXT PRIMARY KEY,
+ built_in BOOLEAN NOT NULL DEFAULT FALSE,
+ created_by TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_categories_name_ci ON asset_categories(lower(name));
+INSERT INTO asset_categories(name,built_in) VALUES
+ ('IT',TRUE),('OT',TRUE),('Workstation',TRUE),('Server',TRUE),
+ ('Engineering Workstation',TRUE),('HMI/SCADA',TRUE),('PLC/RTU',TRUE),
+ ('Historian',TRUE),('Network',TRUE),('Security Appliance',TRUE),
+ ('Virtualization',TRUE),('Storage/NAS',TRUE),('Printer',TRUE),('Mobile',TRUE),
+ ('IoT',TRUE),('Rogue/Unknown',TRUE)
+ON CONFLICT DO NOTHING;
+UPDATE asset_categories SET built_in=TRUE WHERE lower(name) IN (
+ 'it','ot','workstation','server','engineering workstation','hmi/scada','plc/rtu',
+ 'historian','network','security appliance','virtualization','storage/nas','printer',
+ 'mobile','iot','rogue/unknown'
+);
 CREATE TABLE IF NOT EXISTS asset_overrides (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  mac TEXT NOT NULL,
@@ -1068,6 +1090,78 @@ INSERT INTO schema_migrations(version,name) VALUES(14,'asset inventory read perf
 `); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply asset inventory performance migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS asset_categories (
+ name TEXT PRIMARY KEY,
+ built_in BOOLEAN NOT NULL DEFAULT FALSE,
+ created_by TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_categories_name_ci ON asset_categories(lower(name));
+INSERT INTO asset_categories(name,built_in) VALUES
+ ('IT',TRUE),('OT',TRUE),('Workstation',TRUE),('Server',TRUE),
+ ('Engineering Workstation',TRUE),('HMI/SCADA',TRUE),('PLC/RTU',TRUE),
+ ('Historian',TRUE),('Network',TRUE),('Security Appliance',TRUE),
+ ('Virtualization',TRUE),('Storage/NAS',TRUE),('Printer',TRUE),('Mobile',TRUE),
+ ('IoT',TRUE),('Rogue/Unknown',TRUE)
+ON CONFLICT DO NOTHING;
+UPDATE asset_categories SET built_in=TRUE WHERE lower(name) IN (
+ 'it','ot','workstation','server','engineering workstation','hmi/scada','plc/rtu',
+ 'historian','network','security appliance','virtualization','storage/nas','printer',
+ 'mobile','iot','rogue/unknown'
+);
+INSERT INTO schema_migrations(version,name) VALUES(15,'operator-managed device categories') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply device category catalogue migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_smb_observations_time_desc ON smb_observations(observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_smb_observations_client_time ON smb_observations(client_ip,observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_smb_observations_server_time ON smb_observations(server_ip,observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_smb_transport ON flow_observations(bucket_end DESC)
+ WHERE protocol='TCP' AND (src_port=445 OR dst_port=445 OR initiator_port=445 OR responder_port=445);
+INSERT INTO schema_migrations(version,name) VALUES(16,'SMB explorer transport visibility and read performance') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply SMB explorer performance migration: %w", err)
+	}
+	if _, err := db.Exec(`
+ALTER TABLE flow_observations ADD COLUMN IF NOT EXISTS src_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE flow_observations ADD COLUMN IF NOT EXISTS dst_identity TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_time ON flow_observations(bucket_start,bucket_end);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_sensor_time ON flow_observations(sensor_id,bucket_start,bucket_end);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_responder_port ON flow_observations(responder_port,bucket_start);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_dst_port ON flow_observations(dst_port,bucket_start);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_protocol_time ON flow_observations(upper(protocol),bucket_start,bucket_end);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_src_identity_time ON flow_observations(sensor_id,src_identity,bucket_start) WHERE src_identity<>'';
+CREATE INDEX IF NOT EXISTS idx_flow_observations_dst_identity_time ON flow_observations(sensor_id,dst_identity,bucket_start) WHERE dst_identity<>'';
+CREATE INDEX IF NOT EXISTS idx_asset_ip_binding_event_lookup ON asset_ip_binding_history(sensor_id,ip,valid_from DESC,last_observed DESC);
+INSERT INTO schema_migrations(version,name) VALUES(17,'stable identity traffic analytics') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply traffic analytics migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_brin_time ON flow_observations USING BRIN(bucket_start) WITH (pages_per_range=64);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_src_ip_time ON flow_observations(sensor_id,src_ip,bucket_start);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_dst_ip_time ON flow_observations(sensor_id,dst_ip,bucket_start);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_src_port_time ON flow_observations(src_port,bucket_start);
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_initiator_port_time ON flow_observations(initiator_port,bucket_start);
+INSERT INTO schema_migrations(version,name) VALUES(18,'traffic analytics read performance') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply traffic analytics read performance migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_src_identity_global_time ON flow_observations(src_identity,bucket_start) WHERE src_identity<>'';
+CREATE INDEX IF NOT EXISTS idx_flow_observations_analytics_dst_identity_global_time ON flow_observations(dst_identity,bucket_start) WHERE dst_identity<>'';
+CREATE INDEX IF NOT EXISTS idx_asset_ip_binding_identity_time ON asset_ip_binding_history(asset_identity,valid_from,valid_to,ip,sensor_id);
+INSERT INTO schema_migrations(version,name) VALUES(19,'network zone traffic scope correctness') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply network zone traffic scope migration: %w", err)
 	}
 	return &Repository{db: db}, nil
 }
@@ -1569,11 +1663,14 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONF
 		if err := json.Unmarshal(x.Topology, &graph); err != nil {
 			return nil, fmt.Errorf("decode topology: %w", err)
 		}
-		if err := persistFlowObservations(ctx, tx, x.SensorID, x.CapturedAt, graph.Edges); err != nil {
-			return nil, fmt.Errorf("persist flow observations: %w", err)
-		}
+		// Reconcile the authoritative current asset snapshot first so flow
+		// deltas written in this same transaction can be stamped with the
+		// stable MAC-backed identities that own their endpoint IPs now.
 		if err := upsertTopologyNodes(ctx, tx, x.SensorID, graph.Nodes); err != nil {
 			return nil, fmt.Errorf("persist topology nodes: %w", err)
+		}
+		if err := persistFlowObservations(ctx, tx, x.SensorID, x.CapturedAt, graph.Edges); err != nil {
+			return nil, fmt.Errorf("persist flow observations: %w", err)
 		}
 		if err := upsertTopologyEdges(ctx, tx, x.SensorID, aggregateEdges(graph.Edges)); err != nil {
 			return nil, fmt.Errorf("persist topology edges: %w", err)
@@ -1675,6 +1772,30 @@ func (r *Repository) TelemetryFingerprint(ctx context.Context) (map[string]int64
 		out[id] = seq
 	}
 	return out, rows.Err()
+}
+
+// TopologyOperatorFingerprint is a compact revision for operator-owned state
+// that changes how topology nodes are classified. Topology exposes the
+// effective device category, which can change either through an explicit
+// asset_overrides category or through asset_context role/Purdue metadata even
+// when no new sensor telemetry arrives. Both tables are intentionally tiny
+// compared with telemetry JSONB/flow ledgers, so this aggregate is cheap to
+// poll alongside the telemetry sequence fingerprint.
+func (r *Repository) TopologyOperatorFingerprint(ctx context.Context) (string, error) {
+	var fingerprint string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT md5(
+			COALESCE((SELECT string_agg(
+				sensor_id || chr(31) || mac || chr(31) || category || chr(31) || name || chr(31) || updated_at::text,
+				chr(30) ORDER BY sensor_id,mac
+			) FROM asset_overrides),'')
+			|| chr(29) ||
+			COALESCE((SELECT string_agg(
+				sensor_id || chr(31) || asset_identity || chr(31) || asset_role || chr(31) || criticality || chr(31) || zone || chr(31) || COALESCE(purdue_override::text,'') || chr(31) || updated_at::text,
+				chr(30) ORDER BY sensor_id,asset_identity
+			) FROM asset_context),'')
+		)`).Scan(&fingerprint)
+	return fingerprint, err
 }
 
 // TopologyRow is the minimal per-sensor payload the /topology handler
@@ -2303,7 +2424,7 @@ func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (
 		"generated_at":   generatedAt,
 		"scope": []string{
 			"sites", "safe sensor enrollment metadata", "managed rules and assignments", "latest sensor telemetry",
-			"asset identity and operator-owned asset/Purdue policy", "alert history", "managed incidents and incident events/comments", "correlation rules", "report history", "pending SIEM outbox",
+			"asset identity, device category catalogue and operator-owned asset/Purdue policy", "alert history", "managed incidents and incident events/comments", "correlation rules", "report history", "pending SIEM outbox",
 		},
 		"excluded": []string{
 			"user password hashes and sessions", "sensor auth-token hashes", "reconnaissance credentials",
@@ -2333,6 +2454,7 @@ func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (
 		"sensor_telemetry":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
 		"asset_identity_history": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_identity_history ORDER BY sensor_id,asset_identity,last_seen) t`,
 		"asset_context":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_context ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"asset_categories":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_categories ORDER BY built_in DESC,lower(name),name) t`,
 		"asset_overrides":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_overrides ORDER BY sensor_id,mac) t`,
 		"vlan_config":            `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vlan_config ORDER BY sensor_id,vlan_id) t`,
 		"segmentation_settings":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM segmentation_settings ORDER BY sensor_id) t`,

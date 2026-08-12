@@ -18,21 +18,48 @@ func persistDNSObservations(ctx context.Context, tx *sql.Tx, sensorID string, ra
 	if err := json.Unmarshal(raw, &observations); err != nil {
 		return err
 	}
+
+	// Telemetry carries a bounded observation buffer (normally up to 5,000 DNS
+	// rows). Executing one INSERT per observation turned one sensor sync into
+	// thousands of PostgreSQL round trips and could easily exceed the sensor's
+	// telemetry timeout even though heartbeat/sync were healthy. Fold each batch
+	// with a single multi-row INSERT instead. The event-unique index keeps resend
+	// of the sensor's bounded buffer idempotent.
+	const writeBatch = 1000
+	type row struct {
+		o       passivedns.Observation
+		answers []byte
+		cnames  []byte
+	}
+	valid := make([]row, 0, len(observations))
 	for _, o := range observations {
-		if strings.TrimSpace(o.QueryName) == "" {
-			continue
-		}
-		at := o.Timestamp
-		if at.IsZero() {
-			// Never invent a fresh timestamp for an old/malformed observation.
-			// Sensors resend their bounded observation buffer on each sync, so
-			// using NOW() here would manufacture a new DNS event every cycle.
+		if strings.TrimSpace(o.QueryName) == "" || o.Timestamp.IsZero() {
 			continue
 		}
 		answers, _ := json.Marshal(o.Answers)
 		cnames, _ := json.Marshal(o.CNAMEs)
-		_, err := tx.ExecContext(ctx, `INSERT INTO dns_observations(sensor_id,observed_at,client_ip,server_ip,query_name,query_type,transaction_id,conversation_id,direction,response_code,is_response,answer_count,payload_bytes,answers,cnames,ttl) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`, sensorID, at, o.ClientIP, o.ServerIP, strings.ToLower(o.QueryName), o.QueryType, o.TransactionID, o.ConversationID, o.Direction, o.ResponseCode, o.IsResponse, o.AnswerCount, o.PayloadBytes, answers, cnames, o.TTL)
-		if err != nil {
+		valid = append(valid, row{o: o, answers: answers, cnames: cnames})
+	}
+	for start := 0; start < len(valid); start += writeBatch {
+		end := start + writeBatch
+		if end > len(valid) {
+			end = len(valid)
+		}
+		args := make([]interface{}, 0, (end-start)*16)
+		values := make([]string, 0, end-start)
+		for _, item := range valid[start:end] {
+			o := item.o
+			values = append(values, appendSQLTuple(&args,
+				sensorID, o.Timestamp, o.ClientIP, o.ServerIP, strings.ToLower(o.QueryName), o.QueryType,
+				o.TransactionID, o.ConversationID, o.Direction, o.ResponseCode, o.IsResponse, o.AnswerCount,
+				o.PayloadBytes, item.answers, item.cnames, o.TTL,
+			))
+		}
+		if len(values) == 0 {
+			continue
+		}
+		q := `INSERT INTO dns_observations(sensor_id,observed_at,client_ip,server_ip,query_name,query_type,transaction_id,conversation_id,direction,response_code,is_response,answer_count,payload_bytes,answers,cnames,ttl) VALUES ` + strings.Join(values, ",") + ` ON CONFLICT DO NOTHING`
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
 	}
