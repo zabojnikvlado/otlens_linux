@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS incidents (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL DEFAULT '',
+ asset_identity TEXT NOT NULL DEFAULT '',
  title TEXT NOT NULL DEFAULT '',
  severity TEXT NOT NULL DEFAULT 'medium',
  score INTEGER NOT NULL DEFAULT 0,
@@ -35,8 +36,9 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS correlation_rule_id BIGINT;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS correlation_rule_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS mitre_tactics TEXT NOT NULL DEFAULT '';
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS mitre_techniques TEXT NOT NULL DEFAULT '';
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
 DROP INDEX IF EXISTS idx_incidents_open_asset_rule;
-CREATE UNIQUE INDEX idx_incidents_open_asset_rule ON incidents(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained');
+-- Identity unique index is created by migration 13 after legacy rows are backfilled/deduplicated.
 CREATE INDEX IF NOT EXISTS idx_incidents_updated ON incidents(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_incidents_status_score_updated ON incidents(status,score DESC,updated_at DESC);
 CREATE TABLE IF NOT EXISTS incident_events (
@@ -85,6 +87,7 @@ ON CONFLICT(name) DO NOTHING;
 CREATE TABLE IF NOT EXISTS asset_risk (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
+ asset_identity TEXT NOT NULL DEFAULT '',
  score INTEGER NOT NULL DEFAULT 0,
  technical_score INTEGER NOT NULL DEFAULT 0,
  contextual_score INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +99,7 @@ CREATE TABLE IF NOT EXISTS asset_risk (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY(sensor_id,asset_ip)
 );
+ALTER TABLE asset_risk ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
 ALTER TABLE asset_risk ADD COLUMN IF NOT EXISTS technical_score INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE asset_risk ADD COLUMN IF NOT EXISTS contextual_score INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE asset_risk ADD COLUMN IF NOT EXISTS propagated_score INTEGER NOT NULL DEFAULT 0;
@@ -105,12 +109,15 @@ CREATE TABLE IF NOT EXISTS asset_risk_history (
  id BIGSERIAL PRIMARY KEY,
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
+ asset_identity TEXT NOT NULL DEFAULT '',
  score INTEGER NOT NULL,
  level TEXT NOT NULL,
  reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE asset_risk_history ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_asset_risk_history_asset ON asset_risk_history(sensor_id,asset_ip,recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_asset_risk_history_identity ON asset_risk_history(sensor_id,asset_identity,recorded_at DESC);
 CREATE TABLE IF NOT EXISTS asset_risk_exceptions (
  sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
  asset_ip TEXT NOT NULL,
@@ -237,11 +244,11 @@ type CorrelationRule struct {
 }
 
 type correlationCandidate struct {
-	SensorID, IP string
-	Types        []string
-	Severity     string
-	Count        int
-	First, Last  time.Time
+	SensorID, IP, Identity string
+	Types                  []string
+	Severity               string
+	Count                  int
+	First, Last            time.Time
 }
 
 func containsAll(have []string, required []string) bool {
@@ -375,12 +382,12 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			continue
 		}
 		relevantTypes := uniqueStrings(append(append([]string{}, rule.RequiredTypes...), rule.SequenceTypes...))
-		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,ip,string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen)
+		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,(array_agg(ip ORDER BY last_seen DESC))[1],COALESCE(NULLIF(asset_identity,''),'ip:'||ip),string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen)
 			FROM alert_history
 			WHERE ip<>'' AND status IN ('new','confirmed')
 			  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$3
 			  AND (cardinality($4::text[])=0 OR type=ANY($4::text[]))
-			GROUP BY sensor_id,ip HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff, relevantTypes)
+			GROUP BY sensor_id,COALESCE(NULLIF(asset_identity,''),'ip:'||ip) HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff, relevantTypes)
 		if qerr != nil {
 			return qerr
 		}
@@ -388,7 +395,7 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 		for rows.Next() {
 			var c correlationCandidate
 			var types, sevs string
-			if qerr = rows.Scan(&c.SensorID, &c.IP, &types, &sevs, &c.Count, &c.First, &c.Last); qerr != nil {
+			if qerr = rows.Scan(&c.SensorID, &c.IP, &c.Identity, &types, &sevs, &c.Count, &c.First, &c.Last); qerr != nil {
 				rows.Close()
 				return qerr
 			}
@@ -430,7 +437,7 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			var id int64
 			tactics, _ := json.Marshal(rule.MITRETactics)
 			techniques, _ := json.Marshal(rule.MITRETechniques)
-			err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques) VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET title=EXCLUDED.title,severity=CASE WHEN (CASE LOWER(EXCLUDED.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= (CASE LOWER(incidents.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) THEN EXCLUDED.severity ELSE incidents.severity END,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),mitre_tactics=EXCLUDED.mitre_tactics,mitre_techniques=EXCLUDED.mitre_techniques,updated_at=NOW() RETURNING id`, c.SensorID, c.IP, title, sev, score, confidence, summary, c.First, c.Last, rule.ID, rule.Name, string(tactics), string(techniques)).Scan(&id)
+			err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,asset_identity,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques) VALUES($1,$2,$3,$4,$5,$6,$7,'new',$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(sensor_id,asset_identity,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET title=EXCLUDED.title,severity=CASE WHEN (CASE LOWER(EXCLUDED.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= (CASE LOWER(incidents.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) THEN EXCLUDED.severity ELSE incidents.severity END,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),mitre_tactics=EXCLUDED.mitre_tactics,mitre_techniques=EXCLUDED.mitre_techniques,updated_at=NOW() RETURNING id`, c.SensorID, c.IP, c.Identity, title, sev, score, confidence, summary, c.First, c.Last, rule.ID, rule.Name, string(tactics), string(techniques)).Scan(&id)
 			if err != nil {
 				return err
 			}
@@ -441,14 +448,14 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			if _, err = tx.ExecContext(ctx, `INSERT INTO incident_events(incident_id,event_type,source_key,severity,message,event_at,metadata)
 				SELECT $1,'alert',alert_key,severity,message,last_seen,$2::jsonb
 				FROM alert_history
-				WHERE sensor_id=$3 AND ip=$4 AND status IN ('new','confirmed')
+				WHERE sensor_id=$3 AND COALESCE(NULLIF(asset_identity,''),'ip:'||ip)=$4 AND status IN ('new','confirmed')
 				  AND last_seen>NOW()-($5*INTERVAL '1 minute') AND last_seen>$6
 				  AND (cardinality($7::text[])=0 OR type=ANY($7::text[]))
 				ON CONFLICT(incident_id,event_type,source_key) DO UPDATE SET
 				  severity=EXCLUDED.severity,
 				  message=EXCLUDED.message,
 				  event_at=GREATEST(incident_events.event_at,EXCLUDED.event_at),
-				  metadata=EXCLUDED.metadata`, id, string(metadata), c.SensorID, c.IP, rule.WindowMinutes, correlationCutoff, relevantTypes); err != nil {
+				  metadata=EXCLUDED.metadata`, id, string(metadata), c.SensorID, c.Identity, rule.WindowMinutes, correlationCutoff, relevantTypes); err != nil {
 				return err
 			}
 		}
@@ -458,11 +465,11 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 
 func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
 	type candidate struct {
-		sensorID, ip, alertKey, severity, message string
-		count                                     uint64
-		firstSeen, lastSeen                       time.Time
-		score, confidence                         float64
-		evidence                                  []byte
+		sensorID, ip, identity, alertKey, severity, message string
+		count                                               uint64
+		firstSeen, lastSeen                                 time.Time
+		score, confidence                                   float64
+		evidence                                            []byte
 	}
 	var ruleID int64
 	var windowMinutes int
@@ -472,7 +479,7 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 	if windowMinutes < 1 {
 		windowMinutes = 30
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT sensor_id,ip,alert_key,severity,message,count,first_seen,last_seen,
+	rows, err := tx.QueryContext(ctx, `SELECT sensor_id,ip,COALESCE(NULLIF(asset_identity,''),'ip:'||ip),alert_key,severity,message,count,first_seen,last_seen,
 		COALESCE((evidence->>'risk_score')::double precision,85),
 		COALESCE((evidence->>'confidence')::double precision,0.5),evidence
 		FROM alert_history WHERE type='behavior_incident_candidate' AND status<>'approved'
@@ -483,7 +490,7 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 	var candidates []candidate
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.sensorID, &item.ip, &item.alertKey, &item.severity, &item.message, &item.count, &item.firstSeen, &item.lastSeen, &item.score, &item.confidence, &item.evidence); err != nil {
+		if err := rows.Scan(&item.sensorID, &item.ip, &item.identity, &item.alertKey, &item.severity, &item.message, &item.count, &item.firstSeen, &item.lastSeen, &item.score, &item.confidence, &item.evidence); err != nil {
 			rows.Close()
 			return err
 		}
@@ -500,12 +507,12 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 		scoreValue := int(math.Round(math.Max(0, math.Min(100, item.score))))
 		confidenceValue := int(math.Round(math.Max(0, math.Min(1, item.confidence)) * 100))
 		var incidentID int64
-		err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques)
-			VALUES($1,$2,$3,$4,$5,$6,'new',$7,$8,$9,$10,'Network Behavior Analytics','["TA0001"]','[]')
-			ON CONFLICT(sensor_id,asset_ip,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET
+		err = tx.QueryRowContext(ctx, `INSERT INTO incidents(sensor_id,asset_ip,asset_identity,title,severity,score,confidence,status,summary,first_seen,last_seen,correlation_rule_id,correlation_rule_name,mitre_tactics,mitre_techniques)
+			VALUES($1,$2,$3,$4,$5,$6,$7,'new',$8,$9,$10,$11,'Network Behavior Analytics','["TA0001"]','[]')
+			ON CONFLICT(sensor_id,asset_identity,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained') DO UPDATE SET
 				severity=CASE WHEN (CASE LOWER(EXCLUDED.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >= (CASE LOWER(incidents.severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) THEN EXCLUDED.severity ELSE incidents.severity END,score=GREATEST(incidents.score,EXCLUDED.score),confidence=GREATEST(incidents.confidence,EXCLUDED.confidence),
 				summary=EXCLUDED.summary,first_seen=LEAST(incidents.first_seen,EXCLUDED.first_seen),last_seen=GREATEST(incidents.last_seen,EXCLUDED.last_seen),updated_at=NOW()
-			RETURNING id`, item.sensorID, item.ip, "Network behavior incident on "+item.ip, item.severity, scoreValue, confidenceValue, item.message, item.firstSeen, item.lastSeen, ruleID).Scan(&incidentID)
+			RETURNING id`, item.sensorID, item.ip, item.identity, "Network behavior incident on "+item.ip, item.severity, scoreValue, confidenceValue, item.message, item.firstSeen, item.lastSeen, ruleID).Scan(&incidentID)
 		if err != nil {
 			return err
 		}
@@ -562,13 +569,8 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 		technical, contextual, propagated := 0, 0, 0
 		reasons := []string{}
 		recommendations := []string{}
-		aliases := []string{ip}
-		var historicalAliases []string
-		if e := tx.QueryRowContext(ctx, `SELECT COALESCE(ARRAY_AGG(DISTINCT ip ORDER BY ip),ARRAY[]::text[]) FROM asset_identity_history WHERE sensor_id=$1 AND asset_identity=$2`, sensor, identity).Scan(&historicalAliases); e == nil && len(historicalAliases) > 0 {
-			aliases = historicalAliases
-		}
 		var criticalAlerts int
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_history WHERE sensor_id=$1 AND status IN ('new','confirmed') AND severity IN ('critical','high') AND last_seen>=NOW()-INTERVAL '5 minutes' AND (ip=ANY($2::text[]) OR evidence->>'source_ip'=ANY($2::text[]) OR evidence->>'destination_ip'=ANY($2::text[]) OR evidence->>'target_ip'=ANY($2::text[]) OR evidence->>'peer_ip'=ANY($2::text[]) OR evidence->>'controller_ip'=ANY($2::text[]) OR evidence->>'origin_ip'=ANY($2::text[]) OR evidence->>'pivot_ip'=ANY($2::text[]) OR evidence->>'latest_target'=ANY($2::text[]))`, sensor, aliases).Scan(&criticalAlerts)
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_history a WHERE sensor_id=$1 AND status IN ('new','confirmed') AND severity IN ('critical','high') AND last_seen>=NOW()-INTERVAL '5 minutes' AND (a.asset_identity=$2 OR (a.asset_identity='' AND EXISTS (SELECT 1 FROM asset_ip_binding_history b WHERE b.sensor_id=a.sensor_id AND b.asset_identity=$2 AND b.valid_from<=a.last_seen AND (b.valid_to IS NULL OR b.valid_to>=a.first_seen) AND b.ip IN (a.ip,COALESCE(a.evidence->>'source_ip',''),COALESCE(a.evidence->>'destination_ip',''),COALESCE(a.evidence->>'target_ip',''),COALESCE(a.evidence->>'peer_ip',''),COALESCE(a.evidence->>'controller_ip',''),COALESCE(a.evidence->>'origin_ip',''),COALESCE(a.evidence->>'pivot_ip',''),COALESCE(a.evidence->>'latest_target','')))))`, sensor, identity).Scan(&criticalAlerts)
 		if criticalAlerts > 0 {
 			add := cappedAdd(criticalAlerts, alertWeight, 36)
 			technical += add
@@ -643,7 +645,7 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 		// Exposure follows the stable identity across DHCP aliases. Multicast,
 		// unspecified, link-local, loopback and documentation/non-routable ranges
 		// are not counted as Internet exposure merely because they are non-RFC1918.
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM flow_observations WHERE sensor_id=$1 AND bucket_end>NOW()-INTERVAL '7 days' AND ((src_ip=ANY($2::text[]) AND NOT (dst_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.0.0.0/24'::cidr,'192.0.2.0/24'::cidr,'192.168.0.0/16'::cidr,'198.18.0.0/15'::cidr,'198.51.100.0/24'::cidr,'203.0.113.0/24'::cidr,'224.0.0.0/4'::cidr,'240.0.0.0/4'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr,'2001:db8::/32'::cidr]))) OR (dst_ip=ANY($2::text[]) AND NOT (src_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.0.0.0/24'::cidr,'192.0.2.0/24'::cidr,'192.168.0.0/16'::cidr,'198.18.0.0/15'::cidr,'198.51.100.0/24'::cidr,'203.0.113.0/24'::cidr,'224.0.0.0/4'::cidr,'240.0.0.0/4'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr,'2001:db8::/32'::cidr]))))`, sensor, aliases).Scan(&external)
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM flow_observations f WHERE f.sensor_id=$1 AND f.bucket_end>NOW()-INTERVAL '7 days' AND EXISTS (SELECT 1 FROM asset_ip_binding_history b WHERE b.sensor_id=f.sensor_id AND b.asset_identity=$2 AND b.valid_from<=f.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=f.bucket_start) AND ((b.ip=f.src_ip AND NOT (f.dst_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))) OR (b.ip=f.dst_ip AND NOT (f.src_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr])))))`, sensor, identity).Scan(&external)
 		if external > 0 {
 			technical += minInt(exposureWeight, 20)
 			reasons = append(reasons, "external network exposure observed")
@@ -691,19 +693,19 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 		}
 		level := riskLevel(score)
 		var previous int
-		_ = tx.QueryRowContext(ctx, `SELECT score FROM asset_risk_history WHERE sensor_id=$1 AND asset_ip=ANY($2::text[]) ORDER BY recorded_at DESC LIMIT 1`, sensor, aliases).Scan(&previous)
+		_ = tx.QueryRowContext(ctx, `SELECT score FROM asset_risk_history WHERE sensor_id=$1 AND asset_identity=$2 ORDER BY recorded_at DESC LIMIT 1`, sensor, identity).Scan(&previous)
 		trend := "stable"
 		if score >= previous+5 {
 			trend = "increasing"
 		} else if score <= previous-5 {
 			trend = "decreasing"
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO asset_risk(sensor_id,asset_ip,score,technical_score,contextual_score,propagated_score,level,trend,reasons,recommendations,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW()) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET score=EXCLUDED.score,technical_score=EXCLUDED.technical_score,contextual_score=EXCLUDED.contextual_score,propagated_score=EXCLUDED.propagated_score,level=EXCLUDED.level,trend=EXCLUDED.trend,reasons=EXCLUDED.reasons,recommendations=EXCLUDED.recommendations,updated_at=NOW()`, sensor, ip, score, technical, contextual, propagated, level, trend, pqStringArrayJSON(reasons), pqStringArrayJSON(uniqueStrings(recommendations)))
+		_, err = tx.ExecContext(ctx, `INSERT INTO asset_risk(sensor_id,asset_ip,asset_identity,score,technical_score,contextual_score,propagated_score,level,trend,reasons,recommendations,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET asset_identity=EXCLUDED.asset_identity,score=EXCLUDED.score,technical_score=EXCLUDED.technical_score,contextual_score=EXCLUDED.contextual_score,propagated_score=EXCLUDED.propagated_score,level=EXCLUDED.level,trend=EXCLUDED.trend,reasons=EXCLUDED.reasons,recommendations=EXCLUDED.recommendations,updated_at=NOW()`, sensor, ip, identity, score, technical, contextual, propagated, level, trend, pqStringArrayJSON(reasons), pqStringArrayJSON(uniqueStrings(recommendations)))
 		if err != nil {
 			return err
 		}
 		if previous != score {
-			_, _ = tx.ExecContext(ctx, `INSERT INTO asset_risk_history(sensor_id,asset_ip,score,level,reasons) VALUES($1,$2,$3,$4,$5)`, sensor, ip, score, level, pqStringArrayJSON(reasons))
+			_, _ = tx.ExecContext(ctx, `INSERT INTO asset_risk_history(sensor_id,asset_ip,asset_identity,score,level,reasons) VALUES($1,$2,$3,$4,$5,$6)`, sensor, ip, identity, score, level, pqStringArrayJSON(reasons))
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -995,11 +997,11 @@ func (r *Repository) ListAssetRisk(ctx context.Context) ([]AssetRisk, error) {
 	return out, rows.Err()
 }
 func (r *Repository) AssetRiskHistory(ctx context.Context, sensor, ip string) ([]AssetRiskHistoryPoint, error) {
-	aliases, err := r.AssetIPAliases(ctx, sensor, ip)
+	identity, err := r.ResolveAssetIdentity(ctx, sensor, ip)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT score,level,recorded_at FROM asset_risk_history WHERE sensor_id=$1 AND asset_ip=ANY($2::text[]) ORDER BY recorded_at DESC LIMIT 90`, sensor, aliases)
+	rows, err := r.db.QueryContext(ctx, `SELECT score,level,recorded_at FROM asset_risk_history WHERE sensor_id=$1 AND asset_identity=$2 ORDER BY recorded_at DESC LIMIT 90`, sensor, identity)
 	if err != nil {
 		return nil, err
 	}

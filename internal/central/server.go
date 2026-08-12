@@ -540,13 +540,25 @@ func (s *Server) scheduleIncidentRefresh(sensorID string) {
 }
 
 func (s *Server) assets(c *gin.Context) {
-	snapshots, err := s.Repo.Telemetry(c)
+	// The Assets view needs only the topology JSON. Pulling the complete
+	// sensor_telemetry row here used to deserialize alerts, DNS/SMB/UDP,
+	// baseline and rule payloads that this endpoint never reads. On busy
+	// sensors those JSONB columns can dwarf the topology itself and made a
+	// simple inventory tab wait behind unrelated telemetry data.
+	snapshots, err := s.Repo.TelemetryTopology(c)
 	if err != nil {
 		respondInternalError(c, err)
 		return
 	}
 	profiles, _ := s.Repo.AssetReconProfiles(c)
 	identityMeta, _ := s.Repo.AssetIdentityMetadata(c)
+	// Fetch operator context and configured VLAN metadata once for the whole
+	// request. The previous implementation repeated both queries per sensor;
+	// ListVLANConfig was especially expensive because it rebuilt current VLAN
+	// inventory with a window function even though /assets only needs the
+	// configured name/Purdue mapping.
+	contexts, _ := s.Repo.ListAssetContexts(c, "")
+	vlanMeta, _ := s.Repo.AssetVLANMetadata(c)
 	out := make([]map[string]interface{}, 0)
 	for _, snapshot := range snapshots {
 		var graph struct {
@@ -555,14 +567,6 @@ func (s *Server) assets(c *gin.Context) {
 		}
 		if json.Unmarshal(snapshot.Topology, &graph) != nil {
 			continue
-		}
-		contexts, _ := s.Repo.ListAssetContexts(c, snapshot.SensorID)
-		vlanRows, _ := s.Repo.ListVLANConfig(c, snapshot.SensorID)
-		vlanLevels := map[int]*float64{}
-		vlanNames := map[int]string{}
-		for _, v := range vlanRows {
-			vlanLevels[v.VLANID] = v.PurdueLevel
-			vlanNames[v.VLANID] = v.Name
 		}
 		threshold := graph.HoneypotThreshold
 		if threshold <= 0 {
@@ -586,7 +590,7 @@ func (s *Server) assets(c *gin.Context) {
 			}
 			discoveredOT, _ := node["IsOT"].(bool)
 			node["DiscoveredIsOT"] = discoveredOT
-			if ac, ok := contexts[identity]; ok {
+			if ac, ok := contexts[snapshot.SensorID+"\x00"+identity]; ok {
 				node["AssetRole"] = ac.AssetRole
 				node["Criticality"] = ac.Criticality
 				node["Zone"] = ac.Zone
@@ -598,14 +602,14 @@ func (s *Server) assets(c *gin.Context) {
 				}
 			}
 			vlanID, _ := strconv.Atoi(fmt.Sprint(node["VLANID"]))
-			if name := vlanNames[vlanID]; name != "" {
-				node["VLANName"] = name
+			if v, ok := vlanMeta[snapshot.SensorID+"\x00"+strconv.Itoa(vlanID)]; ok && v.Name != "" {
+				node["VLANName"] = v.Name
 			}
-			if ac, ok := contexts[identity]; ok && ac.PurdueOverride != nil {
+			if ac, ok := contexts[snapshot.SensorID+"\x00"+identity]; ok && ac.PurdueOverride != nil {
 				node["PurdueLevel"] = *ac.PurdueOverride
 				node["PurdueSource"] = "asset_override"
-			} else if level := vlanLevels[vlanID]; level != nil {
-				node["PurdueLevel"] = *level
+			} else if v, ok := vlanMeta[snapshot.SensorID+"\x00"+strconv.Itoa(vlanID)]; ok && v.PurdueLevel != nil {
+				node["PurdueLevel"] = *v.PurdueLevel
 				node["PurdueSource"] = "vlan_config"
 			} else {
 				node["PurdueSource"] = "unclassified"
@@ -1889,10 +1893,11 @@ func (s *Server) addIncidentComment(c *gin.Context) {
 }
 
 func (s *Server) assetRisk(c *gin.Context) {
-	if err := s.Repo.RecalculateAssetRisk(c); err != nil {
-		respondInternalError(c, err)
-		return
-	}
+	// Risk is recalculated asynchronously after telemetry ingestion and
+	// synchronously after an analyst changes a risk exception. A read endpoint
+	// must not execute the full per-asset risk engine: that was an N+1 query
+	// storm (several SQL statements per asset) and was the main reason opening
+	// the Assets tab could take seconds. Return the latest materialized state.
 	risks, err := s.Repo.ListAssetRisk(c)
 	if err != nil {
 		respondInternalError(c, err)

@@ -2,6 +2,7 @@ package protocolobs
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zabojnikvlado/otlens_linux/internal/core"
@@ -16,6 +17,7 @@ type Engine struct {
 	observations []Observation
 	exchanges    []any
 	correlator   *Correlator
+	timeouts     atomic.Uint64
 	stop         chan struct{}
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
@@ -37,6 +39,7 @@ func (e *Engine) Reset() {
 	if e.correlator != nil {
 		e.correlator.Reset()
 	}
+	e.timeouts.Store(0)
 }
 
 func (e *Engine) Start() {
@@ -102,6 +105,9 @@ func (e *Engine) publishExchanges(exchanges []any) {
 	for _, exchange := range exchanges {
 		eventType, timestamp := exchangeEvent(exchange)
 		if eventType != "" {
+			if exchangeTimedOut(exchange) {
+				e.timeouts.Add(1)
+			}
 			e.mu.Lock()
 			e.exchanges = append(e.exchanges, exchange)
 			if len(e.exchanges) > maxObservations {
@@ -140,4 +146,30 @@ func (e *Engine) GetExchanges() []any {
 	result := make([]any, len(e.exchanges))
 	copy(result, e.exchanges)
 	return result
+}
+
+// Timeouts returns the cumulative number of completed UDP protocol
+// correlations that ended by timeout. DNS has its own tracker and is added by
+// the sensor when producing the combined UDP telemetry snapshot.
+func (e *Engine) Timeouts() uint64 { return e.timeouts.Load() }
+
+func exchangeTimedOut(value any) bool {
+	switch x := value.(type) {
+	case DHCPExchange:
+		return x.TimedOut
+	case NTPExchange:
+		return x.TimedOut
+	case SNMPExchange:
+		return x.TimedOut
+	case SIPDialog:
+		return x.TimedOut
+	case DTLSHandshake:
+		return x.TimedOut
+	case OpenVPNSession:
+		return x.TimedOut
+	case BitTorrentExchange:
+		return x.TimedOut
+	default:
+		return false
+	}
 }

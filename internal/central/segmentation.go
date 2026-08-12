@@ -127,6 +127,33 @@ type VLANConfig struct {
 	AssetCount  int
 }
 
+// AssetVLANMetadata returns only the Central-managed VLAN name/Purdue mapping
+// needed while rendering the Assets inventory. Unlike ListVLANConfig it does
+// not rebuild observed VLAN membership or asset counts, so it is safe to call
+// on every lightweight inventory refresh.
+func (r *Repository) AssetVLANMetadata(ctx context.Context) (map[string]VLANConfig, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,vlan_id,name,purdue_level FROM vlan_config ORDER BY sensor_id,vlan_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]VLANConfig)
+	for rows.Next() {
+		var sensorID string
+		var v VLANConfig
+		var level sql.NullFloat64
+		if err := rows.Scan(&sensorID, &v.VLANID, &v.Name, &level); err != nil {
+			return nil, err
+		}
+		if level.Valid {
+			x := level.Float64
+			v.PurdueLevel = &x
+		}
+		out[fmt.Sprintf("%s\x00%d", sensorID, v.VLANID)] = v
+	}
+	return out, rows.Err()
+}
+
 // ListVLANConfig returns every VLAN currently observed for a sensor
 // (from topology_nodes, so it includes VLANs that have never been
 // explicitly named/leveled), left-joined with whatever vlan_config

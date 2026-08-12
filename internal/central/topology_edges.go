@@ -3,6 +3,7 @@ package central
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -248,67 +249,134 @@ func (n topologyNodeRecord) Identity() string {
 // physical identities separately, so resetting the IP-indexed current row loses
 // no identity history.
 func upsertTopologyNodes(ctx context.Context, x execer, sensorID string, nodes []topology.Node) error {
-	if _, err := x.ExecContext(ctx, `UPDATE topology_nodes SET active=FALSE WHERE sensor_id=$1`, sensorID); err != nil {
+	if _, err := x.ExecContext(ctx, `UPDATE topology_nodes SET active=FALSE,identity_conflict=FALSE,conflict_macs='' WHERE sensor_id=$1`, sensorID); err != nil {
 		return err
 	}
+	snapshotAt := time.Now().UTC()
+	type candidate struct {
+		node topology.Node
+		ip   string
+	}
+	byIP := make(map[string][]candidate)
 	for _, n := range nodes {
-		if n.IP == "" {
-			continue
+		ips := append([]string(nil), n.IPs...)
+		if len(ips) == 0 && n.IP != "" {
+			ips = []string{n.IP}
 		}
-		protocols := strings.Join(n.Protocols, ",")
-		firstSeen := n.FirstSeen
+		seen := map[string]bool{}
+		for _, ip := range ips {
+			ip = strings.TrimSpace(ip)
+			if ip == "" || seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			byIP[ip] = append(byIP[ip], candidate{node: n, ip: ip})
+		}
+	}
+	for ip, cs := range byIP {
+		// Stable candidate order: ARP/L2-confirmed first, newest observation next,
+		// canonical MAC last. The order is only for deterministic display fields;
+		// a true multi-MAC conflict is never resolved to that display candidate.
+		sort.Slice(cs, func(i, j int) bool {
+			if cs[i].node.IPVerifiedByARP != cs[j].node.IPVerifiedByARP {
+				return cs[i].node.IPVerifiedByARP
+			}
+			if !cs[i].node.LastSeen.Equal(cs[j].node.LastSeen) {
+				return cs[i].node.LastSeen.After(cs[j].node.LastSeen)
+			}
+			return strings.ToLower(cs[i].node.MAC) < strings.ToLower(cs[j].node.MAC)
+		})
+		uniqueMAC := map[string]bool{}
+		macs := []string{}
+		for _, c := range cs {
+			m := strings.ToLower(strings.TrimSpace(c.node.MAC))
+			if m != "" && !uniqueMAC[m] {
+				uniqueMAC[m] = true
+				macs = append(macs, m)
+			}
+		}
+		conflict := len(macs) > 1
+		display := cs[0].node
+		protocols := strings.Join(display.Protocols, ",")
+		firstSeen := display.FirstSeen
 		if firstSeen.IsZero() {
-			firstSeen = time.Now()
+			firstSeen = snapshotAt
 		}
-		lastSeen := n.LastSeen
+		lastSeen := display.LastSeen
 		if lastSeen.IsZero() {
 			lastSeen = firstSeen
 		}
+		displayMAC := display.MAC
+		if conflict {
+			displayMAC = ""
+		}
 		_, err := x.ExecContext(ctx, `
-			INSERT INTO topology_nodes(sensor_id,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen,active)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,TRUE)
-			ON CONFLICT(sensor_id,ip) DO UPDATE SET
-				mac = CASE
-					WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.mac
-					WHEN EXCLUDED.mac<>'' AND (EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.mac='') THEN EXCLUDED.mac
-					ELSE topology_nodes.mac END,
-				hostname = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.hostname WHEN EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.hostname='' THEN EXCLUDED.hostname ELSE topology_nodes.hostname END,
-				vendor = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.vendor WHEN EXCLUDED.last_seen >= topology_nodes.last_seen OR topology_nodes.vendor='' THEN EXCLUDED.vendor ELSE topology_nodes.vendor END,
-				is_ot = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.is_ot ELSE topology_nodes.is_ot OR EXCLUDED.is_ot END,
-				protocols = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) OR EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.protocols ELSE topology_nodes.protocols END,
-				confirmed = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) OR EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.confirmed ELSE topology_nodes.confirmed END,
-				score = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) OR EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.score ELSE topology_nodes.score END,
-				vlan_id = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) OR EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.vlan_id ELSE topology_nodes.vlan_id END,
-				packet_count = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) OR EXCLUDED.last_seen >= topology_nodes.last_seen THEN EXCLUDED.packet_count ELSE topology_nodes.packet_count END,
-				first_seen = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.first_seen ELSE LEAST(topology_nodes.first_seen, EXCLUDED.first_seen) END,
-				last_seen = CASE WHEN topology_nodes.mac<>'' AND EXCLUDED.mac<>'' AND lower(topology_nodes.mac)<>lower(EXCLUDED.mac) THEN EXCLUDED.last_seen ELSE GREATEST(topology_nodes.last_seen, EXCLUDED.last_seen) END,
-				active = TRUE`,
-			sensorID, n.IP, n.MAC, n.Hostname, n.Vendor, n.IsOT, protocols, n.Confirmed, n.Score, n.VLANID, n.PacketCount, firstSeen, lastSeen,
-		)
+			INSERT INTO topology_nodes(sensor_id,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen,active,identity_conflict,conflict_macs)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,TRUE,$14,$15)
+			ON CONFLICT(sensor_id,ip) DO UPDATE SET mac=EXCLUDED.mac,hostname=EXCLUDED.hostname,vendor=EXCLUDED.vendor,is_ot=EXCLUDED.is_ot,
+			protocols=EXCLUDED.protocols,confirmed=EXCLUDED.confirmed,score=EXCLUDED.score,vlan_id=EXCLUDED.vlan_id,packet_count=EXCLUDED.packet_count,
+			first_seen=EXCLUDED.first_seen,last_seen=EXCLUDED.last_seen,active=TRUE,identity_conflict=EXCLUDED.identity_conflict,conflict_macs=EXCLUDED.conflict_macs`,
+			sensorID, ip, displayMAC, display.Hostname, display.Vendor, display.IsOT, protocols, display.Confirmed, display.Score, display.VLANID, display.PacketCount, firstSeen, lastSeen, conflict, strings.Join(macs, ","))
 		if err != nil {
 			return err
 		}
 
-		identity := canonicalAssetIdentity(n.MAC, n.IP)
-		if _, err := x.ExecContext(ctx, `
-			INSERT INTO asset_identity_history(sensor_id,asset_identity,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-			ON CONFLICT(sensor_id,asset_identity,ip) DO UPDATE SET
-				mac = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen OR asset_identity_history.mac='' THEN EXCLUDED.mac ELSE asset_identity_history.mac END,
-				hostname = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen OR asset_identity_history.hostname='' THEN EXCLUDED.hostname ELSE asset_identity_history.hostname END,
-				vendor = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen OR asset_identity_history.vendor='' THEN EXCLUDED.vendor ELSE asset_identity_history.vendor END,
-				is_ot = asset_identity_history.is_ot OR EXCLUDED.is_ot,
-				protocols = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen THEN EXCLUDED.protocols ELSE asset_identity_history.protocols END,
-				confirmed = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen THEN EXCLUDED.confirmed ELSE asset_identity_history.confirmed END,
-				score = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen THEN EXCLUDED.score ELSE asset_identity_history.score END,
-				vlan_id = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen THEN EXCLUDED.vlan_id ELSE asset_identity_history.vlan_id END,
-				packet_count = CASE WHEN EXCLUDED.last_seen >= asset_identity_history.last_seen THEN EXCLUDED.packet_count ELSE asset_identity_history.packet_count END,
-				first_seen = LEAST(asset_identity_history.first_seen, EXCLUDED.first_seen),
-				last_seen = GREATEST(asset_identity_history.last_seen, EXCLUDED.last_seen)`,
-			sensorID, identity, n.IP, n.MAC, n.Hostname, n.Vendor, n.IsOT, protocols, n.Confirmed, n.Score, n.VLANID, n.PacketCount, firstSeen, lastSeen,
-		); err != nil {
-			return err
+		for _, c := range cs {
+			n := c.node
+			identity := canonicalAssetIdentity(n.MAC, ip)
+			protocols := strings.Join(n.Protocols, ",")
+			fs := n.LastSeen // binding start must not inherit the NIC's lifetime FirstSeen
+			if fs.IsZero() {
+				fs = snapshotAt
+			}
+			ls := n.LastSeen
+			if ls.IsZero() {
+				ls = fs
+			}
+			if _, err := x.ExecContext(ctx, `
+				INSERT INTO asset_identity_history(sensor_id,asset_identity,ip,mac,hostname,vendor,is_ot,protocols,confirmed,score,vlan_id,packet_count,first_seen,last_seen)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+				ON CONFLICT(sensor_id,asset_identity,ip) DO UPDATE SET mac=EXCLUDED.mac,hostname=CASE WHEN EXCLUDED.last_seen>=asset_identity_history.last_seen THEN EXCLUDED.hostname ELSE asset_identity_history.hostname END,
+				vendor=CASE WHEN EXCLUDED.last_seen>=asset_identity_history.last_seen THEN EXCLUDED.vendor ELSE asset_identity_history.vendor END,is_ot=asset_identity_history.is_ot OR EXCLUDED.is_ot,
+				protocols=CASE WHEN EXCLUDED.last_seen>=asset_identity_history.last_seen THEN EXCLUDED.protocols ELSE asset_identity_history.protocols END,confirmed=EXCLUDED.confirmed,score=EXCLUDED.score,vlan_id=EXCLUDED.vlan_id,
+				packet_count=GREATEST(asset_identity_history.packet_count,EXCLUDED.packet_count),last_seen=GREATEST(asset_identity_history.last_seen,EXCLUDED.last_seen)`,
+				sensorID, identity, ip, n.MAC, n.Hostname, n.Vendor, n.IsOT, protocols, n.Confirmed, n.Score, n.VLANID, n.PacketCount, fs, ls); err != nil {
+				return err
+			}
+			// Promote provisional ip:<addr> operator state once this snapshot proves
+			// an unambiguous MAC owner. Existing MAC-owned state wins on collision.
+			if !conflict && strings.HasPrefix(identity, "mac:") {
+				oldIdentity := canonicalAssetIdentity("", ip)
+				for _, table := range []string{"asset_context", "asset_security_status", "asset_risk_exceptions", "asset_recon_profile"} {
+					q := fmt.Sprintf("UPDATE %s SET asset_identity=$3 WHERE sensor_id=$1 AND asset_identity=$2 AND NOT EXISTS (SELECT 1 FROM %s x WHERE x.sensor_id=$1 AND x.asset_identity=$3)", table, table)
+					if _, err := x.ExecContext(ctx, q, sensorID, oldIdentity, identity); err != nil {
+						return err
+					}
+					q = fmt.Sprintf("DELETE FROM %s WHERE sensor_id=$1 AND asset_identity=$2 AND EXISTS (SELECT 1 FROM %s x WHERE x.sensor_id=$1 AND x.asset_identity=$3)", table, table)
+					if _, err := x.ExecContext(ctx, q, sensorID, oldIdentity, identity); err != nil {
+						return err
+					}
+				}
+			}
+
+			prov := "topology"
+			if n.IPVerifiedByARP {
+				prov = "arp"
+			}
+			res, err := x.ExecContext(ctx, `UPDATE asset_ip_binding_history SET last_observed=GREATEST(last_observed,$4),snapshot_seen_at=$5,vlan_id=$6,provenance=CASE WHEN $7='arp' THEN 'arp' ELSE provenance END WHERE sensor_id=$1 AND asset_identity=$2 AND ip=$3 AND valid_to IS NULL`, sensorID, identity, ip, ls, snapshotAt, n.VLANID, prov)
+			if err != nil {
+				return err
+			}
+			if rows, _ := res.RowsAffected(); rows == 0 {
+				if _, err := x.ExecContext(ctx, `INSERT INTO asset_ip_binding_history(sensor_id,asset_identity,ip,mac,vlan_id,provenance,valid_from,last_observed,snapshot_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, sensorID, identity, ip, n.MAC, n.VLANID, prov, fs, ls, snapshotAt); err != nil {
+					return err
+				}
+			}
 		}
+	}
+	// Complete topology snapshots close only bindings not represented anymore.
+	if _, err := x.ExecContext(ctx, `UPDATE asset_ip_binding_history SET valid_to=$2 WHERE sensor_id=$1 AND valid_to IS NULL AND snapshot_seen_at<$2`, sensorID, snapshotAt); err != nil {
+		return err
 	}
 	return nil
 }
@@ -318,7 +386,7 @@ func upsertTopologyNodes(ctx context.Context, x execer, sensorID string, nodes [
 // unresolved IP deliberately falls back to an IP identity.
 func (r *Repository) ResolveAssetIdentity(ctx context.Context, sensorID, ip string) (string, error) {
 	var mac string
-	err := r.db.QueryRowContext(ctx, `SELECT COALESCE(mac,'') FROM topology_nodes WHERE sensor_id=$1 AND ip=$2 AND active=TRUE ORDER BY last_seen DESC LIMIT 1`, sensorID, ip).Scan(&mac)
+	err := r.db.QueryRowContext(ctx, `SELECT CASE WHEN identity_conflict THEN '' ELSE COALESCE(mac,'') END FROM topology_nodes WHERE sensor_id=$1 AND ip=$2 AND active=TRUE ORDER BY last_seen DESC LIMIT 1`, sensorID, ip).Scan(&mac)
 	if err == nil {
 		return canonicalAssetIdentity(mac, ip), nil
 	}
@@ -330,6 +398,31 @@ func (r *Repository) ResolveAssetIdentity(ctx context.Context, sensorID, ip stri
 	// only when no active device currently owns that address.
 	var identity string
 	err = r.db.QueryRowContext(ctx, `SELECT asset_identity FROM asset_identity_history WHERE sensor_id=$1 AND ip=$2 ORDER BY last_seen DESC LIMIT 1`, sensorID, ip).Scan(&identity)
+	if err == sql.ErrNoRows {
+		return canonicalAssetIdentity("", ip), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return identity, nil
+}
+
+// ResolveAssetIdentityAt resolves historical evidence against the device that
+// owned the address at event time. It prefers explicit binding episodes and
+// only falls back to the older coarse history for pre-v13 data.
+func (r *Repository) ResolveAssetIdentityAt(ctx context.Context, sensorID, ip string, at time.Time) (string, error) {
+	if at.IsZero() {
+		return r.ResolveAssetIdentity(ctx, sensorID, ip)
+	}
+	var identity string
+	err := r.db.QueryRowContext(ctx, `SELECT asset_identity FROM asset_ip_binding_history WHERE sensor_id=$1 AND ip=$2 AND valid_from<=$3 AND (valid_to IS NULL OR valid_to>=$3) ORDER BY CASE provenance WHEN 'arp' THEN 0 ELSE 1 END,last_observed DESC LIMIT 1`, sensorID, ip, at).Scan(&identity)
+	if err == nil {
+		return identity, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	err = r.db.QueryRowContext(ctx, `SELECT asset_identity FROM asset_identity_history WHERE sensor_id=$1 AND ip=$2 AND first_seen<=$3 AND last_seen>=$3 ORDER BY last_seen DESC LIMIT 1`, sensorID, ip, at).Scan(&identity)
 	if err == sql.ErrNoRows {
 		return canonicalAssetIdentity("", ip), nil
 	}
@@ -506,26 +599,34 @@ type AssetIdentityMeta struct {
 // AssetIdentityMetadata returns identity/lifecycle metadata keyed by sensorID\x00IP.
 func (r *Repository) AssetIdentityMetadata(ctx context.Context) (map[string]AssetIdentityMeta, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		WITH grouped AS (
-			SELECT sensor_id,asset_identity,
-			       MIN(first_seen) AS first_seen,
-			       MAX(last_seen) AS last_seen,
-			       COUNT(DISTINCT ip)::int AS ip_count,
-			       COUNT(*)::int AS source_count,
-			       ARRAY_AGG(DISTINCT ip ORDER BY ip) AS aliases
-			FROM asset_identity_history
-			GROUP BY sensor_id,asset_identity
+		WITH active AS (
+			SELECT n.sensor_id,n.ip,n.mac,n.hostname,n.vendor,n.first_seen,n.last_seen,
+			       CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||n.ip END AS asset_identity
+			FROM topology_nodes n
+			WHERE n.active=TRUE AND COALESCE(n.identity_conflict,FALSE)=FALSE
+		), active_ids AS (
+			SELECT DISTINCT sensor_id,asset_identity FROM active
+		), grouped AS (
+			SELECT a.sensor_id,a.asset_identity,
+			       MIN(h.first_seen) AS first_seen,
+			       MAX(h.last_seen) AS last_seen,
+			       COUNT(DISTINCT h.ip)::int AS ip_count,
+			       COUNT(h.ip)::int AS source_count,
+			       ARRAY_AGG(DISTINCT h.ip ORDER BY h.ip) AS aliases
+			FROM active_ids a
+			JOIN asset_identity_history h ON h.sensor_id=a.sensor_id AND h.asset_identity=a.asset_identity
+			GROUP BY a.sensor_id,a.asset_identity
 		)
-		SELECT n.sensor_id,n.ip,g.asset_identity,g.first_seen,g.last_seen,g.ip_count,g.source_count,g.aliases,
+		SELECT n.sensor_id,n.ip,n.asset_identity,
+		       COALESCE(g.first_seen,n.first_seen),COALESCE(g.last_seen,n.last_seen),
+		       COALESCE(g.ip_count,1),COALESCE(g.source_count,1),COALESCE(g.aliases,ARRAY[n.ip]::text[]),
 		       CASE
 		         WHEN n.mac <> '' THEN 'high'
 		         WHEN n.hostname <> '' OR n.vendor <> '' THEN 'medium'
 		         ELSE 'low'
 		       END AS confidence
-		FROM topology_nodes n
-		JOIN grouped g ON g.sensor_id=n.sensor_id
-		 AND g.asset_identity=CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||n.ip END
-		WHERE n.active=TRUE`)
+		FROM active n
+		LEFT JOIN grouped g ON g.sensor_id=n.sensor_id AND g.asset_identity=n.asset_identity`)
 	if err != nil {
 		return nil, err
 	}

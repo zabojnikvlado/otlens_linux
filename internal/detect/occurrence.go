@@ -123,7 +123,7 @@ func (e *Engine) excludePacketFromLearning(packet core.Packet, reason string) {
 	// because packet learning ran before the detector.
 	e.mutex.Lock()
 	if e.baselineMode == BaselineModeLearning {
-		delete(e.learnedPatterns, baselineKeyForPacket(packet))
+		delete(e.learnedPatterns, e.baselineKeyForPacketLocked(packet))
 	}
 	e.mutex.Unlock()
 	if e.eventBus == nil {

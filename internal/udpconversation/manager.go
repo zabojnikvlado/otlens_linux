@@ -57,11 +57,78 @@ type managerCounters struct {
 	active, created, updated, expired, evicted, dropped, packets, bytes atomic.Uint64
 }
 
+// managerProtocolCounters deliberately uses atomics rather than a shared map
+// mutex. UDP observation is sharded for high packet rates; a global lock on
+// every packet would undo that scalability just to feed dashboard telemetry.
+type managerProtocolCounters struct {
+	dns, dhcp, ntp, snmp, sip, dtls, openvpn, bittorrent, udp atomic.Uint64
+}
+
+func (c *managerProtocolCounters) add(protocol string) {
+	switch protocol {
+	case "dns":
+		c.dns.Add(1)
+	case "dhcp":
+		c.dhcp.Add(1)
+	case "ntp":
+		c.ntp.Add(1)
+	case "snmp":
+		c.snmp.Add(1)
+	case "sip":
+		c.sip.Add(1)
+	case "dtls":
+		c.dtls.Add(1)
+	case "openvpn":
+		c.openvpn.Add(1)
+	case "bittorrent":
+		c.bittorrent.Add(1)
+	default:
+		c.udp.Add(1)
+	}
+}
+
+func (c *managerProtocolCounters) reset() {
+	c.dns.Store(0)
+	c.dhcp.Store(0)
+	c.ntp.Store(0)
+	c.snmp.Store(0)
+	c.sip.Store(0)
+	c.dtls.Store(0)
+	c.openvpn.Store(0)
+	c.bittorrent.Store(0)
+	c.udp.Store(0)
+}
+
+func (c *managerProtocolCounters) snapshot() map[string]uint64 {
+	result := make(map[string]uint64, 9)
+	for protocol, value := range map[string]uint64{
+		"dns":        c.dns.Load(),
+		"dhcp":       c.dhcp.Load(),
+		"ntp":        c.ntp.Load(),
+		"snmp":       c.snmp.Load(),
+		"sip":        c.sip.Load(),
+		"dtls":       c.dtls.Load(),
+		"openvpn":    c.openvpn.Load(),
+		"bittorrent": c.bittorrent.Load(),
+		"udp":        c.udp.Load(),
+	} {
+		if value > 0 {
+			result[protocol] = value
+		}
+	}
+	return result
+}
+
 type Manager struct {
 	shards     [managerShardCount]managerShard
 	shardCount int
 	config     ManagerConfig
 	stats      managerCounters
+	// protocolPackets is intentionally independent of the active conversation
+	// table. Conversations are short-lived (30s by default), while these
+	// counters are cumulative until Reset/restart so Central can report a stable
+	// "top UDP protocol" even between bursts.
+	protocolPackets managerProtocolCounters
 }
 
 func NewManager(maxActive int) *Manager {
@@ -109,6 +176,7 @@ func (m *Manager) Reset() {
 	m.stats.dropped.Store(0)
 	m.stats.packets.Store(0)
 	m.stats.bytes.Store(0)
+	m.protocolPackets.reset()
 }
 
 func (m *Manager) GetOrCreate(key Key) *Conversation {
@@ -198,6 +266,7 @@ func (m *Manager) ObserveWithContext(packet core.Packet) (*Conversation, ParseCo
 	conversation.Protocol = classifyProtocol(packet.SrcPort, packet.DstPort)
 	m.stats.packets.Add(1)
 	m.stats.bytes.Add(uint64(size))
+	m.protocolPackets.add(conversation.Protocol)
 
 	context := m.contextFor(conversation, key, packet, now)
 	context.Direction = direction
@@ -268,6 +337,7 @@ func (m *Manager) Telemetry(now time.Time, unmatchedResponses, requestTimeouts u
 		UDPConversationsEvictedTotal: stats.Evicted,
 		UDPPacketsTotal:              stats.TotalPackets,
 		UDPBytesTotal:                stats.TotalBytes,
+		UDPProtocolPacketsTotal:      m.protocolPackets.snapshot(),
 		UDPUnmatchedResponsesTotal:   unmatchedResponses,
 		UDPRequestTimeoutsTotal:      requestTimeouts,
 		UDPAverageDuration:           averageDuration,

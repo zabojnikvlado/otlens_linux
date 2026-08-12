@@ -154,6 +154,9 @@ type Alert struct {
 	Message  string
 
 	IP string
+	// AssetIdentity is the stable owner of IP when known. It prevents Central
+	// and sensor-side approval/dedup state from following a DHCP-reused address.
+	AssetIdentity string `json:"AssetIdentity,omitempty"`
 
 	// Structured evidence for enriched detections such as threat intelligence.
 	Evidence map[string]interface{} `json:"evidence,omitempty"`

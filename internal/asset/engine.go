@@ -2,6 +2,8 @@ package asset
 
 import (
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,45 @@ type Engine struct {
 	// core.EventHoneypotCleared), not to gate anything in this engine
 	// directly.
 	honeypotThreshold int
+}
+
+func canonicalAssetIP(ip string) string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return ""
+	}
+	a, err := netip.ParseAddr(ip)
+	if err != nil || a.IsUnspecified() || a.IsMulticast() {
+		return ""
+	}
+	return a.Unmap().String()
+}
+
+func upsertAddressBinding(a *Asset, ip string, at time.Time, verified bool, vlan uint16) {
+	if ip == "" {
+		return
+	}
+	for i := range a.Addresses {
+		b := &a.Addresses[i]
+		if b.IP != ip {
+			continue
+		}
+		if b.FirstSeen.IsZero() || at.Before(b.FirstSeen) {
+			b.FirstSeen = at
+		}
+		if b.LastSeen.IsZero() || at.After(b.LastSeen) {
+			b.LastSeen = at
+		}
+		b.VerificationKnown = true
+		if verified {
+			b.VerifiedByL2 = true
+		}
+		if vlan != 0 {
+			b.VLANID = vlan
+		}
+		return
+	}
+	a.Addresses = append(a.Addresses, AddressBinding{IP: ip, FirstSeen: at, LastSeen: at, VerificationKnown: true, VerifiedByL2: verified, VLANID: vlan})
 }
 
 func NewEngine(deceptionScores map[string]int, honeypotThreshold int) *Engine {
@@ -98,6 +139,7 @@ func (e *Engine) Update(
 	vlanID uint16,
 ) {
 
+	ip = canonicalAssetIP(ip)
 	canonical, ok := canonicalMAC(mac)
 	if !ok || isMulticastMAC(canonical) {
 		return
@@ -192,6 +234,24 @@ func (e *Engine) Update(
 	}
 
 	if ip != "" {
+		// Do not let routed Ethernet/IP observations create secondary aliases
+		// after this NIC has an authoritative ARP/NDP identity. Before the first
+		// authoritative claim we keep one provisional path; once L2 proof arrives,
+		// discard other unverified aliases learned from routed traffic.
+		if fromARP {
+			if !e.arpVerified[mac] {
+				kept := asset.Addresses[:0]
+				for _, b := range asset.Addresses {
+					if b.VerifiedByL2 || b.IP == ip {
+						kept = append(kept, b)
+					}
+				}
+				asset.Addresses = kept
+			}
+			upsertAddressBinding(asset, ip, timestamp, true, vlanID)
+		} else if !e.arpVerified[mac] {
+			upsertAddressBinding(asset, ip, timestamp, false, vlanID)
+		}
 
 		if fromARP {
 
@@ -302,6 +362,21 @@ func (e *Engine) Restore(assets []*Asset) {
 		}
 		a.MAC = mac
 		a.ID = mac
+		a.IP = canonicalAssetIP(a.IP)
+		clean := a.Addresses[:0]
+		seen := map[string]bool{}
+		for _, b := range a.Addresses {
+			b.IP = canonicalAssetIP(b.IP)
+			if b.IP == "" || seen[b.IP] {
+				continue
+			}
+			seen[b.IP] = true
+			clean = append(clean, b)
+		}
+		a.Addresses = clean
+		if a.IP != "" && !seen[a.IP] {
+			a.Addresses = append(a.Addresses, AddressBinding{IP: a.IP, FirstSeen: a.FirstSeen, LastSeen: a.LastSeen, VerificationKnown: a.IPVerificationKnown, VerifiedByL2: a.IPVerifiedByARP, VLANID: a.VLANID})
+		}
 
 		// Recompute against the *current* config.Deception.Stations,
 		// not whatever Score happened to be persisted — otherwise a
@@ -657,6 +732,11 @@ func (e *Engine) handle(packet core.Packet) {
 		packet.ARPSrcIP != "" && packet.ARPSrcIP != "0.0.0.0" {
 
 		observations = append(observations, observation{ip: packet.ARPSrcIP, mac: packet.ARPSrcMAC, fromARP: true})
+	}
+
+	// IPv6 Neighbor Discovery is authoritative L2 ownership just like ARP.
+	if packet.NDPSrcMAC != "" && !isMulticastMAC(packet.NDPSrcMAC) && packet.NDPSrcIP != "" && packet.NDPSrcIP != "::" {
+		observations = append(observations, observation{ip: packet.NDPSrcIP, mac: packet.NDPSrcMAC, fromARP: true})
 	}
 
 	// Merge by MAC: prefer an ARP-sourced observation over a non-ARP

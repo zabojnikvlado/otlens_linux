@@ -26,9 +26,10 @@ function behaviorFindingType(item){
   const secondary=signals.filter(kind=>kind!==primary&&behaviorFindingTypeLabels[kind]);
   return {label,signals,secondaryCount:secondary.length};
 }
-function behaviorProfile(sensor,ip){return (behaviorOverview.profiles||[]).find(x=>x.sensor_id===sensor&&x.asset_ip===ip)}
+let behaviorProfileIndexSource=null,behaviorProfileIndex=new Map();
+function behaviorProfile(sensor,ip){const profiles=behaviorOverview?.profiles||[];if(behaviorProfileIndexSource!==profiles){behaviorProfileIndexSource=profiles;behaviorProfileIndex=new Map(profiles.map(x=>[`${x.sensor_id}\x00${x.asset_ip}`,x]))}return behaviorProfileIndex.get(`${sensor}\x00${ip}`)}
 function behaviorState(profile){return profile?.state||((behaviorOverview.learning_complete&&Number(behaviorOverview.coverage)>=99.5)?'healthy':'learning')}
-function behaviorBadge(profile){const state=behaviorState(profile),score=profile?Math.round(Number(profile.health_score||0)):'—';return `<span class="behavior-badge behavior-${esc(state)}" title="${esc(profile?.top_reason||state)}">${esc(score)}${score==='—'?'':' health'}</span>`}
+function behaviorBadge(profile){if(!behaviorOverviewLoaded)return '<span class="behavior-badge behavior-learning" title="Behavior enrichment is loading">…</span>';const state=behaviorState(profile),score=profile?Math.round(Number(profile.health_score||0)):'—';return `<span class="behavior-badge behavior-${esc(state)}" title="${esc(profile?.top_reason||state)}">${esc(score)}${score==='—'?'':' health'}</span>`}
 function renderNetworkBehavior(){
   const overview=behaviorOverview||{},health=Math.max(0,Math.min(100,Number(overview.network_health||0))),readiness=Math.max(0,Math.min(100,Number(overview.learning_readiness||0))),state=overview.state||'learning',hero=document.getElementById('network-behavior-hero');if(!hero)return;
   const barValue=state==='learning'?readiness:health,bar=document.getElementById('network-health-bar');

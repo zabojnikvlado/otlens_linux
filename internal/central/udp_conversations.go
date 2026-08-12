@@ -203,12 +203,41 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 	}
 	totals := map[string]float64{}
 	protocols := map[string]uint64{}
+	protocolPackets := map[string]uint64{}
 	var rttTotal, durationWeighted float64
 	var rttSamples, durationWeight uint64
 	for _, snapshot := range snapshots {
-		var telemetry map[string]float64
+		// RawMessage keeps the endpoint backward compatible with older sensors
+		// that only sent numeric fields while allowing newer sensors to include
+		// nested cumulative protocol counters. Unmarshalling directly into
+		// map[string]float64 would reject the entire snapshot as soon as the
+		// nested field is present.
+		var telemetry map[string]json.RawMessage
 		if json.Unmarshal(snapshot.UDPTelemetry, &telemetry) == nil {
-			for key, value := range telemetry {
+			var activeConversations uint64
+			if raw, ok := telemetry["udp_conversations_active"]; ok {
+				var value float64
+				if json.Unmarshal(raw, &value) == nil && value > 0 {
+					activeConversations = uint64(value)
+				}
+			}
+			for key, raw := range telemetry {
+				if key == "udp_protocol_packets_total" {
+					var values map[string]uint64
+					if json.Unmarshal(raw, &values) == nil {
+						for protocol, packets := range values {
+							protocol = strings.ToLower(strings.TrimSpace(protocol))
+							if protocol != "" {
+								protocolPackets[protocol] += packets
+							}
+						}
+					}
+					continue
+				}
+				var value float64
+				if json.Unmarshal(raw, &value) != nil {
+					continue
+				}
 				switch key {
 				case "udp_average_rtt":
 					// Recomputed below from actual correlated protocol exchanges. The
@@ -216,9 +245,8 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 					// dashboard look like an all-UDP metric when it was not.
 					continue
 				case "udp_average_duration":
-					weight := uint64(telemetry["udp_conversations_active"])
-					durationWeighted += value * float64(weight)
-					durationWeight += weight
+					durationWeighted += value * float64(activeConversations)
+					durationWeight += activeConversations
 				default:
 					totals[key] += value
 				}
@@ -244,12 +272,19 @@ func (s *Server) udpTelemetry(c *gin.Context) {
 	}
 	topProtocol := ""
 	var topCount uint64
-	for protocol, count := range protocols {
-		if count > topCount {
+	topSource := protocolPackets
+	if len(topSource) == 0 {
+		// Compatibility fallback for sensors that predate cumulative protocol
+		// packet counters. This may become empty between bursts, but avoids
+		// breaking mixed-version deployments during rollout.
+		topSource = protocols
+	}
+	for protocol, count := range topSource {
+		if count > topCount || count == topCount && count > 0 && (topProtocol == "" || protocol < topProtocol) {
 			topProtocol, topCount = protocol, count
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"totals": totals, "protocols": protocols, "top_protocol": topProtocol})
+	c.JSON(http.StatusOK, gin.H{"totals": totals, "protocols": protocols, "protocol_packets": protocolPackets, "top_protocol": topProtocol})
 }
 
 func matchUDPConversation(c *gin.Context, conversation udpconversation.Conversation) bool {

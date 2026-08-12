@@ -402,6 +402,20 @@ function renderDashboard(){
   operationalWarningSensors.delete('');
   const healthWarnings=operationalWarningSensors.size;
   document.getElementById('dashboard-pps').textContent=Math.round(totalPPS).toLocaleString();document.getElementById('dashboard-streams').textContent=Math.round(totalStreams).toLocaleString();document.getElementById('dashboard-health-warnings').textContent=healthWarnings;
+  // UDP telemetry is loaded as part of the dashboard domain. Keep these KPI
+  // values wired here (the script actually loaded by index.html) rather than
+  // only in the legacy views/detection.js source fragment.
+  const udp=udpTelemetry?.totals||{},udpRTT=Number(udp.udp_average_rtt||0),topUDP=String(udpTelemetry?.top_protocol||'');
+  const udpActiveEl=document.getElementById('dashboard-udp-active'),udpRTTEl=document.getElementById('dashboard-udp-rtt'),udpTimeoutEl=document.getElementById('dashboard-udp-timeouts'),udpProtocolEl=document.getElementById('dashboard-udp-protocol'),udpPacketEl=document.getElementById('dashboard-udp-packets');
+  if(udpActiveEl)udpActiveEl.textContent=Number(udp.udp_conversations_active||0).toLocaleString();
+  if(udpRTTEl)udpRTTEl.textContent=udpRTT>0?`${udpRTT.toFixed(2)} ms`:'—';
+  if(udpTimeoutEl)udpTimeoutEl.textContent=Number(udp.udp_request_timeouts_total||0).toLocaleString();
+  if(udpProtocolEl)udpProtocolEl.textContent=topUDP?topUDP.toUpperCase():'—';
+  // udp_packets_total is cumulative for the sensor process and therefore
+  // produces a meaningful value immediately after the first dashboard load.
+  // A browser-side delta made the first refresh look like zero even when the
+  // sensor had already observed substantial UDP traffic.
+  if(udpPacketEl)udpPacketEl.textContent=Number(udp.udp_packets_total||0).toLocaleString();
   const profiled=(assets||[]).filter(a=>a.LastProfiledAt||a.ReconHostname||a.ReconVendor||a.ReconOS).length, unknownIdentity=(assets||[]).filter(a=>!(a.Hostname||a.ReconHostname)||!(a.Vendor||a.ReconVendor)||!a.ReconOS).length, reconActive=(reconnaissanceJobs||[]).filter(j=>['queued','running'].includes(j.status)).length;
   const dp=document.getElementById('dashboard-profiled');if(dp)dp.textContent=profiled;const du=document.getElementById('dashboard-unknown-identity');if(du)du.textContent=unknownIdentity;const dj=document.getElementById('dashboard-recon-jobs');if(dj)dj.textContent=reconActive;
 

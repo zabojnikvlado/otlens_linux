@@ -641,7 +641,7 @@ type AssetReconProfile struct {
 }
 
 func (r *Repository) AssetReconProfiles(ctx context.Context) (map[string]AssetReconProfile, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,asset_identity,ip,hostname,vendor,operating_system,model,firmware,serial,ot_identity,services,evidence,last_profiled_at::text FROM asset_recon_profile`)
+	rows, err := r.db.QueryContext(ctx, `SELECT p.sensor_id,p.asset_identity,p.ip,p.hostname,p.vendor,p.operating_system,p.model,p.firmware,p.serial,p.ot_identity,p.services,p.evidence,p.last_profiled_at::text FROM asset_recon_profile p WHERE EXISTS (SELECT 1 FROM topology_nodes n WHERE n.sensor_id=p.sensor_id AND n.active=TRUE AND COALESCE(n.identity_conflict,FALSE)=FALSE AND (CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||n.ip END)=p.asset_identity)`)
 	if err != nil {
 		return nil, err
 	}

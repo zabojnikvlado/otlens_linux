@@ -20,16 +20,17 @@ func alertIsActive(status string, lastSeen, now time.Time) bool {
 // it and doesn't otherwise depend on the sensor's detection engine
 // package.
 type telemetryAlert struct {
-	ID        string                 `json:"ID"`
-	Type      string                 `json:"Type"`
-	Severity  string                 `json:"Severity"`
-	Message   string                 `json:"Message"`
-	IP        string                 `json:"IP"`
-	FirstSeen time.Time              `json:"FirstSeen"`
-	LastSeen  time.Time              `json:"LastSeen"`
-	Count     uint64                 `json:"Count"`
-	Status    string                 `json:"Status"`
-	Evidence  map[string]interface{} `json:"Evidence,omitempty"`
+	ID            string                 `json:"ID"`
+	Type          string                 `json:"Type"`
+	Severity      string                 `json:"Severity"`
+	Message       string                 `json:"Message"`
+	IP            string                 `json:"IP"`
+	AssetIdentity string                 `json:"AssetIdentity,omitempty"`
+	FirstSeen     time.Time              `json:"FirstSeen"`
+	LastSeen      time.Time              `json:"LastSeen"`
+	Count         uint64                 `json:"Count"`
+	Status        string                 `json:"Status"`
+	Evidence      map[string]interface{} `json:"Evidence,omitempty"`
 }
 
 // upsertAlertHistory folds this sync's reported alerts into the durable,
@@ -83,15 +84,28 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 		if count == 0 {
 			count = 1
 		}
+		identity := strings.TrimSpace(a.AssetIdentity)
+		if identity == "" && a.Evidence != nil {
+			if v, ok := a.Evidence["asset_identity"].(string); ok {
+				identity = strings.TrimSpace(v)
+			}
+		}
+		if identity == "" && a.IP != "" {
+			_ = x.QueryRowContext(ctx, `SELECT asset_identity FROM asset_ip_binding_history WHERE sensor_id=$1 AND ip=$2 AND valid_from<=$3 AND (valid_to IS NULL OR valid_to>=$3) ORDER BY CASE provenance WHEN 'arp' THEN 0 ELSE 1 END,last_observed DESC LIMIT 1`, sensorID, a.IP, lastSeen).Scan(&identity)
+		}
+		if identity == "" && a.IP != "" {
+			identity = canonicalAssetIdentity("", a.IP)
+		}
 		var wasInserted bool
 		err := x.QueryRowContext(ctx, `
-			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,status,count,first_seen,last_seen,evidence)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,asset_identity,status,count,first_seen,last_seen,evidence)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
 				type = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.type ELSE alert_history.type END,
 				severity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.severity ELSE alert_history.severity END,
 				message = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.message ELSE alert_history.message END,
 				ip = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.ip ELSE alert_history.ip END,
+				asset_identity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen AND EXCLUDED.asset_identity<>'' THEN EXCLUDED.asset_identity ELSE alert_history.asset_identity END,
 				status = CASE
 					WHEN EXCLUDED.last_seen < alert_history.last_seen THEN alert_history.status
 					WHEN alert_history.status='approved' THEN alert_history.status
@@ -103,7 +117,7 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
 				evidence = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.evidence ELSE alert_history.evidence END
 			RETURNING (xmax = 0) AS inserted
-		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, status, count, firstSeen, lastSeen, jsonObject(a.Evidence)).Scan(&wasInserted)
+		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, identity, status, count, firstSeen, lastSeen, jsonObject(a.Evidence)).Scan(&wasInserted)
 		if err != nil {
 			return newlyCreated, err
 		}
@@ -421,43 +435,19 @@ func (r *Repository) ListAssetAlertHistory(ctx context.Context, sensorID, assetI
 	if err != nil {
 		return nil, err
 	}
-	aliases, err := r.AssetIPAliases(ctx, sensorID, identity)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{}, len(aliases)+1)
-	clean := make([]string, 0, len(aliases)+1)
-	for _, value := range append(aliases, assetIP) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		clean = append(clean, value)
-	}
-	if len(clean) == 0 {
-		return []AlertHistoryEntry{}, nil
-	}
-
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT sensor_id,alert_key,type,severity,message,ip,status,approved_by,approved_at,count,first_seen,last_seen,evidence
-		FROM alert_history
+		FROM alert_history a
 		WHERE sensor_id=$1 AND (
-			ip = ANY($2) OR
-			evidence->>'source_ip' = ANY($2) OR
-			evidence->>'destination_ip' = ANY($2) OR
-			evidence->>'target_ip' = ANY($2) OR
-			evidence->>'peer_ip' = ANY($2) OR
-			evidence->>'controller_ip' = ANY($2) OR
-			evidence->>'origin_ip' = ANY($2) OR
-			evidence->>'pivot_ip' = ANY($2) OR
-			evidence->>'latest_target' = ANY($2)
+			a.asset_identity=$2 OR
+			(a.asset_identity='' AND EXISTS (
+				SELECT 1 FROM asset_ip_binding_history b
+				WHERE b.sensor_id=a.sensor_id AND b.asset_identity=$2
+				  AND b.valid_from<=a.last_seen AND (b.valid_to IS NULL OR b.valid_to>=a.first_seen)
+				  AND b.ip IN (a.ip,COALESCE(a.evidence->>'source_ip',''),COALESCE(a.evidence->>'destination_ip',''),COALESCE(a.evidence->>'target_ip',''),COALESCE(a.evidence->>'peer_ip',''),COALESCE(a.evidence->>'controller_ip',''),COALESCE(a.evidence->>'origin_ip',''),COALESCE(a.evidence->>'pivot_ip',''),COALESCE(a.evidence->>'latest_target',''))
+			))
 		)
-		ORDER BY last_seen DESC, alert_key ASC
-		LIMIT $3`, sensorID, clean, limit)
+		ORDER BY last_seen DESC, alert_key ASC LIMIT $3`, sensorID, identity, limit)
 	if err != nil {
 		return nil, err
 	}

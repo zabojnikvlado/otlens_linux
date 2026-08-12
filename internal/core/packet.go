@@ -48,6 +48,12 @@ type Packet struct {
 	ARPDstMAC    string
 	ARPDstIP     string
 
+	// NDP is the IPv6 equivalent of authoritative ARP neighbour identity.
+	// Populated for ICMPv6 Neighbor Solicitation/Advertisement when a link-layer
+	// address option is present.
+	NDPSrcMAC string
+	NDPSrcIP  string
+
 	EtherType  string // e.g. "IPv4", "ARP" — from the Ethernet header
 	L4Protocol string // "TCP", "UDP", or "ARP"
 

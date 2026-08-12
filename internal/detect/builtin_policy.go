@@ -210,6 +210,26 @@ func (e *Engine) raiseBuiltinAlertLocked(ruleID string, alertType AlertType, fal
 			return false
 		}
 	}
+	identity := ""
+	if ip != "" {
+		known, candidate := strings.TrimSpace(e.knownMAC[ip]), strings.TrimSpace(e.candidateMAC[ip])
+		if candidate != "" && !strings.EqualFold(candidate, known) {
+			identity = "conflict:" + strings.TrimSpace(ip) + ":" + strings.ToLower(candidate)
+		} else if known != "" {
+			identity = "mac:" + strings.ToLower(known)
+		} else {
+			identity = "ip:" + strings.TrimSpace(ip)
+		}
+	}
+	if identity != "" {
+		// Approval/suppression belongs to the physical identity, never merely the
+		// current address. A different MAC reusing the IP therefore gets a new key.
+		key += "|asset=" + identity
+		if evidence == nil {
+			evidence = map[string]interface{}{}
+		}
+		evidence["asset_identity"] = identity
+	}
 	if mode == "every" {
 		key = fmt.Sprintf("%s|%d", key, now.UnixNano())
 	}
@@ -219,7 +239,7 @@ func (e *Engine) raiseBuiltinAlertLocked(ruleID string, alertType AlertType, fal
 		return false
 	}
 	if !exists {
-		a = &Alert{ID: key, Type: alertType, Severity: severity, Message: message, IP: ip, FirstSeen: now, Status: AlertStatusNew, Evidence: evidence}
+		a = &Alert{ID: key, Type: alertType, Severity: severity, Message: message, IP: ip, AssetIdentity: identity, FirstSeen: now, Status: AlertStatusNew, Evidence: evidence}
 		e.alerts[key] = a
 		e.logNewAlert(a)
 	} else {
@@ -229,6 +249,9 @@ func (e *Engine) raiseBuiltinAlertLocked(ruleID string, alertType AlertType, fal
 		a.Severity = severity
 		if ip != "" {
 			a.IP = ip
+		}
+		if identity != "" {
+			a.AssetIdentity = identity
 		}
 	}
 

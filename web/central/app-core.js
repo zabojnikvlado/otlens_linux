@@ -6,6 +6,10 @@ const POLL=10000;let graph={Nodes:[],Edges:[]},assets=[],devices=[],vulnerabilit
 let currentUser=null,currentRole=null,permissions={view:[],actions:[]};
 let pollTimer=null,liveRefreshTimer=null;const livePendingTypes=new Set();let activeIncidentID=null,presenceTimer=null;const liveNotifications=[];let liveHistoryLoaded=false,assetContextsData=[],lastCreatedRuleSet=null;
 const connectionState={api:'unknown',apiText:'',live:'idle',liveSince:0,lastEventAt:0};
+// Assets first-paint state: core inventory renders independently from optional
+// security/risk/behavior enrichments so a slow analytical query never leaves
+// the table at an apparent 0 records.
+let assetSecurityLoaded=false,assetRiskLoaded=false,behaviorOverviewLoaded=false;
 // View-scoped data loading. The old UI refreshed every endpoint after nearly
 // every action; these maps keep requests and rendering limited to the active
 // data domain. Concurrent GETs are deduplicated and recently loaded views are
@@ -14,7 +18,7 @@ const DOMAIN_TTL_MS=15000;
 const domainLoadedAt=new Map(),pendingLoads=new Map();
 const DOMAIN_PATHS={
   dashboard:['/baseline','/dashboard/trends','/reports','/sensors','/sensors/metrics','/alerts','/alerts/stats','/asset-risk','/assets','/rules','/tags','/analysis/jobs','/data/backups','/vulnerabilities','/smb-observations?limit=1000','/reconnaissance/jobs','/udp-telemetry','/behavior-overview','/incidents/dashboard'],
-  assets:['/assets','/asset-security-status','/asset-risk','/behavior-overview'],devices:['/devices'],
+  assets:['/assets'],devices:['/devices'],
   vulnerabilities:['/vulnerabilities'],tags:['/tags','/tags/changes','/tags/events','/sensors'],
   sensors:['/sensors','/sensors/metrics'],alerts:['/alerts','/alerts/stats','/dns-observations?limit=1000','/smb-observations?limit=1000','/behavior-overview'],
   nba:['/behavior-findings','/baseline','/behavior-overview','/sensors'],
@@ -48,7 +52,7 @@ async function fetchTopology(){
   return{unchanged:false,value};
 }
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const val=v=>typeof v==='object'?JSON.stringify(v):v??'—';const time=v=>v?new Date(v).toLocaleString():'—';
-async function api(path,opt={}){const isFormData=typeof FormData!=='undefined'&&opt.body instanceof FormData;const h=isFormData?{...(opt.headers||{})}:{'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}if((opt.method||'GET').toUpperCase()!=='GET')domainLoadedAt.clear();if(r.status===204||r.status===205)return null;const body=await r.text();if(!body.trim())return null;const contentType=(r.headers.get('Content-Type')||'').toLowerCase();if(contentType.includes('application/json'))return JSON.parse(body);try{return JSON.parse(body)}catch(_){return body}}
+async function api(path,opt={}){const isFormData=typeof FormData!=='undefined'&&opt.body instanceof FormData;const h=isFormData?{...(opt.headers||{})}:{'Content-Type':'application/json',...(opt.headers||{})};let r;try{r=await fetch('/v1'+path,{...opt,headers:h,credentials:'include'})}catch(cause){const e=new Error('network error');e.kind='network';e.cause=cause;throw e}if(!r.ok){const body=await r.text();const e=new Error(r.status+' '+body);e.status=r.status;e.body=body;try{e.parsed=JSON.parse(body)}catch(_){}throw e}if((opt.method||'GET').toUpperCase()!=='GET'){domainLoadedAt.clear();if(typeof invalidateAssetEnrichment==='function')invalidateAssetEnrichment()}if(r.status===204||r.status===205)return null;const body=await r.text();if(!body.trim())return null;const contentType=(r.headers.get('Content-Type')||'').toLowerCase();if(contentType.includes('application/json'))return JSON.parse(body);try{return JSON.parse(body)}catch(_){return body}}
 function renderConnectionState(){
   const dot=document.getElementById('conn-dot'),text=document.getElementById('conn-text');if(!dot||!text)return;
   let cls='down',label='connecting',title='';
@@ -94,6 +98,7 @@ function liveEventDomains(type){
   return[activeTab()];
 }
 function scheduleLiveRefresh(type){
+  if(type.startsWith('asset-risk')&&typeof invalidateAssetEnrichment==='function')invalidateAssetEnrichment();
   liveEventDomains(type).forEach(d=>livePendingTypes.add(d));
   if(liveRefreshTimer)return;
   liveRefreshTimer=setTimeout(async()=>{const domains=[...livePendingTypes];liveRefreshTimer=null;livePendingTypes.clear();try{await refreshDomains(domains,true)}catch(e){console.error('live refresh',e)}},450);

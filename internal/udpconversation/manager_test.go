@@ -162,6 +162,30 @@ func TestTelemetry(t *testing.T) {
 		telemetry.UDPAverageRTT != 12.5 {
 		t.Fatalf("unexpected telemetry: %#v", telemetry)
 	}
+	if telemetry.UDPProtocolPacketsTotal["dns"] != 1 {
+		t.Fatalf("DNS packet telemetry = %#v", telemetry.UDPProtocolPacketsTotal)
+	}
+}
+
+func TestProtocolTelemetrySurvivesConversationExpiry(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{MaxActive: 10, MaxPacketsPerConversation: 10, IdleTimeout: time.Second})
+	start := time.Unix(20_000, 0).UTC()
+	manager.Observe(udpPacket("10.0.0.1", 53000, "10.0.0.53", 53, 64, start))
+	manager.Observe(udpPacket("10.0.0.2", 40000, "10.0.0.123", 123, 64, start))
+	if expired := manager.ExpireIdle(start.Add(2 * time.Second)); expired != 2 {
+		t.Fatalf("expired = %d, want 2", expired)
+	}
+	telemetry := manager.Telemetry(start.Add(2*time.Second), 0, 0, 0)
+	if telemetry.UDPConversationsActive != 0 {
+		t.Fatalf("active conversations = %d, want 0", telemetry.UDPConversationsActive)
+	}
+	if telemetry.UDPProtocolPacketsTotal["dns"] != 1 || telemetry.UDPProtocolPacketsTotal["ntp"] != 1 {
+		t.Fatalf("protocol counters were lost after expiry: %#v", telemetry.UDPProtocolPacketsTotal)
+	}
+	manager.Reset()
+	if got := manager.Telemetry(start.Add(3*time.Second), 0, 0, 0).UDPProtocolPacketsTotal; len(got) != 0 {
+		t.Fatalf("protocol counters survived reset: %#v", got)
+	}
 }
 
 func BenchmarkObserve(b *testing.B) {

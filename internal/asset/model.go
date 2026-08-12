@@ -5,6 +5,17 @@ package asset
 
 import "time"
 
+// AddressBinding preserves every concurrently/recently observed address for a NIC.
+// IP remains the preferred/current display address for backwards compatibility.
+type AddressBinding struct {
+	IP                string
+	FirstSeen         time.Time
+	LastSeen          time.Time
+	VerificationKnown bool
+	VerifiedByL2      bool
+	VLANID            uint16
+}
+
 // Asset is one discovered network device, keyed internally by MAC
 // address (see Engine.assets) since IP addresses can change (DHCP)
 // but the MAC is comparatively stable for the lifetime of a NIC.
@@ -18,6 +29,10 @@ type Asset struct {
 	// updated on every sighting, not just the first, so a DHCP
 	// renewal doesn't leave this stale. See engine.go's Update.
 	IP string
+
+	// Addresses prevents the old 1-MAC=1-IP model from discarding IPv4/IPv6
+	// aliases and secondary addresses. It is persisted with the asset snapshot.
+	Addresses []AddressBinding `json:"Addresses,omitempty"`
 
 	MAC string
 

@@ -642,6 +642,24 @@ CREATE TABLE IF NOT EXISTS asset_identity_history (
 );
 CREATE INDEX IF NOT EXISTS idx_asset_identity_history_mac ON asset_identity_history(sensor_id,mac,last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_asset_identity_history_ip ON asset_identity_history(sensor_id,ip,last_seen DESC);
+CREATE TABLE IF NOT EXISTS asset_ip_binding_history (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ provenance TEXT NOT NULL DEFAULT 'topology',
+ valid_from TIMESTAMPTZ NOT NULL,
+ valid_to TIMESTAMPTZ,
+ last_observed TIMESTAMPTZ NOT NULL,
+ snapshot_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_ip_binding_open ON asset_ip_binding_history(sensor_id,asset_identity,ip) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_asset_ip_binding_time ON asset_ip_binding_history(sensor_id,ip,valid_from,valid_to);
+ALTER TABLE topology_nodes ADD COLUMN IF NOT EXISTS identity_conflict BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE topology_nodes ADD COLUMN IF NOT EXISTS conflict_macs TEXT NOT NULL DEFAULT '';
+
 -- Durable, one-row-per-alert history, independent of sensor_telemetry.alerts
 -- (which is a single JSONB array per sensor, wholesale-overwritten on every
 -- sync — no per-alert timestamp to prune by). Upserted from that JSONB on
@@ -657,6 +675,7 @@ CREATE TABLE IF NOT EXISTS alert_history (
  message TEXT NOT NULL,
  evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
  ip TEXT NOT NULL DEFAULT '',
+ asset_identity TEXT NOT NULL DEFAULT '',
  status TEXT NOT NULL DEFAULT 'new',
  approved_by TEXT NOT NULL DEFAULT '',
  approved_at TIMESTAMPTZ,
@@ -671,6 +690,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_history_severity_last_seen ON alert_history
 CREATE INDEX IF NOT EXISTS idx_alert_history_sensor_last_seen ON alert_history(sensor_id,last_seen DESC);
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS count BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
 
 -- Written unconditionally by auditMiddleware for every mutating
 -- Management API request, independent of whether SIEM export is
@@ -986,6 +1006,68 @@ CREATE INDEX IF NOT EXISTS idx_asset_recon_history_identity ON asset_recon_histo
 `); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply reconnaissance asset identity migration: %w", err)
+	}
+	if _, err := db.Exec(`
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS asset_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE topology_nodes ADD COLUMN IF NOT EXISTS identity_conflict BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE topology_nodes ADD COLUMN IF NOT EXISTS conflict_macs TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS asset_ip_binding_history (
+ id BIGSERIAL PRIMARY KEY,
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ asset_identity TEXT NOT NULL,
+ ip TEXT NOT NULL,
+ mac TEXT NOT NULL DEFAULT '',
+ vlan_id INTEGER NOT NULL DEFAULT 0,
+ provenance TEXT NOT NULL DEFAULT 'topology',
+ valid_from TIMESTAMPTZ NOT NULL,
+ valid_to TIMESTAMPTZ,
+ last_observed TIMESTAMPTZ NOT NULL,
+ snapshot_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_ip_binding_open ON asset_ip_binding_history(sensor_id,asset_identity,ip) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_asset_ip_binding_time ON asset_ip_binding_history(sensor_id,ip,valid_from,valid_to);
+UPDATE alert_history a SET asset_identity=COALESCE(NULLIF(a.evidence->>'asset_identity',''),(
+ SELECT h.asset_identity FROM asset_identity_history h WHERE h.sensor_id=a.sensor_id AND h.ip=a.ip
+ ORDER BY CASE WHEN a.last_seen BETWEEN h.first_seen AND h.last_seen THEN 0 ELSE 1 END,h.last_seen DESC LIMIT 1
+),'ip:'||a.ip) WHERE asset_identity='';
+UPDATE incidents i SET asset_identity=COALESCE((
+ SELECT h.asset_identity FROM asset_identity_history h WHERE h.sensor_id=i.sensor_id AND h.ip=i.asset_ip
+ ORDER BY CASE WHEN i.last_seen BETWEEN h.first_seen AND h.last_seen THEN 0 ELSE 1 END,h.last_seen DESC LIMIT 1
+),'ip:'||i.asset_ip) WHERE asset_identity='';
+DROP INDEX IF EXISTS idx_incidents_open_asset_rule;
+-- Collapse legacy open incidents that represented one MAC under multiple DHCP
+-- addresses before enforcing identity uniqueness. Preserve their events/comments.
+INSERT INTO incident_events(incident_id,event_type,source_key,severity,message,event_at,metadata)
+SELECT m.keep_id,e.event_type,e.source_key,e.severity,e.message,e.event_at,e.metadata
+FROM (
+ SELECT id,FIRST_VALUE(id) OVER(PARTITION BY sensor_id,asset_identity,COALESCE(correlation_rule_id,0) ORDER BY updated_at DESC,id DESC) keep_id
+ FROM incidents WHERE status IN ('new','investigating','contained')
+) m JOIN incident_events e ON e.incident_id=m.id WHERE m.id<>m.keep_id
+ON CONFLICT(incident_id,event_type,source_key) DO UPDATE SET event_at=GREATEST(incident_events.event_at,EXCLUDED.event_at),severity=EXCLUDED.severity,message=EXCLUDED.message,metadata=EXCLUDED.metadata;
+UPDATE incident_comments c SET incident_id=m.keep_id FROM (
+ SELECT id,FIRST_VALUE(id) OVER(PARTITION BY sensor_id,asset_identity,COALESCE(correlation_rule_id,0) ORDER BY updated_at DESC,id DESC) keep_id
+ FROM incidents WHERE status IN ('new','investigating','contained')
+) m WHERE c.incident_id=m.id AND m.id<>m.keep_id;
+DELETE FROM incidents i USING (
+ SELECT id,FIRST_VALUE(id) OVER(PARTITION BY sensor_id,asset_identity,COALESCE(correlation_rule_id,0) ORDER BY updated_at DESC,id DESC) keep_id
+ FROM incidents WHERE status IN ('new','investigating','contained')
+) m WHERE i.id=m.id AND m.id<>m.keep_id;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_open_identity_rule ON incidents(sensor_id,asset_identity,COALESCE(correlation_rule_id,0)) WHERE status IN ('new','investigating','contained');
+INSERT INTO schema_migrations(version,name) VALUES(13,'event-time asset identity and IP binding episodes') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply event-time asset identity migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_topology_nodes_active_inventory ON topology_nodes(sensor_id,last_seen DESC) WHERE active=TRUE;
+CREATE INDEX IF NOT EXISTS idx_topology_nodes_active_identity ON topology_nodes(sensor_id,(CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END)) WHERE active=TRUE AND identity_conflict=FALSE;
+CREATE INDEX IF NOT EXISTS idx_asset_identity_history_identity_seen ON asset_identity_history(sensor_id,asset_identity,last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_history_behavior_active ON alert_history(type text_pattern_ops,last_seen DESC) WHERE status<>'approved';
+INSERT INTO schema_migrations(version,name) VALUES(14,'asset inventory read performance') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply asset inventory performance migration: %w", err)
 	}
 	return &Repository{db: db}, nil
 }

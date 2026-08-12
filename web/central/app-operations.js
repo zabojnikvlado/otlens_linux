@@ -49,6 +49,33 @@ async function pingIncidentPresence(active=true){if(!activeIncidentID)return;try
 function startIncidentPresence(id){stopIncidentPresence(false);activeIncidentID=id;pingIncidentPresence(true);presenceTimer=setInterval(()=>pingIncidentPresence(true),15000)}
 function stopIncidentPresence(clear=true){if(presenceTimer){clearInterval(presenceTimer);presenceTimer=null}if(activeIncidentID)pingIncidentPresence(false);if(clear)activeIncidentID=null}
 window.addEventListener('beforeunload',()=>{if(activeIncidentID)navigator.sendBeacon?.('/v1/live/presence',new Blob([JSON.stringify({entity:'incident',entity_id:String(activeIncidentID),active:false})],{type:'application/json'}))});
+const ASSET_ENRICHMENT_TTL_MS=30000;
+let assetEnrichmentLoadedAt=0,assetEnrichmentPending=null;
+function invalidateAssetEnrichment(){assetEnrichmentLoadedAt=0}
+async function refreshAssetEnrichment(){
+  if(!canView('assets'))return;
+  if(assetEnrichmentPending)return assetEnrichmentPending;
+  if(assetSecurityLoaded&&assetRiskLoaded&&behaviorOverviewLoaded&&Date.now()-assetEnrichmentLoadedAt<ASSET_ENRICHMENT_TTL_MS)return;
+  const paths=['/asset-security-status','/asset-risk','/behavior-overview'];
+  const run=(async()=>{
+    const settled=await Promise.allSettled(paths.map(loadPath));
+    const ok=i=>settled[i]?.status==='fulfilled';
+    if(ok(0)){assetSecurity=Array.isArray(settled[0].value)?settled[0].value:[];assetSecurityLoaded=true}
+    if(ok(1)){assetRiskData=Array.isArray(settled[1].value)?settled[1].value:[];assetRiskLoaded=true}
+    if(ok(2)&&settled[2].value&&typeof settled[2].value==='object'){behaviorOverview=settled[2].value;behaviorOverviewLoaded=true}
+    assetEnrichmentLoadedAt=Date.now();
+    const failed=paths.filter((_,i)=>settled[i]?.status==='rejected');
+    if(failed.length)console.warn('Asset enrichment refresh failed:',failed);
+    // Enrichment is intentionally second paint. The inventory rows themselves
+    // are already usable; only security/risk/behavior decorations update here.
+    if(activeTab()==='assets'){
+      try{renderAssets();OTDataTables.refresh('table-assets')}catch(error){console.error('asset enrichment render',error)}
+    }
+  })();
+  assetEnrichmentPending=run.finally(()=>{assetEnrichmentPending=null});
+  return assetEnrichmentPending;
+}
+
 async function refreshDomains(domains,force=false){
   domains=[...new Set((domains||[]).filter(Boolean))];
   const now=Date.now();
@@ -67,20 +94,20 @@ async function refreshDomains(domains,force=false){
   const ok=path=>results[path]?.status==='fulfilled';
   const list=path=>ok(path)&&Array.isArray(results[path].value)?results[path].value:[];
   if(topo.status==='fulfilled'&&topo.value&&!topo.value.unchanged){const v=topo.value.value;graph=(v&&Array.isArray(v.Nodes)&&Array.isArray(v.Edges))?v:{Nodes:[],Edges:[],HoneypotThreshold:100}}
-  if(ok('/assets'))assets=list('/assets');if(ok('/asset-security-status'))assetSecurity=list('/asset-security-status');if(ok('/devices'))devices=list('/devices');
+  if(ok('/assets'))assets=list('/assets');if(ok('/asset-security-status')){assetSecurity=list('/asset-security-status');assetSecurityLoaded=true}if(ok('/devices'))devices=list('/devices');
   if(ok('/vulnerabilities')&&results['/vulnerabilities'].value&&typeof results['/vulnerabilities'].value==='object')vulnerabilities=results['/vulnerabilities'].value.Advisories||[];
   if(ok('/tags'))tags=list('/tags');if(ok('/tags/changes'))changes=list('/tags/changes');if(ok('/tags/events'))events=list('/tags/events');
   if(ok('/sensors'))sensors=list('/sensors');if(ok('/sensors/metrics'))sensorMetrics=list('/sensors/metrics');if(ok('/alerts'))alerts=list('/alerts');if(ok('/alerts/stats')&&results['/alerts/stats'].value&&typeof results['/alerts/stats'].value==='object'){alertStats=results['/alerts/stats'].value;if(typeof renderAlertBadge==='function')renderAlertBadge();}
-  if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk'))assetRiskData=list('/asset-risk');
+  if(ok('/correlation-rules'))correlationRules=list('/correlation-rules');if(ok('/asset-risk')){assetRiskData=list('/asset-risk');assetRiskLoaded=true}
   if(ok('/incidents/dashboard')&&results['/incidents/dashboard'].value&&typeof results['/incidents/dashboard'].value==='object')incidentDashboard=results['/incidents/dashboard'].value;
   if(ok('/behavior-findings'))behaviorFindings=list('/behavior-findings');
-  if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object')behaviorOverview=results['/behavior-overview'].value;
+  if(ok('/behavior-overview')&&results['/behavior-overview'].value&&typeof results['/behavior-overview'].value==='object'){behaviorOverview=results['/behavior-overview'].value;behaviorOverviewLoaded=true}
   if(ok('/dns-observations?limit=1000'))dnsObservations=list('/dns-observations?limit=1000');if(ok('/smb-observations?limit=1000'))smbObservations=list('/smb-observations?limit=1000');if(ok('/reports'))reports=list('/reports');
   if(ok('/rules'))rules=list('/rules').map(x=>({...x,ID:x.ID||x.id,Name:x.Name||x.name,Description:x.Description||x.description,Category:x.Category||x.category,Kind:x.Kind||x.kind,Enabled:x.Enabled??x.enabled,Severity:x.Severity||x.severity,SeverityOverride:x.SeverityOverride??x.severity_override??false,Priority:x.Priority||x.priority,Simulation:x.Simulation??x.simulation,SimulationHits:x.SimulationHits||x.simulation_hits||0,LastSimulationHit:x.LastSimulationHit||x.last_simulation_hit,Version:x.Version||x.version,Groups:x.Groups||x.groups,GroupOperator:x.GroupOperator||x.group_operator,Actions:x.Actions||x.actions,Suppression:x.Suppression||x.suppression,Schedule:x.Schedule||x.schedule||'always',Detector:x.Detector||x.detector,MITRETactics:x.MITRETactics||x.mitre_tactics||[],MITRETechniques:x.MITRETechniques||x.mitre_techniques||[],Prerequisites:x.Prerequisites||x.prerequisites||[],Protocols:x.Protocols||x.protocols||[],Parameters:x.Parameters||x.parameters||{},AlertType:x.AlertType||x.alert_type,Field:x.Field||x.field,Value:x.Value||x.value}));
   if(ok('/baseline'))baselines=list('/baseline');if(ok('/analysis/jobs'))analysisJobs=list('/analysis/jobs');if(ok('/data/backups'))backups=list('/data/backups');if(ok('/reconnaissance/jobs'))reconnaissanceJobs=list('/reconnaissance/jobs');
   if(ok('/settings')&&typeof results['/settings'].value==='object')settings=results['/settings'].value;if(ok('/dashboard/trends')&&typeof results['/dashboard/trends'].value==='object')trends=results['/dashboard/trends'].value;if(ok('/audit'))audit=list('/audit');
   try{if(topologyActive&&topo.status==='fulfilled'){if(topologyColourMode==='behavior')topologyNodeSigCache.clear();renderTopology()}}catch(e){console.error('render topology',e)}
-  if(due.includes('assets')){try{renderAssets()}catch(e){console.error(e)}}if(due.includes('devices'))try{renderDevices()}catch(e){console.error(e)}if(due.includes('vulnerabilities'))try{renderVulnerabilities()}catch(e){console.error(e)}
+  if(due.includes('assets')){try{renderAssets()}catch(e){console.error(e)}void refreshAssetEnrichment()}if(due.includes('devices'))try{renderDevices()}catch(e){console.error(e)}if(due.includes('vulnerabilities'))try{renderVulnerabilities()}catch(e){console.error(e)}
   if(due.includes('tags'))try{renderTags()}catch(e){console.error(e)}if(due.includes('sensors'))try{renderSensors()}catch(e){console.error(e)}if(due.includes('alerts')){try{await refreshAlertSearch();renderDNS();renderSMB()}catch(e){console.error(e)}}
   if(due.includes('incidents')){try{renderCorrelationRules();await refreshIncidentSearch(false)}catch(e){console.error(e)}}if(due.includes('reports'))try{renderReports()}catch(e){console.error(e)}if(due.includes('rules'))try{renderRules()}catch(e){console.error(e)}
   if(due.includes('nba'))try{renderBehaviorFindings()}catch(e){console.error(e)}

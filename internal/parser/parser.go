@@ -39,6 +39,7 @@ func Parse(frame core.RawFrame) core.Packet {
 	parseTCP(pkt, &packet)
 	parseUDP(pkt, &packet)
 	parseARP(pkt, &packet)
+	parseNDP(frame.Data, &packet)
 
 	return packet
 }

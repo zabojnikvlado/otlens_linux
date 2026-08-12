@@ -459,11 +459,20 @@ func (e *Engine) startARPWatch(bus *core.EventBus) {
 
 			packet, ok := event.Data.(core.Packet)
 
-			if !ok || packet.L4Protocol != "ARP" {
+			if !ok || (packet.L4Protocol != "ARP" && packet.NDPSrcIP == "") {
 				continue
 			}
 
-			e.handleARP(packet)
+			if packet.L4Protocol == "ARP" {
+				e.handleARP(packet)
+				continue
+			}
+			// Feed authoritative IPv6 Neighbor Discovery through the same guarded
+			// identity-change state machine as ARP.
+			claim := packet
+			claim.ARPSrcIP = packet.NDPSrcIP
+			claim.ARPSrcMAC = packet.NDPSrcMAC
+			e.handleARP(claim)
 
 		}
 
@@ -556,7 +565,11 @@ func (e *Engine) ApproveAlert(id string) bool {
 	// after an analyst explicitly approves it. Older builds silently learned it
 	// on first sight, which could normalize malicious traffic.
 	if alert.Type == AlertNewCommunication {
-		e.learnedPatterns[alert.ID] = true
+		baselineKey := evidenceString(evidence, "baseline_key")
+		if baselineKey == "" {
+			baselineKey = alert.ID
+		}
+		e.learnedPatterns[baselineKey] = true
 	}
 	// ARP identity changes are never auto-promoted by packet repetition. An
 	// explicit analyst approval is the trust transition.

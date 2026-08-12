@@ -67,7 +67,7 @@ func (e *Engine) handleBaseline(packet core.Packet) {
 
 	var key string
 	if hasIPEndpoints {
-		key = baselineKeyForPacket(packet)
+		key = e.baselineKeyForPacketLocked(packet)
 		if e.baselineMode == BaselineModeLearning && !e.learnedPatterns[key] {
 			e.learnedPatterns[key] = true
 			e.patternCreatedAt = append(e.patternCreatedAt, now)
@@ -315,7 +315,7 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 	}
 	service := packet.DstPort
 	message := fmt.Sprintf("New %s communication: %s:%d <-> %s:%d (not seen during trusted baseline)", packet.L4Protocol, packet.SrcIP, packet.SrcPort, packet.DstIP, packet.DstPort)
-	evidence := map[string]interface{}{"source_ip": packet.SrcIP, "destination_ip": packet.DstIP, "source_port": packet.SrcPort, "destination_port": packet.DstPort, "protocol": packet.L4Protocol, "service_port": service}
+	evidence := map[string]interface{}{"baseline_key": key, "source_ip": packet.SrcIP, "destination_ip": packet.DstIP, "source_port": packet.SrcPort, "destination_port": packet.DstPort, "protocol": packet.L4Protocol, "service_port": service}
 	e.raiseBuiltinAlertLocked(string(AlertNewCommunication), AlertNewCommunication, "medium", key, message, packet.SrcIP, evidence, now, alertEpisodeGap)
 }
 
@@ -334,7 +334,7 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 // negotiation — it can occasionally misidentify the service port for
 // unusual setups, which is acceptable for a baseline signal but not
 // something to build hard enforcement on.
-func baselineKeyForPacket(packet core.Packet) string {
+func (e *Engine) baselineKeyForPacketLocked(packet core.Packet) string {
 	service := packet.SrcPort
 	flags := strings.ToUpper(packet.TCPFlags)
 	if strings.EqualFold(packet.L4Protocol, "tcp") && strings.Contains(flags, "SYN") {
@@ -348,7 +348,25 @@ func baselineKeyForPacket(packet core.Packet) string {
 	} else if packet.DstPort < service {
 		service = packet.DstPort
 	}
-	a, b := packet.SrcIP, packet.DstIP
+	endpoint := func(ip, observedMAC string) string {
+		known := strings.TrimSpace(e.knownMAC[ip])
+		candidate := strings.TrimSpace(e.candidateMAC[ip])
+		observedMAC = strings.TrimSpace(observedMAC)
+		if candidate != "" && !strings.EqualFold(candidate, known) {
+			// During an unresolved duplicate-IP/DHCP replacement, never let the
+			// old owner's trusted baseline suppress the new claimant. For directly
+			// observed L2 traffic, distinguish both claimants by their MAC.
+			if observedMAC != "" && (strings.EqualFold(observedMAC, candidate) || strings.EqualFold(observedMAC, known)) {
+				return "mac:" + strings.ToLower(observedMAC)
+			}
+			return "conflict:" + strings.TrimSpace(ip)
+		}
+		if known != "" {
+			return "mac:" + strings.ToLower(known)
+		}
+		return "ip:" + strings.TrimSpace(ip)
+	}
+	a, b := endpoint(packet.SrcIP, packet.SrcMAC), endpoint(packet.DstIP, packet.DstMAC)
 	if a > b {
 		a, b = b, a
 	}

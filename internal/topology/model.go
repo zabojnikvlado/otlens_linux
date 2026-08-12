@@ -7,10 +7,12 @@ import "time"
 type Node struct {
 	ID string // MAC address — same identity asset.Engine uses
 
-	IP       string
-	MAC      string
-	Hostname string
-	Vendor   string // from internal/oui, "" if unknown
+	IP              string
+	IPs             []string `json:"IPs,omitempty"`
+	IPVerifiedByARP bool     `json:"IPVerifiedByARP,omitempty"`
+	MAC             string
+	Hostname        string
+	Vendor          string // from internal/oui, "" if unknown
 
 	// IsOT is true if this device has been observed speaking a
 	// recognized OT/ICS protocol (Modbus, S7comm) — see Classify.

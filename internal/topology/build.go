@@ -74,20 +74,48 @@ func Build(
 
 	for _, a := range assets {
 
-		scoreByIP[a.IP] = a.Score
+		ips := make([]string, 0, len(a.Addresses)+1)
+		seenIP := map[string]bool{}
+		if a.IP != "" {
+			ips = append(ips, a.IP)
+			seenIP[a.IP] = true
+		}
+		for _, b := range a.Addresses {
+			if b.IP != "" && !seenIP[b.IP] {
+				ips = append(ips, b.IP)
+				seenIP[b.IP] = true
+			}
+		}
+		assetOT := false
+		protoSet := map[string]bool{}
+		for _, ip := range ips {
+			scoreByIP[ip] = a.Score
+			if isOT[ip] {
+				assetOT = true
+			}
+			for _, pr := range protocols[ip] {
+				protoSet[pr] = true
+			}
+		}
+		assetProtocols := make([]string, 0, len(protoSet))
+		for pr := range protoSet {
+			assetProtocols = append(assetProtocols, pr)
+		}
 
 		nodes = append(
 			nodes,
 			Node{
 				ID: a.MAC,
 
-				IP:       a.IP,
-				MAC:      a.MAC,
-				Hostname: a.Hostname,
-				Vendor:   oui.Lookup(a.MAC),
+				IP:              a.IP,
+				IPs:             ips,
+				IPVerifiedByARP: a.IPVerifiedByARP,
+				MAC:             a.MAC,
+				Hostname:        a.Hostname,
+				Vendor:          oui.Lookup(a.MAC),
 
-				IsOT:      isOT[a.IP],
-				Protocols: protocols[a.IP],
+				IsOT:      assetOT,
+				Protocols: assetProtocols,
 
 				Confirmed: a.Confirmed,
 				Score:     a.Score,

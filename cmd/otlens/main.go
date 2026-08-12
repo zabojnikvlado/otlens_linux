@@ -566,7 +566,13 @@ func main() {
 					return management.TelemetrySnapshot{}, err
 				}
 				dnsStats := application.DNSEngine.Stats()
-				udpTelemetryJSON, err := marshal(application.UDPConversations.Manager().Telemetry(time.Now(), dnsStats.DNSUnmatchedResponses, dnsStats.DNSTimeouts, dnsStats.DNSAverageRTT))
+				// UDP request timeout telemetry covers both the dedicated DNS tracker
+				// and every protocol handled by ProtocolEngine (DHCP/NTP/SNMP/SIP/
+				// DTLS/OpenVPN/BitTorrent). Keeping the cumulative count on the
+				// sensor avoids making the dashboard depend on whether a timed-out
+				// exchange is still present in the bounded exchange history.
+				udpTimeouts := dnsStats.DNSTimeouts + application.ProtocolEngine.Timeouts()
+				udpTelemetryJSON, err := marshal(application.UDPConversations.Manager().Telemetry(time.Now(), dnsStats.DNSUnmatchedResponses, udpTimeouts, dnsStats.DNSAverageRTT))
 				if err != nil {
 					return management.TelemetrySnapshot{}, err
 				}
