@@ -1163,6 +1163,61 @@ INSERT INTO schema_migrations(version,name) VALUES(19,'network zone traffic scop
 		db.Close()
 		return nil, fmt.Errorf("apply network zone traffic scope migration: %w", err)
 	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_alert_history_risk_identity ON alert_history(sensor_id,asset_identity,last_seen DESC) WHERE status IN ('new','confirmed') AND severity IN ('critical','high');
+CREATE INDEX IF NOT EXISTS idx_vulnerability_findings_risk_identity ON vulnerability_findings(sensor_id,asset_identity,status) WHERE status IN ('confirmed','accepted_risk','potential');
+CREATE INDEX IF NOT EXISTS idx_vulnerability_findings_risk_ip ON vulnerability_findings(sensor_id,asset_ip,status) WHERE asset_identity='' AND status IN ('confirmed','accepted_risk','potential');
+CREATE INDEX IF NOT EXISTS idx_topology_edges_risk_recent ON topology_edges(sensor_id,last_seen DESC,src_ip,dst_ip);
+CREATE INDEX IF NOT EXISTS idx_asset_risk_identity_current ON asset_risk(sensor_id,asset_identity,updated_at DESC);
+INSERT INTO schema_migrations(version,name) VALUES(20,'set based asset risk refresh') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply asset risk refresh performance migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_alert_history_correlation_active_identity_time
+  ON alert_history(sensor_id,(COALESCE(NULLIF(asset_identity,''),'ip:'||ip)),last_seen DESC,type)
+  INCLUDE (ip,severity,first_seen,alert_key)
+  WHERE status IN ('new','confirmed');
+CREATE INDEX IF NOT EXISTS idx_alert_history_behavior_candidate_time
+  ON alert_history(last_seen DESC,sensor_id,(COALESCE(NULLIF(asset_identity,''),'ip:'||ip)))
+  WHERE type='behavior_incident_candidate' AND status<>'approved';
+INSERT INTO central_runtime_state(key,value,updated_at)
+  VALUES('incident_correlation_watermark',COALESCE((SELECT MAX(last_seen)-INTERVAL '5 minutes' FROM alert_history),NOW()-INTERVAL '5 minutes')::text,NOW())
+  ON CONFLICT(key) DO NOTHING;
+INSERT INTO schema_migrations(version,name) VALUES(21,'incremental incident correlation') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply incremental incident correlation migration: %w", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS rule_occurrence_buckets (
+ sensor_id TEXT NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+ alert_type TEXT NOT NULL,
+ bucket_start TIMESTAMPTZ NOT NULL,
+ occurrences BIGINT NOT NULL DEFAULT 0,
+ new_findings BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(sensor_id,alert_type,bucket_start)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_occurrence_buckets_time ON rule_occurrence_buckets(bucket_start DESC,sensor_id,alert_type);
+CREATE INDEX IF NOT EXISTS idx_alert_history_rule_runtime ON alert_history(sensor_id,type,last_seen DESC,status) INCLUDE (count);
+-- Seed a conservative 24h floor from retained alert rows. If a finding started
+-- inside the window its complete Count is known to belong to the window; for
+-- older findings seen recently we only know that at least one recent episode
+-- occurred. Future telemetry count deltas make the buckets exact going forward.
+INSERT INTO rule_occurrence_buckets(sensor_id,alert_type,bucket_start,occurrences,new_findings)
+SELECT sensor_id,type,date_trunc('minute',last_seen),
+       SUM(CASE WHEN first_seen >= NOW()-INTERVAL '24 hours' THEN count ELSE 1 END),
+       SUM(CASE WHEN first_seen >= NOW()-INTERVAL '24 hours' THEN 1 ELSE 0 END)
+FROM alert_history
+WHERE last_seen >= NOW()-INTERVAL '24 hours'
+GROUP BY sensor_id,type,date_trunc('minute',last_seen)
+ON CONFLICT(sensor_id,alert_type,bucket_start) DO NOTHING;
+INSERT INTO schema_migrations(version,name) VALUES(22,'rule runtime occurrence metrics') ON CONFLICT(version) DO NOTHING;
+`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply rule runtime occurrence metrics migration: %w", err)
+	}
 	return &Repository{db: db}, nil
 }
 func (r *Repository) Close() error { return r.db.Close() }
@@ -1556,6 +1611,12 @@ func (e *TelemetrySequenceConflictError) Error() string {
 }
 
 func (r *Repository) PutTelemetry(ctx context.Context, x management.TelemetrySnapshot) ([]AlertHistoryEntry, error) {
+	// The HTTP checksum has already been verified against the original wire
+	// payload. Sanitize only the database copy so packet-derived U+0000 bytes
+	// cannot make PostgreSQL reject an otherwise valid telemetry batch.
+	if _, err := sanitizeTelemetryJSONForPostgres(&x); err != nil {
+		return nil, fmt.Errorf("sanitize telemetry for PostgreSQL: %w", err)
+	}
 	if x.CapturedAt.IsZero() {
 		x.CapturedAt = time.Now().UTC()
 	}
@@ -2161,7 +2222,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 			_, err = tx.ExecContext(ctx, `UPDATE sensors SET last_data_received_at=NULL,last_sync_success_at=NULL,pending_records=0,sync_failures=0,last_sync_error='',sync_sequence=0,sync_status='reset'`)
 		}
 	case "alerts":
-		_, err = tx.ExecContext(ctx, `TRUNCATE alert_history, asset_risk, asset_risk_history RESTART IDENTITY`)
+		_, err = tx.ExecContext(ctx, `TRUNCATE alert_history, rule_occurrence_buckets, asset_risk, asset_risk_history RESTART IDENTITY`)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `UPDATE sensor_telemetry SET alerts='[]'::jsonb,updated_at=NOW()`)
 		}
@@ -2173,6 +2234,9 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 		_, err = tx.ExecContext(ctx, `TRUNCATE incident_comments, incident_events, incidents, asset_exposures, malware_incidents RESTART IDENTITY`)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `INSERT INTO central_runtime_state(key,value,updated_at) VALUES('incident_correlation_cutoff',NOW()::text,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO central_runtime_state(key,value,updated_at) VALUES('incident_correlation_watermark',NOW()::text,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`)
 		}
 	case "siem":
 		_, err = tx.ExecContext(ctx, `TRUNCATE siem_outbox RESTART IDENTITY`)
@@ -2193,7 +2257,7 @@ func (r *Repository) ResetCentral(ctx context.Context, operation, bootstrapUsern
 			protocol_observations, dns_observations, smb_observations,
 			flow_counters, flow_observations,
 			topology_edges, topology_nodes, asset_identity_history,
-			alert_history, asset_risk, asset_risk_history,
+			alert_history, rule_occurrence_buckets, asset_risk, asset_risk_history,
 			asset_security_status, vulnerability_findings,
 			analysis_jobs, siem_outbox, report_history,
 			sensor_rule_sets, rule_sets, imported_tags
@@ -2449,21 +2513,22 @@ func (r *Repository) CreateCentralBackup(ctx context.Context, id, name string) (
 			       sync_status,pending_records,sync_failures,last_sync_error,sync_sequence,last_seen
 			FROM sensors ORDER BY id
 		) t`,
-		"rule_sets":              `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_sets ORDER BY id) t`,
-		"sensor_rule_sets":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_rule_sets ORDER BY sensor_id) t`,
-		"sensor_telemetry":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
-		"asset_identity_history": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_identity_history ORDER BY sensor_id,asset_identity,last_seen) t`,
-		"asset_context":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_context ORDER BY sensor_id,asset_identity,updated_at) t`,
-		"asset_categories":       `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_categories ORDER BY built_in DESC,lower(name),name) t`,
-		"asset_overrides":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_overrides ORDER BY sensor_id,mac) t`,
-		"vlan_config":            `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vlan_config ORDER BY sensor_id,vlan_id) t`,
-		"segmentation_settings":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM segmentation_settings ORDER BY sensor_id) t`,
-		"asset_security_status":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_security_status ORDER BY sensor_id,asset_identity,updated_at) t`,
-		"asset_risk_exceptions":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_risk_exceptions ORDER BY sensor_id,asset_identity,updated_at) t`,
-		"vulnerability_findings": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vulnerability_findings ORDER BY sensor_id,asset_identity,cve_id) t`,
-		"alert_history":          `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM alert_history ORDER BY sensor_id,alert_key) t`,
-		"incidents":              `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incidents ORDER BY id) t`,
-		"incident_events":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incident_events ORDER BY id) t`,
+		"rule_sets":               `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_sets ORDER BY id) t`,
+		"sensor_rule_sets":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_rule_sets ORDER BY sensor_id) t`,
+		"sensor_telemetry":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM sensor_telemetry ORDER BY sensor_id) t`,
+		"rule_occurrence_buckets": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM rule_occurrence_buckets ORDER BY sensor_id,alert_type,bucket_start) t`,
+		"asset_identity_history":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_identity_history ORDER BY sensor_id,asset_identity,last_seen) t`,
+		"asset_context":           `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_context ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"asset_categories":        `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_categories ORDER BY built_in DESC,lower(name),name) t`,
+		"asset_overrides":         `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_overrides ORDER BY sensor_id,mac) t`,
+		"vlan_config":             `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vlan_config ORDER BY sensor_id,vlan_id) t`,
+		"segmentation_settings":   `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM segmentation_settings ORDER BY sensor_id) t`,
+		"asset_security_status":   `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_security_status ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"asset_risk_exceptions":   `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM asset_risk_exceptions ORDER BY sensor_id,asset_identity,updated_at) t`,
+		"vulnerability_findings":  `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM vulnerability_findings ORDER BY sensor_id,asset_identity,cve_id) t`,
+		"alert_history":           `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM alert_history ORDER BY sensor_id,alert_key) t`,
+		"incidents":               `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incidents ORDER BY id) t`,
+		"incident_events":         `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM incident_events ORDER BY id) t`,
 		"incident_comments": `SELECT COALESCE(jsonb_agg(t),'[]'::jsonb) FROM (
 			SELECT * FROM incident_comments ORDER BY id
 		) t`,

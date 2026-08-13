@@ -44,6 +44,7 @@ var retentionTables = []retentionTable{
 	{"topology_nodes", "last_seen", func(c RetentionConfig) int { return c.TelemetryDays }},
 	{"analysis_jobs", "created_at", func(c RetentionConfig) int { return c.TelemetryDays }},
 	{"alert_history", "last_seen", func(c RetentionConfig) int { return c.AlertsDays }},
+	{"rule_occurrence_buckets", "bucket_start", func(c RetentionConfig) int { return c.AlertsDays }},
 	{"audit_log", "created_at", func(c RetentionConfig) int { return c.AuditDays }},
 }
 

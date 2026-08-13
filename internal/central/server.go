@@ -530,18 +530,28 @@ func (s *Server) scheduleIncidentRefresh(sensorID string) {
 			s.incidentRefresh.mu.Unlock()
 		}()
 
+		incidentStarted := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := s.Repo.SyncCorrelatedIncidents(ctx); err != nil {
-			log.Printf("incident correlation refresh failed: %v", err)
+			log.Printf("incident correlation refresh failed after %s: %v", time.Since(incidentStarted).Round(time.Millisecond), err)
 		} else {
+			duration := time.Since(incidentStarted)
+			if duration > 5*time.Second {
+				log.Printf("incident correlation refresh completed slowly: duration=%s", duration.Round(time.Millisecond))
+			}
 			s.publishLive(LiveEvent{Type: "incidents.changed", SensorID: sensorID, Message: "incident correlation refreshed"})
 		}
 		cancel()
 
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		riskStarted := time.Now()
+		ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 		if err := s.Repo.RecalculateAssetRisk(ctx); err != nil {
-			log.Printf("asset risk refresh failed: %v", err)
+			log.Printf("asset risk refresh failed after %s: %v", time.Since(riskStarted).Round(time.Millisecond), err)
 		} else {
+			duration := time.Since(riskStarted)
+			if duration > 5*time.Second {
+				log.Printf("asset risk refresh completed slowly: duration=%s", duration.Round(time.Millisecond))
+			}
 			s.publishLive(LiveEvent{Type: "asset-risk.changed", SensorID: sensorID, Message: "asset risk recalculated"})
 		}
 		cancel()
@@ -2054,13 +2064,86 @@ func (s *Server) setAssetRiskException(c *gin.Context) {
 	c.JSON(200, gin.H{"updated": true})
 }
 
+func ruleJSONUint64(v interface{}) uint64 {
+	switch x := v.(type) {
+	case float64:
+		if x > 0 {
+			return uint64(x)
+		}
+	case uint64:
+		return x
+	case int:
+		if x > 0 {
+			return uint64(x)
+		}
+	case json.Number:
+		if n, err := strconv.ParseUint(string(x), 10, 64); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func maxRuleMetric(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (s *Server) rules(c *gin.Context) {
-	v, e := s.Repo.Telemetry(c)
-	if e != nil {
-		respondInternalError(c, e)
+	v, err := s.Repo.Telemetry(c)
+	if err != nil {
+		respondInternalError(c, err)
 		return
 	}
-	aggregateRaw(c, v, func(x management.TelemetrySnapshot) json.RawMessage { return x.Rules })
+	metrics, err := s.Repo.RuleRuntimeMetrics(c)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	out := make([]map[string]interface{}, 0)
+	for _, snapshot := range v {
+		var rows []map[string]interface{}
+		if json.Unmarshal(snapshot.Rules, &rows) != nil {
+			continue
+		}
+		for _, row := range rows {
+			row["SensorID"] = snapshot.SensorID
+			alertType, _ := row["alert_type"].(string)
+			if alertType == "" {
+				alertType, _ = row["AlertType"].(string)
+			}
+			rawRetained := ruleJSONUint64(row["RetainedOccurrences"])
+			if rawRetained == 0 {
+				rawRetained = ruleJSONUint64(row["HitCount"])
+			}
+			rawUnique := ruleJSONUint64(row["UniqueFindings"])
+			rawActive := ruleJSONUint64(row["ActiveFindings"])
+			if metric, ok := metrics[ruleRuntimeMetricKey(snapshot.SensorID, alertType)]; ok {
+				row["ActiveFindings"] = maxRuleMetric(metric.ActiveFindings, rawActive)
+				row["Occurrences24h"] = metric.Occurrences24h
+				row["NewFindings24h"] = metric.NewFindings24h
+				row["RetainedOccurrences"] = maxRuleMetric(metric.RetainedOccurrences, rawRetained)
+				row["UniqueFindings"] = maxRuleMetric(metric.UniqueFindings, rawUnique)
+				// HitCount remains as a compatibility alias for older clients, but
+				// the UI no longer labels it simply "Hits".
+				row["HitCount"] = row["RetainedOccurrences"]
+				if !metric.LastHit.IsZero() {
+					row["LastHit"] = metric.LastHit
+				}
+			} else {
+				row["ActiveFindings"] = rawActive
+				row["Occurrences24h"] = uint64(0)
+				row["NewFindings24h"] = uint64(0)
+				row["RetainedOccurrences"] = rawRetained
+				row["UniqueFindings"] = rawUnique
+				row["HitCount"] = rawRetained
+			}
+			out = append(out, row)
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func validateManagementRule(req *management.Rule) error {

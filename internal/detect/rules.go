@@ -95,11 +95,16 @@ type Rule struct {
 
 type RuleView struct {
 	Rule
-	HitCount          uint64    `json:"HitCount"`
-	LastHit           time.Time `json:"LastHit"`
-	LastHitIP         string    `json:"LastHitIP"`
-	SimulationHits    uint64    `json:"SimulationHits"`
-	LastSimulationHit time.Time `json:"LastSimulationHit"`
+	// HitCount is retained for wire compatibility. Central relabels it as
+	// RetainedOccurrences and enriches the rule with durable 24h metrics.
+	HitCount            uint64    `json:"HitCount"`
+	RetainedOccurrences uint64    `json:"RetainedOccurrences"`
+	UniqueFindings      uint64    `json:"UniqueFindings"`
+	ActiveFindings      uint64    `json:"ActiveFindings"`
+	LastHit             time.Time `json:"LastHit"`
+	LastHitIP           string    `json:"LastHitIP"`
+	SimulationHits      uint64    `json:"SimulationHits"`
+	LastSimulationHit   time.Time `json:"LastSimulationHit"`
 }
 
 func builtinRules() map[string]*Rule {
@@ -282,18 +287,45 @@ func (e *Engine) isRuleEnabledLocked(id string) bool {
 func (e *Engine) GetRules() []RuleView {
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
+	type runtime struct {
+		occurrences uint64
+		unique      uint64
+		active      uint64
+		lastHit     time.Time
+		lastHitIP   string
+	}
+	now := time.Now()
+	byType := make(map[AlertType]*runtime, len(e.rules))
+	for _, a := range e.alerts {
+		if a == nil {
+			continue
+		}
+		st := byType[a.Type]
+		if st == nil {
+			st = &runtime{}
+			byType[a.Type] = st
+		}
+		st.occurrences += a.Count
+		st.unique++
+		if a.Status != AlertStatusApproved && !a.LastSeen.IsZero() && now.Sub(a.LastSeen) <= alertEpisodeGap {
+			st.active++
+		}
+		if a.LastSeen.After(st.lastHit) {
+			st.lastHit = a.LastSeen
+			st.lastHitIP = a.IP
+		}
+	}
 	result := make([]RuleView, 0, len(e.rules))
 	for _, rule := range e.rules {
 		cloned := cloneRule(rule)
 		view := RuleView{Rule: *cloned, SimulationHits: rule.SimulationHits, LastSimulationHit: rule.LastSimulationHit}
-		for _, a := range e.alerts {
-			if a.Type == rule.AlertType {
-				view.HitCount += a.Count
-				if a.LastSeen.After(view.LastHit) {
-					view.LastHit = a.LastSeen
-					view.LastHitIP = a.IP
-				}
-			}
+		if st := byType[rule.AlertType]; st != nil {
+			view.HitCount = st.occurrences
+			view.RetainedOccurrences = st.occurrences
+			view.UniqueFindings = st.unique
+			view.ActiveFindings = st.active
+			view.LastHit = st.lastHit
+			view.LastHitIP = st.lastHitIP
 		}
 		result = append(result, view)
 	}

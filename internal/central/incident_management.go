@@ -366,12 +366,68 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 	}
 	var correlationCutoff time.Time
 	_ = r.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT value::timestamptz FROM central_runtime_state WHERE key='incident_correlation_cutoff'),'1970-01-01'::timestamptz)`).Scan(&correlationCutoff)
+
+	// Correlation used to rescan every active alert in each rule window on every
+	// telemetry refresh. On a busy sensor that meant repeatedly grouping tens of
+	// thousands of unchanged alert_history rows (the built-in multi-stage rule
+	// has a 24 hour window), which could exceed the background timeout even when
+	// no new alert required correlation. The watermark identifies only assets
+	// whose alert state changed since the last successful refresh. Each rule can
+	// then inspect its full lookback window for those assets, preserving sequence
+	// and multi-stage semantics without rescanning the whole estate.
+	var correlationWatermark time.Time
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT value::timestamptz FROM central_runtime_state WHERE key='incident_correlation_watermark'),NOW()-INTERVAL '5 minutes')`).Scan(&correlationWatermark); err != nil {
+		return err
+	}
+	type changedIdentity struct {
+		SensorID string    `json:"sensor_id"`
+		Identity string    `json:"asset_identity"`
+		LastSeen time.Time `json:"-"`
+	}
+	changedRows, err := r.db.QueryContext(ctx, `SELECT sensor_id,COALESCE(NULLIF(asset_identity,''),'ip:'||ip),MAX(last_seen)
+		FROM alert_history
+		WHERE ip<>'' AND last_seen>$1 AND last_seen>$2
+		  AND (status IN ('new','confirmed') OR (type='behavior_incident_candidate' AND status<>'approved'))
+		GROUP BY sensor_id,COALESCE(NULLIF(asset_identity,''),'ip:'||ip)`, correlationWatermark, correlationCutoff)
+	if err != nil {
+		return err
+	}
+	changed := make([]changedIdentity, 0, 32)
+	for changedRows.Next() {
+		var item changedIdentity
+		if err := changedRows.Scan(&item.SensorID, &item.Identity, &item.LastSeen); err != nil {
+			changedRows.Close()
+			return err
+		}
+		changed = append(changed, item)
+	}
+	if err := changedRows.Err(); err != nil {
+		changedRows.Close()
+		return err
+	}
+	if err := changedRows.Close(); err != nil {
+		return err
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	watermarkNext := changed[0].LastSeen
+	for _, item := range changed[1:] {
+		if item.LastSeen.After(watermarkNext) {
+			watermarkNext = item.LastSeen
+		}
+	}
+	changedJSON, err := json.Marshal(changed)
+	if err != nil {
+		return err
+	}
+
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := syncBehaviorIncidents(ctx, tx, correlationCutoff); err != nil {
+	if err := syncBehaviorIncidents(ctx, tx, correlationCutoff, correlationWatermark); err != nil {
 		return err
 	}
 	for _, rule := range rules {
@@ -382,12 +438,16 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			continue
 		}
 		relevantTypes := uniqueStrings(append(append([]string{}, rule.RequiredTypes...), rule.SequenceTypes...))
-		rows, qerr := tx.QueryContext(ctx, `SELECT sensor_id,(array_agg(ip ORDER BY last_seen DESC))[1],COALESCE(NULLIF(asset_identity,''),'ip:'||ip),string_agg(type,',' ORDER BY last_seen),string_agg(DISTINCT severity,','),COUNT(*),MIN(first_seen),MAX(last_seen)
-			FROM alert_history
-			WHERE ip<>'' AND status IN ('new','confirmed')
-			  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$3
-			  AND (cardinality($4::text[])=0 OR type=ANY($4::text[]))
-			GROUP BY sensor_id,COALESCE(NULLIF(asset_identity,''),'ip:'||ip) HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff, relevantTypes)
+		rows, qerr := tx.QueryContext(ctx, `WITH changed AS MATERIALIZED (
+				SELECT sensor_id,asset_identity FROM jsonb_to_recordset($5::jsonb) AS c(sensor_id text,asset_identity text)
+			)
+			SELECT a.sensor_id,(array_agg(a.ip ORDER BY a.last_seen DESC))[1],COALESCE(NULLIF(a.asset_identity,''),'ip:'||a.ip),string_agg(a.type,',' ORDER BY a.last_seen),string_agg(DISTINCT a.severity,','),COUNT(*),MIN(a.first_seen),MAX(a.last_seen)
+			FROM alert_history a
+			JOIN changed c ON c.sensor_id=a.sensor_id AND c.asset_identity=COALESCE(NULLIF(a.asset_identity,''),'ip:'||a.ip)
+			WHERE a.ip<>'' AND a.status IN ('new','confirmed')
+			  AND a.last_seen>NOW()-($1*INTERVAL '1 minute') AND a.last_seen>$3
+			  AND (cardinality($4::text[])=0 OR a.type=ANY($4::text[]))
+			GROUP BY a.sensor_id,COALESCE(NULLIF(a.asset_identity,''),'ip:'||a.ip) HAVING COUNT(*) >= $2`, rule.WindowMinutes, rule.MinEvents, correlationCutoff, relevantTypes, string(changedJSON))
 		if qerr != nil {
 			return qerr
 		}
@@ -402,6 +462,10 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			c.Types = strings.Split(types, ",")
 			c.Severity = highestSeverity(strings.Split(sevs, ","))
 			candidates = append(candidates, c)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
 		}
 		rows.Close()
 		for _, c := range candidates {
@@ -442,9 +506,6 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 				return err
 			}
 			metadata, _ := json.Marshal(map[string]any{"correlation_rule": rule.Name, "mitre_tactics": rule.MITRETactics, "mitre_techniques": rule.MITRETechniques})
-			// Insert all matching alert events in one database statement. The previous
-			// implementation issued one SELECT and one INSERT per alert key, which made
-			// correlation increasingly expensive as alert volume grew.
 			if _, err = tx.ExecContext(ctx, `INSERT INTO incident_events(incident_id,event_type,source_key,severity,message,event_at,metadata)
 				SELECT $1,'alert',alert_key,severity,message,last_seen,$2::jsonb
 				FROM alert_history
@@ -460,10 +521,13 @@ func (r *Repository) SyncCorrelatedIncidents(ctx context.Context) error {
 			}
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO central_runtime_state(key,value,updated_at) VALUES('incident_correlation_watermark',$1,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, watermarkNext.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff, watermark time.Time) error {
 	type candidate struct {
 		sensorID, ip, identity, alertKey, severity, message string
 		count                                               uint64
@@ -483,7 +547,7 @@ func syncBehaviorIncidents(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 		COALESCE((evidence->>'risk_score')::double precision,85),
 		COALESCE((evidence->>'confidence')::double precision,0.5),evidence
 		FROM alert_history WHERE type='behavior_incident_candidate' AND status<>'approved'
-		  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$2`, windowMinutes, cutoff)
+		  AND last_seen>NOW()-($1*INTERVAL '1 minute') AND last_seen>$2 AND last_seen>$3`, windowMinutes, cutoff, watermark)
 	if err != nil {
 		return err
 	}
@@ -541,54 +605,328 @@ func cappedAdd(count, weight, capValue int) int {
 }
 
 func (r *Repository) RecalculateAssetRisk(ctx context.Context) error {
-	rows, err := r.db.QueryContext(ctx, `WITH current_nodes AS (
-SELECT * FROM (SELECT n.*,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END asset_identity,ROW_NUMBER() OVER(PARTITION BY sensor_id,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END ORDER BY last_seen DESC,ip ASC) rn FROM topology_nodes n WHERE n.active=TRUE) x WHERE rn=1)
-SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown'),COALESCE(NULLIF(n.protocols,''),''),n.last_seen,n.is_ot,COALESCE(c.asset_role,''),COALESCE(c.criticality,''),COALESCE(c.zone,''),c.purdue_override FROM current_nodes n LEFT JOIN asset_context c ON c.sensor_id=n.sensor_id AND c.asset_identity=n.asset_identity`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	type riskAssetInput struct {
+		sensor      string
+		identity    string
+		ip          string
+		vendor      string
+		protocols   string
+		last        time.Time
+		isOT        bool
+		role        string
+		criticality string
+		zone        string
+		purdue      sql.NullFloat64
+	}
+	type vulnCounts struct {
+		critical int
+		high     int
+		other    int
+	}
+	type riskExceptionState struct {
+		disposition string
+		override    sql.NullInt64
+		control     string
+	}
+	type riskWrite struct {
+		SensorID        string   `json:"sensor_id"`
+		AssetIP         string   `json:"asset_ip"`
+		AssetIdentity   string   `json:"asset_identity"`
+		Score           int      `json:"score"`
+		TechnicalScore  int      `json:"technical_score"`
+		ContextualScore int      `json:"contextual_score"`
+		PropagatedScore int      `json:"propagated_score"`
+		Level           string   `json:"level"`
+		Trend           string   `json:"trend"`
+		Reasons         []string `json:"reasons"`
+		Recommendations []string `json:"recommendations"`
+	}
+	type riskHistoryWrite struct {
+		SensorID      string   `json:"sensor_id"`
+		AssetIP       string   `json:"asset_ip"`
+		AssetIdentity string   `json:"asset_identity"`
+		Score         int      `json:"score"`
+		Level         string   `json:"level"`
+		Reasons       []string `json:"reasons"`
+	}
+
+	key := func(sensor, identity string) string { return sensor + "\x00" + identity }
+	ipKey := func(sensor, ip string) string { return sensor + "\x00" + ip }
+
+	rows, err := tx.QueryContext(ctx, `WITH current_nodes AS (
+SELECT * FROM (
+ SELECT n.*,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END asset_identity,
+        ROW_NUMBER() OVER(PARTITION BY sensor_id,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END ORDER BY last_seen DESC,ip ASC) rn
+ FROM topology_nodes n WHERE n.active=TRUE
+) x WHERE rn=1)
+SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown'),COALESCE(NULLIF(n.protocols,''),''),n.last_seen,n.is_ot,
+       COALESCE(c.asset_role,''),COALESCE(c.criticality,''),COALESCE(c.zone,''),c.purdue_override
+FROM current_nodes n
+LEFT JOIN asset_context c ON c.sensor_id=n.sensor_id AND c.asset_identity=n.asset_identity`)
+	if err != nil {
+		return err
+	}
+	assets := make([]riskAssetInput, 0, 256)
+	identityByIP := make(map[string]string, 256)
+	for rows.Next() {
+		var a riskAssetInput
+		if err := rows.Scan(&a.sensor, &a.identity, &a.ip, &a.vendor, &a.protocols, &a.last, &a.isOT, &a.role, &a.criticality, &a.zone, &a.purdue); err != nil {
+			rows.Close()
+			return err
+		}
+		assets = append(assets, a)
+		identityByIP[ipKey(a.sensor, a.ip)] = a.identity
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(assets) == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM asset_risk`); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
 	var alertWeight, vulnWeight, exposureWeight, contextWeight, propagationWeight, halfLife int
 	_ = tx.QueryRowContext(ctx, `SELECT alert_weight,vulnerability_weight,exposure_weight,context_weight,propagation_weight,decay_half_life_days FROM asset_risk_settings WHERE singleton=TRUE`).Scan(&alertWeight, &vulnWeight, &exposureWeight, &contextWeight, &propagationWeight, &halfLife)
 	if alertWeight == 0 {
 		alertWeight, vulnWeight, exposureWeight, contextWeight, propagationWeight, halfLife = 12, 8, 15, 20, 12, 14
 	}
+
+	criticalAlerts := make(map[string]int, len(assets))
+	rows, err = tx.QueryContext(ctx, `WITH matched AS (
+ SELECT a.sensor_id,a.asset_identity,COUNT(*)::bigint cnt
+ FROM alert_history a
+ WHERE a.status IN ('new','confirmed') AND a.severity IN ('critical','high')
+   AND a.last_seen>=NOW()-INTERVAL '5 minutes' AND a.asset_identity<>''
+ GROUP BY a.sensor_id,a.asset_identity
+ UNION ALL
+ SELECT a.sensor_id,b.asset_identity,COUNT(DISTINCT a.alert_key)::bigint cnt
+ FROM alert_history a
+ JOIN asset_ip_binding_history b ON b.sensor_id=a.sensor_id
+  AND b.valid_from<=a.last_seen AND (b.valid_to IS NULL OR b.valid_to>=a.first_seen)
+  AND b.ip IN (a.ip,COALESCE(a.evidence->>'source_ip',''),COALESCE(a.evidence->>'destination_ip',''),COALESCE(a.evidence->>'target_ip',''),COALESCE(a.evidence->>'peer_ip',''),COALESCE(a.evidence->>'controller_ip',''),COALESCE(a.evidence->>'origin_ip',''),COALESCE(a.evidence->>'pivot_ip',''),COALESCE(a.evidence->>'latest_target',''))
+ WHERE a.status IN ('new','confirmed') AND a.severity IN ('critical','high')
+   AND a.last_seen>=NOW()-INTERVAL '5 minutes' AND a.asset_identity=''
+ GROUP BY a.sensor_id,b.asset_identity
+)
+SELECT sensor_id,asset_identity,SUM(cnt)::bigint FROM matched GROUP BY sensor_id,asset_identity`)
+	if err != nil {
+		return err
+	}
 	for rows.Next() {
-		var sensor, identity, ip, vendor, protocols, role, criticality, zone string
-		var last time.Time
-		var isOT bool
-		var purdue sql.NullFloat64
-		if err = rows.Scan(&sensor, &identity, &ip, &vendor, &protocols, &last, &isOT, &role, &criticality, &zone, &purdue); err != nil {
+		var sensor, identity string
+		var count int64
+		if err := rows.Scan(&sensor, &identity, &count); err != nil {
+			rows.Close()
 			return err
 		}
+		criticalAlerts[key(sensor, identity)] = int(count)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	vulnerabilities := make(map[string]vulnCounts, len(assets))
+	rows, err = tx.QueryContext(ctx, `SELECT f.sensor_id,f.asset_identity,f.asset_ip,
+ COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,''))='critical')::bigint,
+ COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,''))='high')::bigint,
+ COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,'')) NOT IN ('critical','high'))::bigint
+FROM vulnerability_findings f
+LEFT JOIN vulnerability_advisories a ON a.cve_id=f.cve_id
+WHERE f.status IN ('confirmed','accepted_risk','potential')
+GROUP BY f.sensor_id,f.asset_identity,f.asset_ip`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sensor, identity, ip string
+		var critical, high, other int64
+		if err := rows.Scan(&sensor, &identity, &ip, &critical, &high, &other); err != nil {
+			rows.Close()
+			return err
+		}
+		if identity == "" {
+			identity = identityByIP[ipKey(sensor, ip)]
+		}
+		if identity == "" {
+			continue
+		}
+		k := key(sensor, identity)
+		v := vulnerabilities[k]
+		v.critical += int(critical)
+		v.high += int(high)
+		v.other += int(other)
+		vulnerabilities[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	externalExposure := make(map[string]int, len(assets))
+	rows, err = tx.QueryContext(ctx, `WITH exposed AS (
+ SELECT f.sensor_id,f.src_identity asset_identity,f.id
+ FROM flow_observations f
+ WHERE f.bucket_end>NOW()-INTERVAL '7 days' AND f.src_identity<>''
+   AND NOT (f.dst_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))
+ UNION ALL
+ SELECT f.sensor_id,f.dst_identity asset_identity,f.id
+ FROM flow_observations f
+ WHERE f.bucket_end>NOW()-INTERVAL '7 days' AND f.dst_identity<>''
+   AND NOT (f.src_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))
+ UNION ALL
+ SELECT DISTINCT f.sensor_id,b.asset_identity,f.id
+ FROM flow_observations f
+ JOIN asset_ip_binding_history b ON b.sensor_id=f.sensor_id AND b.ip=f.src_ip
+  AND b.valid_from<=f.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=f.bucket_start)
+ WHERE f.bucket_end>NOW()-INTERVAL '7 days' AND f.src_identity=''
+   AND NOT (f.dst_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))
+ UNION ALL
+ SELECT DISTINCT f.sensor_id,b.asset_identity,f.id
+ FROM flow_observations f
+ JOIN asset_ip_binding_history b ON b.sensor_id=f.sensor_id AND b.ip=f.dst_ip
+  AND b.valid_from<=f.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=f.bucket_start)
+ WHERE f.bucket_end>NOW()-INTERVAL '7 days' AND f.dst_identity=''
+   AND NOT (f.src_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))
+)
+SELECT sensor_id,asset_identity,COUNT(DISTINCT id)::bigint FROM exposed WHERE asset_identity<>'' GROUP BY sensor_id,asset_identity`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sensor, identity string
+		var count int64
+		if err := rows.Scan(&sensor, &identity, &count); err != nil {
+			rows.Close()
+			return err
+		}
+		externalExposure[key(sensor, identity)] = int(count)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	riskyNeighbors := make(map[string]int, len(assets))
+	rows, err = tx.QueryContext(ctx, `WITH pairs AS (
+ SELECT e.sensor_id,e.src_ip asset_ip,e.dst_ip neighbor_ip FROM topology_edges e WHERE e.last_seen>NOW()-INTERVAL '7 days'
+ UNION ALL
+ SELECT e.sensor_id,e.dst_ip asset_ip,e.src_ip neighbor_ip FROM topology_edges e WHERE e.last_seen>NOW()-INTERVAL '7 days'
+)
+SELECT p.sensor_id,p.asset_ip,COUNT(DISTINCT p.neighbor_ip)::bigint
+FROM pairs p
+JOIN asset_risk ar ON ar.sensor_id=p.sensor_id AND ar.asset_ip=p.neighbor_ip AND ar.score>=75
+GROUP BY p.sensor_id,p.asset_ip`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sensor, ip string
+		var count int64
+		if err := rows.Scan(&sensor, &ip, &count); err != nil {
+			rows.Close()
+			return err
+		}
+		if identity := identityByIP[ipKey(sensor, ip)]; identity != "" {
+			riskyNeighbors[key(sensor, identity)] = int(count)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	exceptions := make(map[string]riskExceptionState, len(assets))
+	rows, err = tx.QueryContext(ctx, `SELECT sensor_id,asset_identity,asset_ip,disposition,score_override,compensating_control
+FROM asset_risk_exceptions
+WHERE expires_at IS NULL OR expires_at>NOW()
+ORDER BY sensor_id,asset_identity,updated_at DESC`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sensor, identity, ip, disposition, control string
+		var override sql.NullInt64
+		if err := rows.Scan(&sensor, &identity, &ip, &disposition, &override, &control); err != nil {
+			rows.Close()
+			return err
+		}
+		if identity == "" {
+			identity = identityByIP[ipKey(sensor, ip)]
+		}
+		if identity == "" {
+			continue
+		}
+		k := key(sensor, identity)
+		if _, exists := exceptions[k]; !exists {
+			exceptions[k] = riskExceptionState{disposition: disposition, override: override, control: control}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	previousScores := make(map[string]int, len(assets))
+	rows, err = tx.QueryContext(ctx, `SELECT DISTINCT ON (sensor_id,asset_identity) sensor_id,asset_identity,score
+FROM asset_risk WHERE asset_identity<>'' ORDER BY sensor_id,asset_identity,updated_at DESC`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sensor, identity string
+		var score int
+		if err := rows.Scan(&sensor, &identity, &score); err != nil {
+			rows.Close()
+			return err
+		}
+		previousScores[key(sensor, identity)] = score
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	writes := make([]riskWrite, 0, len(assets))
+	historyWrites := make([]riskHistoryWrite, 0, len(assets)/4+1)
+	for _, a := range assets {
+		k := key(a.sensor, a.identity)
 		technical, contextual, propagated := 0, 0, 0
 		reasons := []string{}
 		recommendations := []string{}
-		var criticalAlerts int
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_history a WHERE sensor_id=$1 AND status IN ('new','confirmed') AND severity IN ('critical','high') AND last_seen>=NOW()-INTERVAL '5 minutes' AND (a.asset_identity=$2 OR (a.asset_identity='' AND EXISTS (SELECT 1 FROM asset_ip_binding_history b WHERE b.sensor_id=a.sensor_id AND b.asset_identity=$2 AND b.valid_from<=a.last_seen AND (b.valid_to IS NULL OR b.valid_to>=a.first_seen) AND b.ip IN (a.ip,COALESCE(a.evidence->>'source_ip',''),COALESCE(a.evidence->>'destination_ip',''),COALESCE(a.evidence->>'target_ip',''),COALESCE(a.evidence->>'peer_ip',''),COALESCE(a.evidence->>'controller_ip',''),COALESCE(a.evidence->>'origin_ip',''),COALESCE(a.evidence->>'pivot_ip',''),COALESCE(a.evidence->>'latest_target','')))))`, sensor, identity).Scan(&criticalAlerts)
-		if criticalAlerts > 0 {
-			add := cappedAdd(criticalAlerts, alertWeight, 36)
-			technical += add
-			reasons = append(reasons, fmt.Sprintf("%d active high/critical alerts", criticalAlerts))
+
+		if count := criticalAlerts[k]; count > 0 {
+			technical += cappedAdd(count, alertWeight, 36)
+			reasons = append(reasons, fmt.Sprintf("%d active high/critical alerts", count))
 			recommendations = append(recommendations, "Investigate and contain active detections")
 		}
-		var vulnCritical, vulnHigh, vulnOther int
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,''))='critical'),COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,''))='high'),COUNT(*) FILTER (WHERE lower(COALESCE(a.severity,'')) NOT IN ('critical','high')) FROM vulnerability_findings f LEFT JOIN vulnerability_advisories a ON a.cve_id=f.cve_id WHERE f.sensor_id=$1 AND (f.asset_identity=$2 OR (f.asset_identity='' AND f.asset_ip=$3)) AND f.status IN ('confirmed','accepted_risk','potential')`, sensor, identity, ip).Scan(&vulnCritical, &vulnHigh, &vulnOther)
-		if total := vulnCritical + vulnHigh + vulnOther; total > 0 {
-			add := cappedAdd(vulnCritical, 14, 28) + cappedAdd(vulnHigh, 9, 18) + cappedAdd(vulnOther, vulnWeight, 12)
+		if v := vulnerabilities[k]; v.critical+v.high+v.other > 0 {
+			total := v.critical + v.high + v.other
+			add := cappedAdd(v.critical, 14, 28) + cappedAdd(v.high, 9, 18) + cappedAdd(v.other, vulnWeight, 12)
 			if add > 38 {
 				add = 38
 			}
 			technical += add
-			reasons = append(reasons, fmt.Sprintf("%d active vulnerabilities (%d critical, %d high)", total, vulnCritical, vulnHigh))
+			reasons = append(reasons, fmt.Sprintf("%d active vulnerabilities (%d critical, %d high)", total, v.critical, v.high))
 			recommendations = append(recommendations, "Prioritize exploitable and critical vulnerability remediation")
 		}
-		p := strings.ToLower(protocols)
+		p := strings.ToLower(a.protocols)
 		if strings.Contains(p, "telnet") {
 			technical += exposureWeight
 			reasons = append(reasons, "Telnet observed")
@@ -599,18 +937,17 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 			reasons = append(reasons, "SMBv1 observed")
 			recommendations = append(recommendations, "Disable SMBv1")
 		}
-		if vendor == "unknown" {
+		if a.vendor == "unknown" {
 			technical += 6
 			reasons = append(reasons, "unknown vendor")
 			recommendations = append(recommendations, "Profile the asset and confirm its identity")
 		}
-		if time.Since(last) > 7*24*time.Hour {
+		if time.Since(a.last) > 7*24*time.Hour {
 			technical += 6
 			reasons = append(reasons, "stale inventory record")
 			recommendations = append(recommendations, "Validate whether the asset is retired or unreachable")
 		}
-		crit := strings.ToLower(criticality)
-		switch crit {
+		switch strings.ToLower(a.criticality) {
 		case "critical":
 			contextual += contextWeight
 		case "high":
@@ -618,44 +955,37 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 		case "medium":
 			contextual += contextWeight / 2
 		}
-		roleLower := strings.ToLower(role)
+		roleLower := strings.ToLower(a.role)
 		if strings.Contains(roleLower, "plc") || strings.Contains(roleLower, "rtu") || strings.Contains(roleLower, "safety") || strings.Contains(roleLower, "domain controller") || strings.Contains(roleLower, "historian") {
 			contextual += 10
-			reasons = append(reasons, "critical operational role: "+role)
+			reasons = append(reasons, "critical operational role: "+a.role)
 		}
-		effectiveOT := isOT
-		if strings.TrimSpace(role) != "" || purdue.Valid {
-			effectiveOT = roleIsOT(role) || (purdue.Valid && purdue.Float64 <= 3)
+		effectiveOT := a.isOT
+		if strings.TrimSpace(a.role) != "" || a.purdue.Valid {
+			effectiveOT = roleIsOT(a.role) || (a.purdue.Valid && a.purdue.Float64 <= 3)
 		}
 		if effectiveOT {
 			contextual += 5
 		}
-		if purdue.Valid && purdue.Float64 <= 1 {
+		if a.purdue.Valid && a.purdue.Float64 <= 1 {
 			contextual += 12
-			reasons = append(reasons, fmt.Sprintf("Purdue level %.1f asset", purdue.Float64))
+			reasons = append(reasons, fmt.Sprintf("Purdue level %.1f asset", a.purdue.Float64))
 			recommendations = append(recommendations, "Verify strict segmentation and least-privilege access")
 		}
-		z := strings.ToLower(zone)
+		z := strings.ToLower(a.zone)
 		if strings.Contains(z, "dmz") {
 			contextual += 4
 		} else if strings.Contains(z, "level 0") || strings.Contains(z, "level 1") || strings.Contains(z, "safety") {
 			contextual += 10
 		}
-		var external int
-		// Exposure follows the stable identity across DHCP aliases. Multicast,
-		// unspecified, link-local, loopback and documentation/non-routable ranges
-		// are not counted as Internet exposure merely because they are non-RFC1918.
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM flow_observations f WHERE f.sensor_id=$1 AND f.bucket_end>NOW()-INTERVAL '7 days' AND EXISTS (SELECT 1 FROM asset_ip_binding_history b WHERE b.sensor_id=f.sensor_id AND b.asset_identity=$2 AND b.valid_from<=f.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=f.bucket_start) AND ((b.ip=f.src_ip AND NOT (f.dst_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr]))) OR (b.ip=f.dst_ip AND NOT (f.src_ip::inet <<= ANY(ARRAY['0.0.0.0/8'::cidr,'10.0.0.0/8'::cidr,'100.64.0.0/10'::cidr,'127.0.0.0/8'::cidr,'169.254.0.0/16'::cidr,'172.16.0.0/12'::cidr,'192.168.0.0/16'::cidr,'::/128'::cidr,'::1/128'::cidr,'fc00::/7'::cidr,'fe80::/10'::cidr,'ff00::/8'::cidr])))))`, sensor, identity).Scan(&external)
-		if external > 0 {
+		if externalExposure[k] > 0 {
 			technical += minInt(exposureWeight, 20)
 			reasons = append(reasons, "external network exposure observed")
 			recommendations = append(recommendations, "Review external connectivity and restrict inbound/outbound paths")
 		}
-		var riskyNeighbors int
-		_ = tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT CASE WHEN e.src_ip=$2 THEN e.dst_ip ELSE e.src_ip END) FROM topology_edges e JOIN asset_risk ar ON ar.sensor_id=e.sensor_id AND ar.asset_ip=CASE WHEN e.src_ip=$2 THEN e.dst_ip ELSE e.src_ip END WHERE e.sensor_id=$1 AND (e.src_ip=$2 OR e.dst_ip=$2) AND ar.score>=75 AND e.last_seen>NOW()-INTERVAL '7 days'`, sensor, ip).Scan(&riskyNeighbors)
-		if riskyNeighbors > 0 {
-			propagated = cappedAdd(riskyNeighbors, propagationWeight, 24)
-			reasons = append(reasons, fmt.Sprintf("connected to %d critical-risk asset(s)", riskyNeighbors))
+		if count := riskyNeighbors[k]; count > 0 {
+			propagated = cappedAdd(count, propagationWeight, 24)
+			reasons = append(reasons, fmt.Sprintf("connected to %d critical-risk asset(s)", count))
 			recommendations = append(recommendations, "Review lateral-movement paths and isolate risky neighbors")
 		}
 		if technical > 60 {
@@ -668,57 +998,78 @@ SELECT n.sensor_id,n.asset_identity,n.ip,COALESCE(NULLIF(n.vendor,''),'unknown')
 			propagated = 15
 		}
 		score := technical + contextual + propagated
-		var disposition, control string
-		var override sql.NullInt64
-		var expires sql.NullTime
-		_ = tx.QueryRowContext(ctx, `SELECT disposition,score_override,compensating_control,expires_at FROM asset_risk_exceptions WHERE sensor_id=$1 AND (asset_identity=$2 OR (asset_identity='' AND asset_ip=$3)) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY updated_at DESC LIMIT 1`, sensor, identity, ip).Scan(&disposition, &override, &control, &expires)
-		if override.Valid {
-			score = int(override.Int64)
-			reasons = append(reasons, "analyst score override applied")
-		}
-		if disposition == "accepted_risk" {
-			score = maxInt(0, score-10)
-			reasons = append(reasons, "risk accepted with analyst justification")
-		}
-		if disposition == "false_positive" {
-			score = maxInt(0, score-25)
-			reasons = append(reasons, "false-positive disposition")
-		}
-		if control != "" {
-			score = maxInt(0, score-8)
-			reasons = append(reasons, "compensating control: "+control)
+		if ex, ok := exceptions[k]; ok {
+			if ex.override.Valid {
+				score = int(ex.override.Int64)
+				reasons = append(reasons, "analyst score override applied")
+			}
+			if ex.disposition == "accepted_risk" {
+				score = maxInt(0, score-10)
+				reasons = append(reasons, "risk accepted with analyst justification")
+			}
+			if ex.disposition == "false_positive" {
+				score = maxInt(0, score-25)
+				reasons = append(reasons, "false-positive disposition")
+			}
+			if ex.control != "" {
+				score = maxInt(0, score-8)
+				reasons = append(reasons, "compensating control: "+ex.control)
+			}
 		}
 		if score > 100 {
 			score = 100
 		}
 		level := riskLevel(score)
-		var previous int
-		_ = tx.QueryRowContext(ctx, `SELECT score FROM asset_risk_history WHERE sensor_id=$1 AND asset_identity=$2 ORDER BY recorded_at DESC LIMIT 1`, sensor, identity).Scan(&previous)
+		previous := previousScores[k]
 		trend := "stable"
 		if score >= previous+5 {
 			trend = "increasing"
 		} else if score <= previous-5 {
 			trend = "decreasing"
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO asset_risk(sensor_id,asset_ip,asset_identity,score,technical_score,contextual_score,propagated_score,level,trend,reasons,recommendations,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET asset_identity=EXCLUDED.asset_identity,score=EXCLUDED.score,technical_score=EXCLUDED.technical_score,contextual_score=EXCLUDED.contextual_score,propagated_score=EXCLUDED.propagated_score,level=EXCLUDED.level,trend=EXCLUDED.trend,reasons=EXCLUDED.reasons,recommendations=EXCLUDED.recommendations,updated_at=NOW()`, sensor, ip, identity, score, technical, contextual, propagated, level, trend, pqStringArrayJSON(reasons), pqStringArrayJSON(uniqueStrings(recommendations)))
+		reasons = uniqueStrings(reasons)
+		recommendations = uniqueStrings(recommendations)
+		writes = append(writes, riskWrite{
+			SensorID: a.sensor, AssetIP: a.ip, AssetIdentity: a.identity, Score: score,
+			TechnicalScore: technical, ContextualScore: contextual, PropagatedScore: propagated,
+			Level: level, Trend: trend, Reasons: reasons, Recommendations: recommendations,
+		})
+		if previous != score {
+			historyWrites = append(historyWrites, riskHistoryWrite{SensorID: a.sensor, AssetIP: a.ip, AssetIdentity: a.identity, Score: score, Level: level, Reasons: reasons})
+		}
+	}
+
+	payload, err := json.Marshal(writes)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO asset_risk(sensor_id,asset_ip,asset_identity,score,technical_score,contextual_score,propagated_score,level,trend,reasons,recommendations,updated_at)
+SELECT x.sensor_id,x.asset_ip,x.asset_identity,x.score,x.technical_score,x.contextual_score,x.propagated_score,x.level,x.trend,x.reasons,x.recommendations,NOW()
+FROM jsonb_to_recordset($1::jsonb) AS x(sensor_id text,asset_ip text,asset_identity text,score integer,technical_score integer,contextual_score integer,propagated_score integer,level text,trend text,reasons jsonb,recommendations jsonb)
+ON CONFLICT(sensor_id,asset_ip) DO UPDATE SET asset_identity=EXCLUDED.asset_identity,score=EXCLUDED.score,technical_score=EXCLUDED.technical_score,contextual_score=EXCLUDED.contextual_score,propagated_score=EXCLUDED.propagated_score,level=EXCLUDED.level,trend=EXCLUDED.trend,reasons=EXCLUDED.reasons,recommendations=EXCLUDED.recommendations,updated_at=NOW()`, string(payload)); err != nil {
+		return err
+	}
+	if len(historyWrites) > 0 {
+		historyPayload, err := json.Marshal(historyWrites)
 		if err != nil {
 			return err
 		}
-		if previous != score {
-			_, _ = tx.ExecContext(ctx, `INSERT INTO asset_risk_history(sensor_id,asset_ip,asset_identity,score,level,reasons) VALUES($1,$2,$3,$4,$5,$6)`, sensor, ip, identity, score, level, pqStringArrayJSON(reasons))
+		if _, err = tx.ExecContext(ctx, `INSERT INTO asset_risk_history(sensor_id,asset_ip,asset_identity,score,level,reasons)
+SELECT x.sensor_id,x.asset_ip,x.asset_identity,x.score,x.level,x.reasons
+FROM jsonb_to_recordset($1::jsonb) AS x(sensor_id text,asset_ip text,asset_identity text,score integer,level text,reasons jsonb)`, string(historyPayload)); err != nil {
+			return err
 		}
 	}
-	if err = rows.Err(); err != nil {
-		return err
-	}
-	// asset_risk is a current-state table. Historical IP aliases belong in
-	// asset_risk_history, not as duplicate current rows after DHCP changes.
-	if _, err = tx.ExecContext(ctx, `DELETE FROM asset_risk ar WHERE NOT EXISTS (SELECT 1 FROM (SELECT sensor_id,ip,ROW_NUMBER() OVER(PARTITION BY sensor_id,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END ORDER BY last_seen DESC,ip ASC) rn FROM topology_nodes WHERE active=TRUE) n WHERE n.rn=1 AND n.sensor_id=ar.sensor_id AND n.ip=ar.asset_ip)`); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM asset_risk ar WHERE NOT EXISTS (
+ SELECT 1 FROM (
+  SELECT sensor_id,ip,ROW_NUMBER() OVER(PARTITION BY sensor_id,CASE WHEN mac<>'' THEN 'mac:'||lower(mac) ELSE 'ip:'||ip END ORDER BY last_seen DESC,ip ASC) rn
+  FROM topology_nodes WHERE active=TRUE
+ ) n WHERE n.rn=1 AND n.sensor_id=ar.sensor_id AND n.ip=ar.asset_ip
+)`); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
-
 func minInt(a, b int) int {
 	if a < b {
 		return a

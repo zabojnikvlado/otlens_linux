@@ -65,9 +65,10 @@ func (e *Engine) handleBaseline(packet core.Packet) {
 		}
 	}
 
-	var key string
+	var key, legacyKey string
 	if hasIPEndpoints {
 		key = e.baselineKeyForPacketLocked(packet)
+		legacyKey = e.legacyBaselineKeyForPacketLocked(packet)
 		if e.baselineMode == BaselineModeLearning && !e.learnedPatterns[key] {
 			e.learnedPatterns[key] = true
 			e.patternCreatedAt = append(e.patternCreatedAt, now)
@@ -100,9 +101,19 @@ func (e *Engine) handleBaseline(packet core.Packet) {
 	if !hasIPEndpoints || e.baselineMode == BaselineModeLearning {
 		return
 	}
-	if e.learnedPatterns[key] {
+	// Routine multicast/broadcast discovery (mDNS/SSDP/LLMNR/DHCP/etc.) is
+	// intentionally handled by discovery-specific detectors rather than
+	// producing one generic "new communication" finding per group service.
+	if routineDiscoveryTraffic(packet) {
 		return
 	}
+	if e.learnedPatterns[key] || (legacyKey != "" && legacyKey != key && e.learnedPatterns[legacyKey]) {
+		return
+	}
+	// Pending legacy findings remain retained history, but new occurrences use
+	// the improved key so dynamic UDP/client-port noise converges instead of
+	// continuing to inflate thousands of pre-upgrade keys. Approved legacy keys
+	// are handled above through learnedPatterns and remain trusted.
 	e.raiseBaselineAlert(key, packet)
 }
 
@@ -313,9 +324,12 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	service := packet.DstPort
+	service := baselineServicePort(packet)
 	message := fmt.Sprintf("New %s communication: %s:%d <-> %s:%d (not seen during trusted baseline)", packet.L4Protocol, packet.SrcIP, packet.SrcPort, packet.DstIP, packet.DstPort)
 	evidence := map[string]interface{}{"baseline_key": key, "source_ip": packet.SrcIP, "destination_ip": packet.DstIP, "source_port": packet.SrcPort, "destination_port": packet.DstPort, "protocol": packet.L4Protocol, "service_port": service}
+	if name := serviceNameForPort(packet.L4Protocol, service); name != "" {
+		evidence["service"] = name
+	}
 	e.raiseBuiltinAlertLocked(string(AlertNewCommunication), AlertNewCommunication, "medium", key, message, packet.SrcIP, evidence, now, alertEpisodeGap)
 }
 
@@ -327,27 +341,20 @@ func (e *Engine) raiseBaselineAlert(key string, packet core.Packet) {
 // the monitoring phase would alert constantly on completely normal
 // traffic.
 //
-// The service port is approximated as whichever of the two ports is
-// lower: real services conventionally listen on low/well-known ports
-// (102, 502, 443...) while OS-assigned ephemeral client ports are
-// always in the upper range. This is a heuristic, not a protocol
-// negotiation — it can occasionally misidentify the service port for
-// unusual setups, which is acceptable for a baseline signal but not
-// something to build hard enforcement on.
+// Service selection is protocol-aware: TCP handshake direction is preferred,
+// known service ports beat unknown client ports, the dynamic/private range is
+// treated as client-side when possible, and unknown high/high UDP pairs collapse
+// to a stable dynamic service bucket. Pre-upgrade keys remain accepted through
+// legacyBaselineKeyForPacketLocked so an upgrade does not invalidate trust.
 func (e *Engine) baselineKeyForPacketLocked(packet core.Packet) string {
-	service := packet.SrcPort
-	flags := strings.ToUpper(packet.TCPFlags)
-	if strings.EqualFold(packet.L4Protocol, "tcp") && strings.Contains(flags, "SYN") {
-		if strings.Contains(flags, "ACK") && packet.SrcPort != 0 {
-			service = packet.SrcPort
-		} else if !strings.Contains(flags, "ACK") && packet.DstPort != 0 {
-			service = packet.DstPort
-		} else if packet.DstPort < service {
-			service = packet.DstPort
-		}
-	} else if packet.DstPort < service {
-		service = packet.DstPort
-	}
+	return e.baselineKeyForPacketServiceLocked(packet, baselineServicePort(packet))
+}
+
+func (e *Engine) legacyBaselineKeyForPacketLocked(packet core.Packet) string {
+	return e.baselineKeyForPacketServiceLocked(packet, legacyBaselineServicePort(packet))
+}
+
+func (e *Engine) baselineKeyForPacketServiceLocked(packet core.Packet, service uint16) string {
 	endpoint := func(ip, observedMAC string) string {
 		known := strings.TrimSpace(e.knownMAC[ip])
 		candidate := strings.TrimSpace(e.candidateMAC[ip])

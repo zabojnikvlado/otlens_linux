@@ -98,25 +98,43 @@ func upsertAlertHistory(ctx context.Context, x execer, sensorID string, alertsJS
 		}
 		var wasInserted bool
 		err := x.QueryRowContext(ctx, `
-			INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,asset_identity,status,count,first_seen,last_seen,evidence)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-			ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
-				type = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.type ELSE alert_history.type END,
-				severity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.severity ELSE alert_history.severity END,
-				message = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.message ELSE alert_history.message END,
-				ip = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.ip ELSE alert_history.ip END,
-				asset_identity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen AND EXCLUDED.asset_identity<>'' THEN EXCLUDED.asset_identity ELSE alert_history.asset_identity END,
-				status = CASE
-					WHEN EXCLUDED.last_seen < alert_history.last_seen THEN alert_history.status
-					WHEN alert_history.status='approved' THEN alert_history.status
-					WHEN alert_history.status='confirmed' AND EXCLUDED.status='new' AND EXCLUDED.count<=alert_history.count THEN alert_history.status
-					ELSE EXCLUDED.status
-				END,
-				count = GREATEST(alert_history.count, EXCLUDED.count),
-				first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
-				last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
-				evidence = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.evidence ELSE alert_history.evidence END
-			RETURNING (xmax = 0) AS inserted
+			WITH previous AS MATERIALIZED (
+				SELECT count FROM alert_history WHERE sensor_id=$1 AND alert_key=$2
+			), upserted AS (
+				INSERT INTO alert_history(sensor_id,alert_key,type,severity,message,ip,asset_identity,status,count,first_seen,last_seen,evidence)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+				ON CONFLICT(sensor_id,alert_key) DO UPDATE SET
+					type = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.type ELSE alert_history.type END,
+					severity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.severity ELSE alert_history.severity END,
+					message = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.message ELSE alert_history.message END,
+					ip = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.ip ELSE alert_history.ip END,
+					asset_identity = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen AND EXCLUDED.asset_identity<>'' THEN EXCLUDED.asset_identity ELSE alert_history.asset_identity END,
+					status = CASE
+						WHEN EXCLUDED.last_seen < alert_history.last_seen THEN alert_history.status
+						WHEN alert_history.status='approved' THEN alert_history.status
+						WHEN alert_history.status='confirmed' AND EXCLUDED.status='new' AND EXCLUDED.count<=alert_history.count THEN alert_history.status
+						ELSE EXCLUDED.status
+					END,
+					count = GREATEST(alert_history.count, EXCLUDED.count),
+					first_seen = LEAST(alert_history.first_seen, EXCLUDED.first_seen),
+					last_seen = GREATEST(alert_history.last_seen, EXCLUDED.last_seen),
+					evidence = CASE WHEN EXCLUDED.last_seen >= alert_history.last_seen THEN EXCLUDED.evidence ELSE alert_history.evidence END
+				RETURNING (xmax = 0) AS inserted,count
+			), occurrence_delta AS (
+				SELECT CASE
+					WHEN EXISTS(SELECT 1 FROM previous) THEN GREATEST((SELECT count FROM upserted)-COALESCE((SELECT count FROM previous),0),0)
+					ELSE 1
+				END AS occurrences,
+				CASE WHEN EXISTS(SELECT 1 FROM previous) THEN 0 ELSE 1 END AS new_findings
+			), metric AS (
+				INSERT INTO rule_occurrence_buckets(sensor_id,alert_type,bucket_start,occurrences,new_findings)
+				SELECT $1,$3,date_trunc('minute',$11::timestamptz),occurrences,new_findings
+				FROM occurrence_delta WHERE occurrences>0 OR new_findings>0
+				ON CONFLICT(sensor_id,alert_type,bucket_start) DO UPDATE SET
+					occurrences=rule_occurrence_buckets.occurrences+EXCLUDED.occurrences,
+					new_findings=rule_occurrence_buckets.new_findings+EXCLUDED.new_findings
+			)
+			SELECT inserted FROM upserted
 		`, sensorID, a.ID, a.Type, a.Severity, a.Message, a.IP, identity, status, count, firstSeen, lastSeen, jsonObject(a.Evidence)).Scan(&wasInserted)
 		if err != nil {
 			return newlyCreated, err

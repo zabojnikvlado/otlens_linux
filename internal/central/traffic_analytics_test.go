@@ -140,3 +140,56 @@ func TestNetworkRightOnlyPeerPointsOutsideSelectedScope(t *testing.T) {
 		t.Fatal("right-only scope should report the opposite endpoint as peer")
 	}
 }
+
+func TestAnalyticsBundleUsesSingleGroupingSetsAggregation(t *testing.T) {
+	now := time.Now()
+	req := trafficAnalyticsRequest{
+		From: now.Add(-6 * time.Hour), To: now,
+		Left:  trafficScope{Type: "any"},
+		Right: trafficScope{Type: "category", Value: "IT", Resolved: true, ResolvedIdentities: []string{"mac:aa:bb:cc:dd:ee:01"}},
+	}
+	q, _, _, _, _, err := buildAnalyticsQuery(req, req.From, req.To, 60, "bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(q, "GROUPING SETS") {
+		t.Fatal("bundle query must aggregate the selected rows in one grouping-sets pass")
+	}
+	if strings.Contains(q, "protocol_agg AS") || strings.Contains(q, "peer_agg AS") {
+		t.Fatal("bundle query must not rescan the selected working set for each breakdown")
+	}
+}
+
+func TestResolvedEmptyInventoryScopeCanShortCircuit(t *testing.T) {
+	s := trafficScope{Type: "category", Value: "Unused category", Resolved: true}
+	if !analyticsScopeResolvedEmpty(s) {
+		t.Fatal("resolved inventory scope with no identities should short-circuit to an empty response")
+	}
+	if analyticsScopeResolvedEmpty(trafficScope{Type: "category", Value: "", Resolved: true}) {
+		t.Fatal("empty scope value represents Any and must not short-circuit")
+	}
+}
+
+func TestAnyAnyAnalyticsUsesLightweightFlowPath(t *testing.T) {
+	now := time.Now()
+	req := trafficAnalyticsRequest{From: now.Add(-6 * time.Hour), To: now, Left: trafficScope{Type: "any"}, Right: trafficScope{Type: "any"}}
+	q, _, _, _, _, err := buildAnalyticsQuery(req, req.From, req.To, 60, "bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(q, "current_identity AS") || strings.Contains(q, "LEFT JOIN asset_overrides") {
+		t.Fatal("Any↔Any analytics should not join topology/asset overrides")
+	}
+	if !strings.Contains(q, "FROM flow_observations f") || !strings.Contains(q, "GROUPING SETS") {
+		t.Fatal("Any↔Any analytics should remain a bounded flow aggregation")
+	}
+}
+
+func TestNetworkScopeTypeWithAnyValueNormalizesToAny(t *testing.T) {
+	for _, typ := range []string{"vlan", "zone", "purdue", "category"} {
+		got := normalizeNetworkAnalyticsScope(trafficScope{Type: typ, Value: ""})
+		if got.Type != "any" || got.Value != "" {
+			t.Fatalf("%s/Any normalized to %#v, want unrestricted Any", typ, got)
+		}
+	}
+}

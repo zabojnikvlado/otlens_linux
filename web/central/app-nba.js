@@ -30,16 +30,38 @@ let behaviorProfileIndexSource=null,behaviorProfileIndex=new Map();
 function behaviorProfile(sensor,ip){const profiles=behaviorOverview?.profiles||[];if(behaviorProfileIndexSource!==profiles){behaviorProfileIndexSource=profiles;behaviorProfileIndex=new Map(profiles.map(x=>[`${x.sensor_id}\x00${x.asset_ip}`,x]))}return behaviorProfileIndex.get(`${sensor}\x00${ip}`)}
 function behaviorState(profile){return profile?.state||((behaviorOverview.learning_complete&&Number(behaviorOverview.coverage)>=99.5)?'healthy':'learning')}
 function behaviorBadge(profile){if(!behaviorOverviewLoaded)return '<span class="behavior-badge behavior-learning" title="Behavior enrichment is loading">…</span>';const state=behaviorState(profile),score=profile?Math.round(Number(profile.health_score||0)):'—';return `<span class="behavior-badge behavior-${esc(state)}" title="${esc(profile?.top_reason||state)}">${esc(score)}${score==='—'?'':' health'}</span>`}
+function networkPostureSummary(){
+  const overview=behaviorOverview||{},clamp=value=>Math.max(0,Math.min(100,Number(value)||0));
+  const behaviorReady=!!overview.learning_complete&&Number(overview.coverage||0)>0;
+  const behaviorHealth=behaviorReady?clamp(overview.network_health):100;
+  const critical=Math.max(0,Number(alertStats?.open_critical)||0),high=Math.max(0,Number(alertStats?.open_high)||0),medium=Math.max(0,Number(alertStats?.open_medium)||0),unreviewed=Math.max(0,Number(alertStats?.unreviewed)||0);
+  const incidentStats=incidentDashboard?.stats||{},openIncidents=Math.max(0,Number(incidentStats.open)||0),highRisk=Math.max(0,Number(incidentStats.high_risk_open)||0);
+  const sensorHealth=typeof effectiveSensorHealthSummary==='function'?effectiveSensorHealthSummary():null;
+  const sensorCounts=sensorHealth?.counts||{};
+  const offline=Math.max(0,Number(sensorCounts.offline)||0),stopped=Math.max(0,Number(sensorCounts.stopped)||0),criticalSensors=Math.max(0,Number(sensorCounts.critical)||0),warningSensors=Math.max(0,Number(sensorCounts.warning)||0);
+  let penalty=0;
+  penalty+=Math.min(60,critical*20);penalty+=Math.min(40,high*8);penalty+=Math.min(20,medium*2);
+  penalty+=Math.min(75,highRisk*15);penalty+=Math.min(25,Math.max(0,openIncidents-highRisk)*2);
+  penalty+=Math.min(15,Math.log10(1+unreviewed)*3);penalty+=Math.min(80,offline*40);penalty+=Math.min(30,stopped*15);penalty+=Math.min(60,criticalSensors*30);penalty+=Math.min(25,warningSensors*10);
+  let securityHealth=Math.max(0,100-Math.min(95,penalty));
+  if(offline>0||criticalSensors>0||critical>0||highRisk>0)securityHealth=Math.min(securityHealth,55);
+  else if(stopped>0||warningSensors>0||high>0||openIncidents>0)securityHealth=Math.min(securityHealth,80);
+  if(unreviewed>=1000)securityHealth=Math.min(securityHealth,84);else if(unreviewed>=100)securityHealth=Math.min(securityHealth,90);
+  const health=Math.min(behaviorHealth,securityHealth);
+  let state='healthy';if(securityHealth<60||behaviorHealth<60)state='critical';else if(!behaviorReady)state='learning';else if(health<85)state='degraded';
+  const reasons=[];if(highRisk)reasons.push(`${highRisk.toLocaleString()} high-risk incident(s)`);if(critical)reasons.push(`${critical.toLocaleString()} critical alert(s)`);if(openIncidents&&!highRisk)reasons.push(`${openIncidents.toLocaleString()} open incident(s)`);if(offline)reasons.push(`${offline} sensor(s) offline`);if(criticalSensors)reasons.push(`${criticalSensors} sensor(s) critical`);if(stopped)reasons.push(`${stopped} sensor(s) stopped`);if(warningSensors)reasons.push(`${warningSensors} sensor(s) warning`);if(unreviewed>=100)reasons.push(`${unreviewed.toLocaleString()} unreviewed alert(s)`);
+  return {health,state,behaviorReady,securityHealth,reasons};
+}
 function renderNetworkBehavior(){
-  const overview=behaviorOverview||{},health=Math.max(0,Math.min(100,Number(overview.network_health||0))),readiness=Math.max(0,Math.min(100,Number(overview.learning_readiness||0))),state=overview.state||'learning',hero=document.getElementById('network-behavior-hero');if(!hero)return;
+  const overview=behaviorOverview||{},posture=networkPostureSummary(),health=posture.health,readiness=Math.max(0,Math.min(100,Number(overview.learning_readiness||0))),state=posture.state,hero=document.getElementById('network-behavior-hero');if(!hero)return;
   const barValue=state==='learning'?readiness:health,bar=document.getElementById('network-health-bar');
   hero.className=`network-behavior-hero behavior-${state}`;hero.dataset.dashboardTab=canView('alerts')?'nba':'assets';document.getElementById('network-health-score').textContent=state==='learning'?'Learning':`${Math.round(health)}%`;bar.style.width=`${barValue}%`;bar.parentElement?.setAttribute('aria-label',state==='learning'?`Learning readiness ${Math.round(readiness)}%`:`Network health ${Math.round(health)}%`);
-  document.getElementById('network-health-state').textContent=state==='healthy'?'Healthy network behavior':state==='degraded'?'Behavior degradation detected':state==='critical'?'Major behavior anomaly':'Building reliable baselines';
+  document.getElementById('network-health-state').textContent=state==='healthy'?'Healthy security and behavior posture':state==='degraded'?(posture.reasons.slice(0,2).join(' · ')||'Security/behavior degradation detected'):state==='critical'?(posture.reasons.slice(0,2).join(' · ')||'Major network risk detected'):'Building reliable baselines';
   const awaitingSensors=Math.max(0,Number(overview.awaiting_sensors||0)),reportingSensors=Math.max(0,Number(overview.reporting_sensors||0));
   document.getElementById('network-learning-state').textContent=overview.learning_complete?'Complete':awaitingSensors&&reportingSensors===0?'Awaiting telemetry':`${Math.round(Number(overview.learning_readiness||0))}% ready`;
   document.getElementById('network-coverage').textContent=awaitingSensors?`${awaitingSensors} sensor(s) awaiting baseline telemetry`:`${Math.round(Number(overview.coverage||0))}% mature-asset coverage`;
   document.getElementById('network-active-baselines').textContent=Number(overview.active_baselines||0).toLocaleString();document.getElementById('network-behavior-alerts').textContent=Number(overview.behavior_alerts||0).toLocaleString();document.getElementById('network-affected-assets').textContent=`${Number(overview.affected_assets||0)} affected assets`;
-  const top=overview.top_anomaly;document.getElementById('network-top-anomaly').textContent=top?.asset_ip||'—';document.getElementById('network-top-anomaly-score').textContent=top?`Anomaly ${Number(top.anomaly_score||0).toFixed(1)} · ${nbaPercent(top.confidence)}`:'No active finding';
+  const top=overview.top_anomaly;document.getElementById('network-top-anomaly').textContent=top?.asset_ip||'—';document.getElementById('network-top-anomaly-score').textContent=top?`Anomaly ${Number(top.anomaly_score||0).toFixed(1)} · ${nbaPercent(top.confidence)}`:'No active behavior finding';
 }
 
 function renderBehaviorFindings(){

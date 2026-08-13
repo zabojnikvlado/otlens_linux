@@ -93,13 +93,18 @@ func (e *Engine) handleReconnaissance(packet core.Packet) {
 	}
 	ip := net.ParseIP(packet.DstIP)
 	specialCount := 0
+	routineDiscovery := routineDiscoveryTraffic(packet)
 	if ip != nil && ip.IsMulticast() {
 		class = "multicast_discovery"
-		specialCount = e.reconSignal(packet.SrcIP, class, now)
+		if !routineDiscovery {
+			specialCount = e.reconSignal(packet.SrcIP, class, now)
+		}
 	}
-	if packet.DstIP == "255.255.255.255" {
+	if packet.DstIP == "255.255.255.255" || groupDestination(packet) && (ip == nil || !ip.IsMulticast()) {
 		class = "broadcast_discovery"
-		specialCount = e.reconSignal(packet.SrcIP, class, now)
+		if !routineDiscovery {
+			specialCount = e.reconSignal(packet.SrcIP, class, now)
+		}
 	}
 	if proto, ok := otServicePorts[packet.DstPort]; ok && hostCount >= maxReconInt(5, e.hostScanThreshold/2) {
 		class = "ot_protocol_discovery_" + proto
@@ -110,7 +115,7 @@ func (e *Engine) handleReconnaissance(packet core.Packet) {
 		return
 	}
 	ctx, _ := e.assetContext(packet.SrcIP)
-	hostThreshold, portThreshold, discoveryThreshold := e.hostScanThreshold, e.portScanThreshold, 20
+	hostThreshold, portThreshold, discoveryThreshold := e.hostScanThreshold, e.portScanThreshold, 40
 	if isTrustedDiscoveryRole(ctx.Role) {
 		// NMS/vulnerability scanners legitimately fan out. Explicit operator
 		// classification does not silence them completely, but requires a much
@@ -120,7 +125,7 @@ func (e *Engine) handleReconnaissance(packet core.Packet) {
 		discoveryThreshold *= 4
 	}
 	evidence := func(kind string) map[string]interface{} {
-		return map[string]interface{}{"scan_type": kind, "source_ip": packet.SrcIP, "source_role": ctx.Role, "source_zone": ctx.Zone, "distinct_hosts": hostCount, "distinct_ports": portCount, "host_threshold": hostThreshold, "port_threshold": portThreshold, "window": e.reconWindow.String(), "latest_target": packet.DstIP, "latest_port": packet.DstPort}
+		return map[string]interface{}{"scan_type": kind, "source_ip": packet.SrcIP, "source_role": ctx.Role, "source_zone": ctx.Zone, "distinct_hosts": hostCount, "distinct_ports": portCount, "host_threshold": hostThreshold, "port_threshold": portThreshold, "discovery_threshold": discoveryThreshold, "routine_discovery": routineDiscovery, "window": e.reconWindow.String(), "latest_target": packet.DstIP, "latest_port": packet.DstPort}
 	}
 	if specialCount >= discoveryThreshold {
 		e.raiseBuiltinAlert(string(AlertReconnaissance), AlertReconnaissance, "high", "recon|"+class+"|"+packet.SrcIP,

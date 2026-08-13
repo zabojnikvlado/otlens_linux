@@ -190,9 +190,14 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		}
 		args := make([]interface{}, 0, (end-start)*21)
 		values := make([]string, 0, end-start)
+		flowObservationTypes := []string{
+			"text", "text", "timestamptz", "timestamptz", "text", "text",
+			"integer", "integer", "text", "text", "text", "integer", "integer",
+			"bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "integer", "boolean",
+		}
 		for _, o := range observations[start:end] {
 			e := o.edge
-			values = append(values, appendSQLTuple(&args,
+			values = append(values, appendSQLTypedTuple(&args, flowObservationTypes,
 				sensorID, e.ID, o.eventAt.UTC().Truncate(time.Minute), o.eventAt, e.SrcIP, e.DstIP, e.SrcPort, e.DstPort, e.Protocol,
 				e.InitiatorIP, e.ResponderIP, e.InitiatorPort, e.ResponderPort,
 				o.packets, o.bytes, o.packetsAToB, o.packetsBToA, o.bytesAToB, o.bytesBToA, e.VLANID, e.IsOT,
@@ -205,10 +210,10 @@ func persistFlowObservations(ctx context.Context, x execer, sensorID string, cap
 		// has overlapping owners, preserve ip:<IP> instead of choosing a random MAC.
 		query := `INSERT INTO flow_observations(
  sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_identity,dst_identity,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot)
-SELECT v.sensor_id,v.flow_id,v.bucket_start,v.bucket_end,v.src_ip,v.dst_ip,
- COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.src_ip END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id AND b.ip=v.src_ip AND b.valid_from<=v.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start)),'ip:'||v.src_ip),
- COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.dst_ip END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id AND b.ip=v.dst_ip AND b.valid_from<=v.bucket_end AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start)),'ip:'||v.dst_ip),
- v.src_port,v.dst_port,v.protocol,v.initiator_ip,v.responder_ip,v.initiator_port,v.responder_port,v.packets,v.bytes,v.packets_a_to_b,v.packets_b_to_a,v.bytes_a_to_b,v.bytes_b_to_a,v.vlan_id,v.is_ot
+SELECT v.sensor_id::text,v.flow_id::text,v.bucket_start::timestamptz,v.bucket_end::timestamptz,v.src_ip::text,v.dst_ip::text,
+ COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.src_ip::text END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id::text AND b.ip=v.src_ip::text AND b.valid_from<=v.bucket_end::timestamptz AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start::timestamptz)),'ip:'||v.src_ip::text),
+ COALESCE((SELECT CASE WHEN COUNT(DISTINCT b.asset_identity)=1 THEN MIN(b.asset_identity) ELSE 'ip:'||v.dst_ip::text END FROM asset_ip_binding_history b WHERE b.sensor_id=v.sensor_id::text AND b.ip=v.dst_ip::text AND b.valid_from<=v.bucket_end::timestamptz AND (b.valid_to IS NULL OR b.valid_to>=v.bucket_start::timestamptz)),'ip:'||v.dst_ip::text),
+ v.src_port::integer,v.dst_port::integer,v.protocol::text,v.initiator_ip::text,v.responder_ip::text,v.initiator_port::integer,v.responder_port::integer,v.packets::bigint,v.bytes::bigint,v.packets_a_to_b::bigint,v.packets_b_to_a::bigint,v.bytes_a_to_b::bigint,v.bytes_b_to_a::bigint,v.vlan_id::integer,v.is_ot::boolean
 FROM (VALUES ` + strings.Join(values, ",") + `) AS v(sensor_id,flow_id,bucket_start,bucket_end,src_ip,dst_ip,src_port,dst_port,protocol,initiator_ip,responder_ip,initiator_port,responder_port,packets,bytes,packets_a_to_b,packets_b_to_a,bytes_a_to_b,bytes_b_to_a,vlan_id,is_ot)
 ON CONFLICT(sensor_id,flow_id,bucket_start) DO UPDATE SET src_identity=EXCLUDED.src_identity,dst_identity=EXCLUDED.dst_identity,packets=flow_observations.packets+EXCLUDED.packets,bytes=flow_observations.bytes+EXCLUDED.bytes,packets_a_to_b=flow_observations.packets_a_to_b+EXCLUDED.packets_a_to_b,packets_b_to_a=flow_observations.packets_b_to_a+EXCLUDED.packets_b_to_a,bytes_a_to_b=flow_observations.bytes_a_to_b+EXCLUDED.bytes_a_to_b,bytes_b_to_a=flow_observations.bytes_b_to_a+EXCLUDED.bytes_b_to_a,bucket_end=GREATEST(flow_observations.bucket_end,EXCLUDED.bucket_end)`
 		if _, err := x.ExecContext(ctx, query, args...); err != nil {

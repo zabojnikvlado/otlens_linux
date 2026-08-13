@@ -137,6 +137,7 @@ type TrafficAnalyticsResponse struct {
 	TopPeers     []TrafficBreakdown      `json:"top_peers"`
 	Anomalies    []TrafficAnomaly        `json:"anomalies"`
 	Baseline     TrafficBaseline         `json:"baseline"`
+	Warning      string                  `json:"warning,omitempty"`
 }
 
 const analyticsServiceSQL = `CASE
@@ -483,12 +484,8 @@ ORDER BY n.sensor_id,(CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||
 	return out, nil
 }
 
-func analyticsCTE(baseWhere string) string {
-	// Scope membership (VLAN/zone/Purdue/category) is resolved once, before the
-	// flow query. The hot path therefore only needs a tiny current-identity map for
-	// readable peer names; it does not re-run classification/context/VLAN joins for
-	// every flow bucket.
-	return `WITH raw AS (
+func analyticsCTE(baseWhere string, lightweight bool) string {
+	common := `WITH raw AS (
  SELECT f.*
  FROM flow_observations f
  WHERE ` + baseWhere + `
@@ -501,7 +498,22 @@ func analyticsCTE(baseWhere string) string {
    CASE WHEN COALESCE(NULLIF(initiator_ip,''),src_ip)=src_ip THEN src_id WHEN COALESCE(NULLIF(initiator_ip,''),src_ip)=dst_ip THEN dst_id ELSE src_id END initiator_identity,
    CASE WHEN COALESCE(NULLIF(responder_ip,''),dst_ip)=dst_ip THEN dst_id WHEN COALESCE(NULLIF(responder_ip,''),dst_ip)=src_ip THEN src_id ELSE dst_id END responder_identity
  FROM enriched
-), current_identity AS (
+)`
+	if lightweight {
+		// An unrestricted Network/Zone request does not need topology, override or
+		// identity-name joins at all. Keep peer labels IP-based in this fast path so
+		// an Any↔Any six-hour graph is a bounded flow aggregation rather than a join
+		// against the inventory for every bucket.
+		return common + `, decorated AS (
+ SELECT o.*,
+  COALESCE(NULLIF(o.initiator_ip_eff,''),o.initiator_identity,'Unknown') initiator_name,
+  COALESCE(NULLIF(o.responder_ip_eff,''),o.responder_identity,'Unknown') responder_name
+ FROM oriented o
+)`
+	}
+	// Scoped analytics keeps friendly current peer names. Scope membership itself
+	// has already been resolved to stable identities before this hot path.
+	return common + `, current_identity AS (
  SELECT DISTINCT ON(sensor_id,identity) sensor_id,identity,ip,mac,hostname FROM (
   SELECT n.sensor_id,CASE WHEN n.mac<>'' THEN 'mac:'||lower(n.mac) ELSE 'ip:'||n.ip END identity,n.ip,n.mac,n.hostname,n.last_seen
   FROM topology_nodes n WHERE n.active=TRUE AND n.identity_conflict=FALSE
@@ -596,13 +608,13 @@ func buildAnalyticsQuery(req trafficAnalyticsRequest, from, to time.Time, step i
 	base = appendResolvedScopeBasePrefilter(base, req.Left, &args)
 	base = appendResolvedScopeBasePrefilter(base, req.Right, &args)
 
-	cte := analyticsCTE(base)
+	leftAny := req.Left.Type == "" || req.Left.Type == "any" || req.Left.Value == ""
+	rightAny := req.Right.Type == "" || req.Right.Type == "any" || req.Right.Value == ""
+	cte := analyticsCTE(base, leftAny && rightAny)
 	li := scopeCondition("initiator", req.Left, &args)
 	lr := scopeCondition("responder", req.Left, &args)
 	ri := scopeCondition("initiator", req.Right, &args)
 	rr := scopeCondition("responder", req.Right, &args)
-	leftAny := req.Left.Type == "" || req.Left.Type == "any" || req.Left.Value == ""
-	rightAny := req.Right.Type == "" || req.Right.Type == "any" || req.Right.Value == ""
 	pairCond := "TRUE"
 	outExpr := "bytes_a_to_b"
 	inExpr := "bytes_b_to_a"
@@ -654,42 +666,49 @@ func buildAnalyticsQuery(req trafficAnalyticsRequest, from, to time.Time, step i
 	case "series":
 		tail = ` SELECT to_timestamp(floor(extract(epoch from bucket_start)/` + stepP + `)*` + stepP + `) bucket,COALESCE(SUM(` + outExpr + `)::bigint,0),COALESCE(SUM(` + inExpr + `)::bigint,0),COALESCE(SUM(` + outPackets + `)::bigint,0),COALESCE(SUM(` + inPackets + `)::bigint,0),COUNT(DISTINCT (sensor_id,flow_id)) FROM decorated WHERE ` + pairCond + ` GROUP BY 1 ORDER BY 1`
 	case "bundle":
-		// Materialize the expensive decorated+filtered row set once. The old code
-		// rebuilt the full CTE six times (series, summary, protocols, ports, peers,
-		// baseline), multiplying joins and history work on million-row datasets.
+		// Aggregate the selected flow rows once with GROUPING SETS. The previous
+		// implementation materialized the filtered rows and then scanned that
+		// materialization separately for series, summary, protocols, ports and
+		// peers. Broad Network/Zone scopes could therefore traverse the same
+		// six-hour working set five times before baseline processing even began.
+		rankMetric := `(out_bytes+in_bytes)`
+		if req.Direction == "out" {
+			rankMetric = `out_bytes`
+		} else if req.Direction == "in" {
+			rankMetric = `in_bytes`
+		}
 		tail = `, selected AS MATERIALIZED (
  SELECT sensor_id,flow_id,to_timestamp(floor(extract(epoch from bucket_start)/` + stepP + `)*` + stepP + `) bucket,
         (` + outExpr + `)::bigint out_bytes,(` + inExpr + `)::bigint in_bytes,
         (` + outPackets + `)::bigint out_packets,(` + inPackets + `)::bigint in_packets,
-        (` + metricExpr + `)::bigint metric_bytes,(` + metricPackets + `)::bigint metric_packets,
         (` + analyticsServiceSQL + `) service_name,
         COALESCE(NULLIF(responder_port,0),dst_port)::text port_name,
         COALESCE(NULLIF(` + peerName + `,''),'Unknown') peer_name
  FROM decorated WHERE ` + pairCond + `
-), series_agg AS (
- SELECT bucket,COALESCE(SUM(out_bytes)::bigint,0) out_bytes,COALESCE(SUM(in_bytes)::bigint,0) in_bytes,
-        COALESCE(SUM(out_packets)::bigint,0) out_packets,COALESCE(SUM(in_packets)::bigint,0) in_packets,COUNT(DISTINCT (sensor_id,flow_id)) connections
- FROM selected GROUP BY bucket
-), summary_agg AS (
- SELECT COALESCE(SUM(out_bytes)::bigint,0) out_bytes,COALESCE(SUM(in_bytes)::bigint,0) in_bytes,
-        COALESCE(SUM(out_packets)::bigint,0) out_packets,COALESCE(SUM(in_packets)::bigint,0) in_packets,COUNT(DISTINCT (sensor_id,flow_id)) connections
+), grouped AS (
+ SELECT CASE
+          WHEN GROUPING(bucket)=0 THEN 'series'
+          WHEN GROUPING(service_name)=0 THEN 'protocol'
+          WHEN GROUPING(port_name)=0 THEN 'port'
+          WHEN GROUPING(peer_name)=0 THEN 'peer'
+          ELSE 'summary' END kind,
+        bucket,
+        CASE WHEN GROUPING(service_name)=0 THEN service_name
+             WHEN GROUPING(port_name)=0 THEN port_name
+             WHEN GROUPING(peer_name)=0 THEN peer_name ELSE ''::text END name,
+        COALESCE(SUM(out_bytes)::bigint,0) out_bytes,COALESCE(SUM(in_bytes)::bigint,0) in_bytes,
+        COALESCE(SUM(out_packets)::bigint,0) out_packets,COALESCE(SUM(in_packets)::bigint,0) in_packets,
+        COUNT(DISTINCT (sensor_id,flow_id)) connections
  FROM selected
-), protocol_agg AS (
- SELECT service_name name,COALESCE(SUM(metric_bytes)::bigint,0) bytes,COALESCE(SUM(metric_packets)::bigint,0) packets,COUNT(DISTINCT (sensor_id,flow_id)) connections
- FROM selected GROUP BY service_name ORDER BY bytes DESC LIMIT 12
-), port_agg AS (
- SELECT port_name name,COALESCE(SUM(metric_bytes)::bigint,0) bytes,COALESCE(SUM(metric_packets)::bigint,0) packets,COUNT(DISTINCT (sensor_id,flow_id)) connections
- FROM selected GROUP BY port_name ORDER BY bytes DESC LIMIT 12
-), peer_agg AS (
- SELECT peer_name name,COALESCE(SUM(metric_bytes)::bigint,0) bytes,COALESCE(SUM(metric_packets)::bigint,0) packets,COUNT(DISTINCT (sensor_id,flow_id)) connections
- FROM selected GROUP BY peer_name ORDER BY bytes DESC LIMIT 12
+ GROUP BY GROUPING SETS ((bucket),(service_name),(port_name),(peer_name),())
+), ranked AS (
+ SELECT grouped.*,CASE WHEN kind IN ('protocol','port','peer') THEN
+        row_number() OVER (PARTITION BY kind ORDER BY ` + rankMetric + ` DESC) ELSE 1 END rn
+ FROM grouped
 )
- SELECT 'series' kind,bucket,''::text name,out_bytes,in_bytes,out_packets,in_packets,connections FROM series_agg
- UNION ALL SELECT 'summary',NULL::timestamptz,'',out_bytes,in_bytes,out_packets,in_packets,connections FROM summary_agg
- UNION ALL SELECT 'protocol',NULL::timestamptz,name,bytes,0::bigint,packets,0::bigint,connections FROM protocol_agg
- UNION ALL SELECT 'port',NULL::timestamptz,name,bytes,0::bigint,packets,0::bigint,connections FROM port_agg
- UNION ALL SELECT 'peer',NULL::timestamptz,name,bytes,0::bigint,packets,0::bigint,connections FROM peer_agg
- ORDER BY 1,2 NULLS LAST`
+ SELECT kind,bucket,name,out_bytes,in_bytes,out_packets,in_packets,connections
+ FROM ranked WHERE kind IN ('series','summary') OR rn<=12
+ ORDER BY kind,bucket NULLS LAST,` + rankMetric + ` DESC`
 	case "summary":
 		tail = ` SELECT COALESCE(SUM(` + outExpr + `)::bigint,0),COALESCE(SUM(` + inExpr + `)::bigint,0),COALESCE(SUM(` + outPackets + `)::bigint,0),COALESCE(SUM(` + inPackets + `)::bigint,0),COUNT(DISTINCT (sensor_id,flow_id)) FROM decorated WHERE ` + pairCond
 	case "protocols":
@@ -799,7 +818,14 @@ func queryAnalyticsBundle(ctx context.Context, r *Repository, req trafficAnalyti
 			if name == "" {
 				name = "Unknown"
 			}
-			x := TrafficBreakdown{Name: name, Bytes: uint64(outBytes), Packets: uint64(outPackets), Connections: connections}
+			metricBytes := outBytes + inBytes
+			metricPackets := outPackets + inPackets
+			if req.Direction == "out" {
+				metricBytes, metricPackets = outBytes, outPackets
+			} else if req.Direction == "in" {
+				metricBytes, metricPackets = inBytes, inPackets
+			}
+			x := TrafficBreakdown{Name: name, Bytes: uint64(metricBytes), Packets: uint64(metricPackets), Connections: connections}
 			switch kind {
 			case "protocol":
 				out.TopProtocols = append(out.TopProtocols, x)
@@ -983,50 +1009,79 @@ func analyticsBaselineWindow(d time.Duration) (time.Duration, string) {
 	}
 }
 
+func emptyTrafficAnalyticsResponse(req trafficAnalyticsRequest, step int) TrafficAnalyticsResponse {
+	return TrafficAnalyticsResponse{
+		From: req.From, To: req.To, StepSeconds: step, Direction: req.Direction,
+		LeftLabel: req.LeftLabel, RightLabel: req.RightLabel,
+		Series: []TrafficSeriesPoint{}, TopProtocols: []TrafficBreakdown{}, TopPorts: []TrafficBreakdown{},
+		TopPeers: []TrafficBreakdown{}, Anomalies: []TrafficAnomaly{}, Baseline: TrafficBaseline{Source: "insufficient_data"},
+	}
+}
+
+func analyticsScopeResolvedEmpty(scope trafficScope) bool {
+	return analyticsInventoryScope(scope.Type) && strings.TrimSpace(scope.Value) != "" && scope.Resolved && len(scope.ResolvedIdentities) == 0
+}
+
 func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyticsRequest) (TrafficAnalyticsResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
 	step := stepForRange(req.To.Sub(req.From))
 	lookback, baselineSource := analyticsBaselineWindow(req.To.Sub(req.From))
 	baselineFrom := req.From.Add(-lookback)
 
-	// Resolve inventory scopes (VLAN/zone/Purdue/category) to endpoint-specific
-	// stable identities before touching flow_observations. This fixes cross-VLAN
-	// semantics and turns a broad decorated scan into an indexed identity scan.
-	if err := r.resolveAnalyticsInventoryScopes(ctx, &req); err != nil {
+	// Scope resolution is metadata work over the current inventory. Keep it under
+	// a short independent deadline so a metadata problem cannot occupy the full
+	// analytics execution budget.
+	scopeCtx, scopeCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer scopeCancel()
+	if err := r.resolveAnalyticsInventoryScopes(scopeCtx, &req); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if err := r.populateAnalyticsScopeLegacyAliases(ctx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
+	if analyticsScopeResolvedEmpty(req.Left) || analyticsScopeResolvedEmpty(req.Right) {
+		return emptyTrafficAnalyticsResponse(req, step), nil
+	}
+	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if err := r.populateAnalyticsScopeLegacyAliases(ctx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
+	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
+		return TrafficAnalyticsResponse{}, err
+	}
+	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
+		return TrafficAnalyticsResponse{}, err
+	}
+	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
 
-	// Resolve the small alias set once. Modern flow rows already contain stable
-	// identities; only legacy rows need this fallback. Doing it here replaces the
-	// previous two per-row LATERAL history scans repeated by every analytics query.
-	if err := r.populateAnalyticsLegacyAliases(ctx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
-		return TrafficAnalyticsResponse{}, err
-	}
-	if err := r.populateAnalyticsLegacyAliases(ctx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
-		return TrafficAnalyticsResponse{}, err
-	}
-
-	bundle, err := queryAnalyticsBundle(ctx, r, req, req.From, req.To, step)
+	// The current window is the product-critical result. Give it its own budget;
+	// historical baseline work below is best-effort and can no longer make a
+	// perfectly valid current graph fail.
+	currentCtx, currentCancel := context.WithTimeout(ctx, 25*time.Second)
+	defer currentCancel()
+	bundle, err := queryAnalyticsBundle(currentCtx, r, req, req.From, req.To, step)
 	if err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-
-	baseline := TrafficBaseline{Source: "insufficient_data"}
-	anomalies := []TrafficAnomaly{}
-	if len(bundle.Series) > 0 {
-		baselineSeries, err := querySeries(ctx, r, req, baselineFrom, req.From, step)
-		if err != nil {
-			return TrafficAnalyticsResponse{}, err
-		}
-		baseline, anomalies = buildBaseline(bundle.Series, baselineSeries, baselineSource)
+	if len(bundle.Series) == 0 {
+		out := emptyTrafficAnalyticsResponse(req, step)
+		out.Summary = bundle.Summary
+		out.TopProtocols, out.TopPorts, out.TopPeers = bundle.TopProtocols, bundle.TopPorts, bundle.TopPeers
+		return out, nil
 	}
+
+	// Always have a usable baseline from the visible series. When the historical
+	// baseline finishes quickly it replaces this provisional baseline. This keeps
+	// anomaly visualization available while preventing a slow 24h/30d lookback
+	// from blanking the entire Network/Zone dashboard.
+	baseline, anomalies := buildBaseline(bundle.Series, nil, "current_window")
+	warning := ""
+	baselineCtx, baselineCancel := context.WithTimeout(ctx, 5*time.Second)
+	baselineSeries, baselineErr := querySeries(baselineCtx, r, req, baselineFrom, req.From, step)
+	baselineCancel()
+	if baselineErr == nil {
+		baseline, anomalies = buildBaseline(bundle.Series, baselineSeries, baselineSource)
+	} else {
+		warning = "historical baseline unavailable; current-window baseline used"
+	}
+
 	for _, a := range anomalies {
 		for i := range bundle.Series {
 			if bundle.Series[i].Time.Equal(a.Time) {
@@ -1047,7 +1102,7 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 		From: req.From, To: req.To, StepSeconds: step, Direction: req.Direction,
 		LeftLabel: req.LeftLabel, RightLabel: req.RightLabel, Summary: bundle.Summary,
 		Series: bundle.Series, TopProtocols: bundle.TopProtocols, TopPorts: bundle.TopPorts,
-		TopPeers: bundle.TopPeers, Anomalies: anomalies, Baseline: baseline,
+		TopPeers: bundle.TopPeers, Anomalies: anomalies, Baseline: baseline, Warning: warning,
 	}, nil
 }
 
@@ -1144,14 +1199,24 @@ func validateAnalyticsScope(scope trafficScope) error {
 	return nil
 }
 
+func normalizeNetworkAnalyticsScope(scope trafficScope) trafficScope {
+	if analyticsInventoryScope(scope.Type) && strings.TrimSpace(scope.Value) == "" {
+		return trafficScope{Type: "any"}
+	}
+	if strings.TrimSpace(scope.Type) == "" {
+		scope.Type = "any"
+	}
+	return scope
+}
+
 func (s *Server) networkTrafficAnalytics(c *gin.Context) {
 	req, err := parseCommonAnalyticsRequest(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	req.Left = parseScope(c, "left")
-	req.Right = parseScope(c, "right")
+	req.Left = normalizeNetworkAnalyticsScope(parseScope(c, "left"))
+	req.Right = normalizeNetworkAnalyticsScope(parseScope(c, "right"))
 	if err := validateAnalyticsScope(req.Left); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
