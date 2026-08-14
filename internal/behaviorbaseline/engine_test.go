@@ -181,6 +181,21 @@ func TestCandidateBaselineRequiresEvidenceAndManualPromotion(t *testing.T) {
 	if len(engine.Candidates(0)) != 0 || !engine.hasTrustedKey(candidate.key) {
 		t.Fatal("manual promotion did not move candidate into trusted baseline")
 	}
+	if err := engine.PromoteCandidate(rows[0].ID); err != nil {
+		t.Fatalf("promotion command should be idempotent until Central confirms it: %v", err)
+	}
+	status := engine.Status(time.Now().UTC())
+	if len(status.PromotedCandidates) != 1 || status.PromotedCandidates[0] != rows[0].ID {
+		t.Fatalf("promotion acknowledgement missing from telemetry status: %#v", status.PromotedCandidates)
+	}
+	snapshot := engine.Snapshot(time.Now().UTC())
+	restored := New(nil, Config{Enabled: true, SensorID: "s", LearningDuration: time.Second, MaxLearningMultiplier: 2, MinAssetSamples: 1, MinAssetAge: time.Millisecond, CandidateMinSamples: 2, CandidateMinDays: 1, MaxProfiles: 100})
+	if err := restored.Restore(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.PromoteCandidate(rows[0].ID); err != nil {
+		t.Fatalf("persisted promotion acknowledgement was not idempotent after restore: %v", err)
+	}
 }
 
 func TestSecurityExclusionQuarantinesCandidateAndTrustedPeer(t *testing.T) {

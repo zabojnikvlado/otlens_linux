@@ -346,11 +346,21 @@ func main() {
 						}
 					}()
 				case "baseline.candidate.promote":
+					log.Printf("OTLens baseline candidate promotion command received (id=%d target=%q)", command.ID, command.Target)
 					if err := application.BehaviorBaseline.PromoteCandidate(command.Target); err != nil {
-						log.Printf("OTLens baseline candidate promotion failed: %v", err)
+						application.BehaviorBaseline.RecordPromotionFailure(command.Target, err)
+						if flushErr := application.Snapshotter.Flush(); flushErr != nil {
+							log.Printf("OTLens baseline candidate promotion failure persistence flush failed: %v", flushErr)
+						}
+						log.Printf("OTLens baseline candidate promotion failed (id=%d target=%q): %v", command.ID, command.Target, err)
 					} else {
 						application.AnomalyEngine.Reset()
-						log.Printf("OTLens baseline candidate promoted: %s", command.Target)
+						if err := application.Snapshotter.Flush(); err != nil {
+							application.BehaviorBaseline.RecordPromotionFailure(command.Target, fmt.Errorf("persist promoted baseline: %w", err))
+							log.Printf("OTLens baseline candidate promotion persistence flush failed: %v", err)
+						} else {
+							log.Printf("OTLens baseline candidate promoted (id=%d target=%q)", command.ID, command.Target)
+						}
 					}
 				case "asset.confirm":
 					if application.AssetEngine.Confirm(command.Target) {

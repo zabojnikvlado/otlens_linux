@@ -193,3 +193,53 @@ func TestNetworkScopeTypeWithAnyValueNormalizesToAny(t *testing.T) {
 		}
 	}
 }
+
+func TestFillTrafficSeriesPreservesQuietIntervals(t *testing.T) {
+	from := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	to := from.Add(5 * time.Minute)
+	series := []TrafficSeriesPoint{{Time: from.Add(2 * time.Minute), TotalBytes: 123, OutBytes: 123}}
+	got := fillTrafficSeries(series, from, to, 60)
+	if len(got) != 5 {
+		t.Fatalf("got %d buckets, want 5", len(got))
+	}
+	if got[2].TotalBytes != 123 || got[0].TotalBytes != 0 || got[4].TotalBytes != 0 {
+		t.Fatalf("unexpected filled series: %#v", got)
+	}
+}
+
+func TestScheduleAwareBaselineUsesTimeOfDayHistory(t *testing.T) {
+	locOffset := -120                                            // browser in UTC+2 reports -120 minutes
+	currentStart := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC) // 10:00 local
+	current := []TrafficSeriesPoint{{Time: currentStart, TotalBytes: 20 * 1024 * 1024, OutBytes: 20 * 1024 * 1024}}
+	history := []TrafficSeriesPoint{}
+	for d := 1; d <= 14; d++ {
+		tm := currentStart.Add(-time.Duration(d) * 24 * time.Hour)
+		history = append(history, TrafficSeriesPoint{Time: tm, TotalBytes: 2 * 1024 * 1024, OutBytes: 2 * 1024 * 1024})
+	}
+	expected, _ := scheduleAwareExpectedSeries(current, history, 300, 300, locOffset)
+	if len(expected) != 1 || expected[0].Samples < 4 {
+		t.Fatalf("unexpected expected series: %#v", expected)
+	}
+	if expected[0].MedianBytes != 2*1024*1024 {
+		t.Fatalf("median=%d, want %d", expected[0].MedianBytes, 2*1024*1024)
+	}
+}
+
+func TestHistoricalBaselineBundleCanSkipPortBreakdown(t *testing.T) {
+	now := time.Now()
+	req := trafficAnalyticsRequest{
+		From: now.Add(-24 * time.Hour), To: now,
+		Left: trafficScope{Type: "asset", Value: "mac:aa:bb:cc:dd:ee:ff"}, Right: trafficScope{Type: "any"},
+		BreakdownLimit: 4096, SkipPorts: true,
+	}
+	q, _, _, _, _, err := buildAnalyticsQuery(req, req.From, req.To, 300, "bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(q, "GROUPING SETS ((bucket),(service_name),(port_name)") {
+		t.Fatal("baseline history bundle should skip the high-cardinality port breakdown")
+	}
+	if !strings.Contains(q, "rn<=4096") {
+		t.Fatal("baseline history bundle should widen peer/service coverage")
+	}
+}

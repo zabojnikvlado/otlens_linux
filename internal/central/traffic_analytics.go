@@ -60,16 +60,22 @@ type trafficScope struct {
 }
 
 type trafficAnalyticsRequest struct {
-	From       time.Time
-	To         time.Time
-	SensorID   string
-	Protocol   string
-	Port       int
-	Direction  string
-	Left       trafficScope
-	Right      trafficScope
-	LeftLabel  string
-	RightLabel string
+	From            time.Time
+	To              time.Time
+	SensorID        string
+	Protocol        string
+	Port            int
+	Direction       string
+	Left            trafficScope
+	Right           trafficScope
+	LeftLabel       string
+	RightLabel      string
+	CompareBaseline bool
+	BaselineDays    int
+	TZOffsetMinutes int
+	// Internal query controls. They are never accepted directly from the client.
+	BreakdownLimit int
+	SkipPorts      bool
 }
 
 type TrafficSeriesPoint struct {
@@ -124,20 +130,21 @@ type TrafficAnalyticsSummary struct {
 }
 
 type TrafficAnalyticsResponse struct {
-	From         time.Time               `json:"from"`
-	To           time.Time               `json:"to"`
-	StepSeconds  int                     `json:"step_seconds"`
-	Direction    string                  `json:"direction"`
-	LeftLabel    string                  `json:"left_label"`
-	RightLabel   string                  `json:"right_label"`
-	Summary      TrafficAnalyticsSummary `json:"summary"`
-	Series       []TrafficSeriesPoint    `json:"series"`
-	TopProtocols []TrafficBreakdown      `json:"top_protocols"`
-	TopPorts     []TrafficBreakdown      `json:"top_ports"`
-	TopPeers     []TrafficBreakdown      `json:"top_peers"`
-	Anomalies    []TrafficAnomaly        `json:"anomalies"`
-	Baseline     TrafficBaseline         `json:"baseline"`
-	Warning      string                  `json:"warning,omitempty"`
+	From               time.Time                  `json:"from"`
+	To                 time.Time                  `json:"to"`
+	StepSeconds        int                        `json:"step_seconds"`
+	Direction          string                     `json:"direction"`
+	LeftLabel          string                     `json:"left_label"`
+	RightLabel         string                     `json:"right_label"`
+	Summary            TrafficAnalyticsSummary    `json:"summary"`
+	Series             []TrafficSeriesPoint       `json:"series"`
+	TopProtocols       []TrafficBreakdown         `json:"top_protocols"`
+	TopPorts           []TrafficBreakdown         `json:"top_ports"`
+	TopPeers           []TrafficBreakdown         `json:"top_peers"`
+	Anomalies          []TrafficAnomaly           `json:"anomalies"`
+	Baseline           TrafficBaseline            `json:"baseline"`
+	BaselineComparison *TrafficBaselineComparison `json:"baseline_comparison,omitempty"`
+	Warning            string                     `json:"warning,omitempty"`
 }
 
 const analyticsServiceSQL = `CASE
@@ -661,6 +668,22 @@ func buildAnalyticsQuery(req trafficAnalyticsRequest, from, to time.Time, step i
 		peerName = `responder_name`
 	}
 
+	rankLimit := req.BreakdownLimit
+	if rankLimit <= 0 {
+		rankLimit = 12
+	}
+	if rankLimit > 4096 {
+		rankLimit = 4096
+	}
+	groupingSets := "((bucket),(service_name),(port_name),(peer_name),())"
+	kindCase := "CASE WHEN GROUPING(bucket)=0 THEN 'series' WHEN GROUPING(service_name)=0 THEN 'protocol' WHEN GROUPING(port_name)=0 THEN 'port' WHEN GROUPING(peer_name)=0 THEN 'peer' ELSE 'summary' END"
+	nameCase := "CASE WHEN GROUPING(service_name)=0 THEN service_name WHEN GROUPING(port_name)=0 THEN port_name WHEN GROUPING(peer_name)=0 THEN peer_name ELSE ''::text END"
+	if req.SkipPorts {
+		groupingSets = "((bucket),(service_name),(peer_name),())"
+		kindCase = "CASE WHEN GROUPING(bucket)=0 THEN 'series' WHEN GROUPING(service_name)=0 THEN 'protocol' WHEN GROUPING(peer_name)=0 THEN 'peer' ELSE 'summary' END"
+		nameCase = "CASE WHEN GROUPING(service_name)=0 THEN service_name WHEN GROUPING(peer_name)=0 THEN peer_name ELSE ''::text END"
+	}
+
 	var tail string
 	switch mode {
 	case "series":
@@ -686,28 +709,21 @@ func buildAnalyticsQuery(req trafficAnalyticsRequest, from, to time.Time, step i
         COALESCE(NULLIF(` + peerName + `,''),'Unknown') peer_name
  FROM decorated WHERE ` + pairCond + `
 ), grouped AS (
- SELECT CASE
-          WHEN GROUPING(bucket)=0 THEN 'series'
-          WHEN GROUPING(service_name)=0 THEN 'protocol'
-          WHEN GROUPING(port_name)=0 THEN 'port'
-          WHEN GROUPING(peer_name)=0 THEN 'peer'
-          ELSE 'summary' END kind,
+ SELECT ` + kindCase + ` kind,
         bucket,
-        CASE WHEN GROUPING(service_name)=0 THEN service_name
-             WHEN GROUPING(port_name)=0 THEN port_name
-             WHEN GROUPING(peer_name)=0 THEN peer_name ELSE ''::text END name,
+        ` + nameCase + ` name,
         COALESCE(SUM(out_bytes)::bigint,0) out_bytes,COALESCE(SUM(in_bytes)::bigint,0) in_bytes,
         COALESCE(SUM(out_packets)::bigint,0) out_packets,COALESCE(SUM(in_packets)::bigint,0) in_packets,
         COUNT(DISTINCT (sensor_id,flow_id)) connections
  FROM selected
- GROUP BY GROUPING SETS ((bucket),(service_name),(port_name),(peer_name),())
+ GROUP BY GROUPING SETS ` + groupingSets + `
 ), ranked AS (
  SELECT grouped.*,CASE WHEN kind IN ('protocol','port','peer') THEN
         row_number() OVER (PARTITION BY kind ORDER BY ` + rankMetric + ` DESC) ELSE 1 END rn
  FROM grouped
 )
  SELECT kind,bucket,name,out_bytes,in_bytes,out_packets,in_packets,connections
- FROM ranked WHERE kind IN ('series','summary') OR rn<=12
+ FROM ranked WHERE kind IN ('series','summary') OR rn<=` + strconv.Itoa(rankLimit) + `
  ORDER BY kind,bucket NULLS LAST,` + rankMetric + ` DESC`
 	case "summary":
 		tail = ` SELECT COALESCE(SUM(` + outExpr + `)::bigint,0),COALESCE(SUM(` + inExpr + `)::bigint,0),COALESCE(SUM(` + outPackets + `)::bigint,0),COALESCE(SUM(` + inPackets + `)::bigint,0),COUNT(DISTINCT (sensor_id,flow_id)) FROM decorated WHERE ` + pairCond
@@ -1026,6 +1042,13 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 	step := stepForRange(req.To.Sub(req.From))
 	lookback, baselineSource := analyticsBaselineWindow(req.To.Sub(req.From))
 	baselineFrom := req.From.Add(-lookback)
+	legacyFrom := baselineFrom
+	if req.CompareBaseline {
+		candidate := req.From.Add(-time.Duration(req.BaselineDays) * 24 * time.Hour)
+		if candidate.Before(legacyFrom) {
+			legacyFrom = candidate
+		}
+	}
 
 	// Scope resolution is metadata work over the current inventory. Keep it under
 	// a short independent deadline so a metadata problem cannot occupy the full
@@ -1038,16 +1061,16 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 	if analyticsScopeResolvedEmpty(req.Left) || analyticsScopeResolvedEmpty(req.Right) {
 		return emptyTrafficAnalyticsResponse(req, step), nil
 	}
-	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
+	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Left, req.SensorID, legacyFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
+	if err := r.populateAnalyticsScopeLegacyAliases(scopeCtx, &req.Right, req.SensorID, legacyFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Left, req.SensorID, baselineFrom, req.To); err != nil {
+	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Left, req.SensorID, legacyFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Right, req.SensorID, baselineFrom, req.To); err != nil {
+	if err := r.populateAnalyticsLegacyAliases(scopeCtx, &req.Right, req.SensorID, legacyFrom, req.To); err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
 
@@ -1060,28 +1083,81 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 	if err != nil {
 		return TrafficAnalyticsResponse{}, err
 	}
-	if len(bundle.Series) == 0 {
+	if bundle.Summary.TotalBytes == 0 && len(bundle.Series) == 0 {
 		out := emptyTrafficAnalyticsResponse(req, step)
 		out.Summary = bundle.Summary
 		out.TopProtocols, out.TopPorts, out.TopPeers = bundle.TopProtocols, bundle.TopPorts, bundle.TopPeers
+		if req.CompareBaseline {
+			out.BaselineComparison = &TrafficBaselineComparison{Enabled: true, Available: false, Maturity: "Learning", LookbackDays: req.BaselineDays, Message: "No traffic exists in the selected window."}
+		}
 		return out, nil
 	}
+	// Analytics graphs are true time series: explicitly insert zero buckets so
+	// quiet intervals keep their temporal width instead of being visually
+	// compressed between two active buckets.
+	bundle.Series = fillTrafficSeries(bundle.Series, req.From, req.To, step)
 
-	// Always have a usable baseline from the visible series. When the historical
-	// baseline finishes quickly it replaces this provisional baseline. This keeps
-	// anomaly visualization available while preventing a slow 24h/30d lookback
-	// from blanking the entire Network/Zone dashboard.
+	// Always have a usable lightweight baseline from the visible series. A deeper
+	// schedule-aware comparison is opt-in because it intentionally scans a longer
+	// asset history window.
 	baseline, anomalies := buildBaseline(bundle.Series, nil, "current_window")
 	warning := ""
-	baselineCtx, baselineCancel := context.WithTimeout(ctx, 5*time.Second)
-	baselineSeries, baselineErr := querySeries(baselineCtx, r, req, baselineFrom, req.From, step)
-	baselineCancel()
-	if baselineErr == nil {
-		baseline, anomalies = buildBaseline(bundle.Series, baselineSeries, baselineSource)
+	var comparison *TrafficBaselineComparison
+
+	if req.CompareBaseline {
+		historyFrom := req.From.Add(-time.Duration(req.BaselineDays) * 24 * time.Hour)
+		historyStep := step
+		if historyStep < 300 {
+			historyStep = 300
+		}
+		historyReq := req
+		historyReq.CompareBaseline = false
+		historyReq.BreakdownLimit = 4096
+		historyReq.SkipPorts = true
+		historyCtx, historyCancel := context.WithTimeout(ctx, 15*time.Second)
+		historyBundle, historyErr := queryAnalyticsBundle(historyCtx, r, historyReq, historyFrom, req.From, historyStep)
+		historyCancel()
+		if historyErr != nil {
+			warning = "schedule-aware baseline unavailable; current-window baseline used"
+			comparison = &TrafficBaselineComparison{Enabled: true, Available: false, Maturity: "Learning", LookbackDays: req.BaselineDays, Message: "Historical baseline query did not complete in time."}
+		} else if len(historyBundle.Series) == 0 && historyBundle.Summary.TotalBytes == 0 {
+			warning = "baseline is still learning; no historical traffic is available"
+			comparison = &TrafficBaselineComparison{Enabled: true, Available: false, Maturity: "Learning", LookbackDays: req.BaselineDays, Message: "No historical traffic is available before the selected window."}
+		} else {
+			rawHistory := append([]TrafficSeriesPoint(nil), historyBundle.Series...)
+			fillStart := historyFrom
+			if len(rawHistory) > 0 && rawHistory[0].Time.After(fillStart) {
+				fillStart = rawHistory[0].Time
+			}
+			filledHistory := fillTrafficSeries(rawHistory, fillStart, req.From, historyStep)
+			scaledHistory := scaleTrafficSeries(filledHistory, step, historyStep)
+			baseline, _ = buildBaseline(bundle.Series, scaledHistory, fmt.Sprintf("previous_%d_days", req.BaselineDays))
+			cmp, scheduleAnomalies := buildTrafficBaselineComparison(req, &bundle, rawHistory, filledHistory, historyBundle, step, historyStep)
+			comparison = &cmp
+			anomalies = scheduleAnomalies
+			if cmp.CoverageCapped {
+				warning = "baseline peer/service history reached the comparison coverage cap"
+			}
+		}
 	} else {
-		warning = "historical baseline unavailable; current-window baseline used"
+		baselineCtx, baselineCancel := context.WithTimeout(ctx, 5*time.Second)
+		baselineSeries, baselineErr := querySeries(baselineCtx, r, req, baselineFrom, req.From, step)
+		baselineCancel()
+		if baselineErr == nil {
+			baselineSeries = fillTrafficSeries(baselineSeries, baselineFrom, req.From, step)
+			baseline, anomalies = buildBaseline(bundle.Series, baselineSeries, baselineSource)
+		} else {
+			warning = "historical baseline unavailable; current-window baseline used"
+		}
 	}
 
+	// buildBaseline mutates the visible series; the schedule-aware builder above
+	// also marks its own deviations. Re-apply the final anomaly list so the graph
+	// always matches the table returned in this response.
+	for i := range bundle.Series {
+		bundle.Series[i].Anomaly = false
+		bundle.Series[i].Ratio = 0
+	}
 	for _, a := range anomalies {
 		for i := range bundle.Series {
 			if bundle.Series[i].Time.Equal(a.Time) {
@@ -1091,6 +1167,7 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 			}
 		}
 	}
+	bundle.Summary.PeakBytesPerBucket = 0
 	for _, p := range bundle.Series {
 		if p.TotalBytes > bundle.Summary.PeakBytesPerBucket {
 			bundle.Summary.PeakBytesPerBucket = p.TotalBytes
@@ -1102,7 +1179,7 @@ func (r *Repository) RunTrafficAnalytics(ctx context.Context, req trafficAnalyti
 		From: req.From, To: req.To, StepSeconds: step, Direction: req.Direction,
 		LeftLabel: req.LeftLabel, RightLabel: req.RightLabel, Summary: bundle.Summary,
 		Series: bundle.Series, TopProtocols: bundle.TopProtocols, TopPorts: bundle.TopPorts,
-		TopPeers: bundle.TopPeers, Anomalies: anomalies, Baseline: baseline, Warning: warning,
+		TopPeers: bundle.TopPeers, Anomalies: anomalies, Baseline: baseline, BaselineComparison: comparison, Warning: warning,
 	}, nil
 }
 
@@ -1128,7 +1205,26 @@ func parseCommonAnalyticsRequest(c *gin.Context) (trafficAnalyticsRequest, error
 	if direction != "both" && direction != "out" && direction != "in" {
 		return trafficAnalyticsRequest{}, fmt.Errorf("invalid direction")
 	}
-	return trafficAnalyticsRequest{From: from, To: to, SensorID: strings.TrimSpace(c.Query("sensor_id")), Protocol: strings.TrimSpace(c.Query("protocol")), Port: port, Direction: direction}, nil
+	compareBaseline := false
+	switch strings.ToLower(strings.TrimSpace(c.Query("compare_baseline"))) {
+	case "1", "true", "yes", "on":
+		compareBaseline = true
+	}
+	baselineDays := 30
+	if v := strings.TrimSpace(c.Query("baseline_days")); v != "" {
+		baselineDays, err = strconv.Atoi(v)
+		if err != nil || baselineDays < 7 || baselineDays > 60 {
+			return trafficAnalyticsRequest{}, fmt.Errorf("baseline_days must be between 7 and 60")
+		}
+	}
+	tzOffsetMinutes := 0
+	if v := strings.TrimSpace(c.Query("tz_offset_minutes")); v != "" {
+		tzOffsetMinutes, err = strconv.Atoi(v)
+		if err != nil || tzOffsetMinutes < -840 || tzOffsetMinutes > 840 {
+			return trafficAnalyticsRequest{}, fmt.Errorf("invalid timezone offset")
+		}
+	}
+	return trafficAnalyticsRequest{From: from, To: to, SensorID: strings.TrimSpace(c.Query("sensor_id")), Protocol: strings.TrimSpace(c.Query("protocol")), Port: port, Direction: direction, CompareBaseline: compareBaseline, BaselineDays: baselineDays, TZOffsetMinutes: tzOffsetMinutes}, nil
 }
 
 func (s *Server) analyticsOptions(c *gin.Context) {

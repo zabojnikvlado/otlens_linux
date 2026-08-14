@@ -2480,6 +2480,11 @@ func (s *Server) baseline(c *gin.Context) {
 		respondInternalError(c, e)
 		return
 	}
+	pendingPromotions, e := s.Repo.PendingCommandTargetsBySensor(c.Request.Context(), "baseline.candidate.promote")
+	if e != nil {
+		respondInternalError(c, e)
+		return
+	}
 	out := make([]map[string]interface{}, 0, len(registered))
 	seen := make(map[string]struct{}, len(registered))
 	for _, x := range v {
@@ -2488,6 +2493,7 @@ func (s *Server) baseline(c *gin.Context) {
 			row["SensorID"] = x.SensorID
 			row["telemetry_available"] = true
 			row["learning_completion_pending"] = pendingLearning[x.SensorID]
+			row["pending_candidate_promotions"] = pendingPromotions[x.SensorID]
 			out = append(out, row)
 			seen[x.SensorID] = struct{}{}
 		}
@@ -2500,13 +2506,63 @@ func (s *Server) baseline(c *gin.Context) {
 			continue
 		}
 		out = append(out, map[string]interface{}{
-			"SensorID":                    sensor.ID,
-			"sensor_name":                 sensor.Name,
-			"telemetry_available":         false,
-			"learning_completion_pending": pendingLearning[sensor.ID],
+			"SensorID":                     sensor.ID,
+			"sensor_name":                  sensor.Name,
+			"telemetry_available":          false,
+			"learning_completion_pending":  pendingLearning[sensor.ID],
+			"pending_candidate_promotions": pendingPromotions[sensor.ID],
 		})
 	}
 	c.JSON(200, out)
+}
+
+type baselinePromotionCandidateState struct {
+	Found        bool
+	Promoted     bool
+	Eligible     bool
+	Ready        bool
+	Reason       string
+	Observations uint64
+	DistinctDays int
+}
+
+func parseBaselinePromotionCandidate(raw json.RawMessage, candidateID string) baselinePromotionCandidateState {
+	candidateID = strings.TrimSpace(candidateID)
+	var payload struct {
+		Behavior struct {
+			Candidates []struct {
+				ID                string `json:"id"`
+				Eligible          bool   `json:"eligible"`
+				ReadyForPromotion bool   `json:"ready_for_promotion"`
+				Reason            string `json:"reason"`
+				Observations      uint64 `json:"observations"`
+				DistinctDays      int    `json:"distinct_days"`
+			} `json:"candidates"`
+			PromotedCandidates []string `json:"promoted_candidates"`
+		} `json:"behavior"`
+	}
+	if candidateID == "" || len(raw) == 0 || json.Unmarshal(raw, &payload) != nil {
+		return baselinePromotionCandidateState{}
+	}
+	for _, promoted := range payload.Behavior.PromotedCandidates {
+		if strings.TrimSpace(promoted) == candidateID {
+			return baselinePromotionCandidateState{Promoted: true}
+		}
+	}
+	for _, candidate := range payload.Behavior.Candidates {
+		if strings.TrimSpace(candidate.ID) != candidateID {
+			continue
+		}
+		return baselinePromotionCandidateState{
+			Found:        true,
+			Eligible:     candidate.Eligible,
+			Ready:        candidate.ReadyForPromotion,
+			Reason:       strings.TrimSpace(candidate.Reason),
+			Observations: candidate.Observations,
+			DistinctDays: candidate.DistinctDays,
+		}
+	}
+	return baselinePromotionCandidateState{}
 }
 
 func (s *Server) promoteBaselineCandidate(c *gin.Context) {
@@ -2517,13 +2573,54 @@ func (s *Server) promoteBaselineCandidate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "candidate_id is required"})
 		return
 	}
+	sensorID := strings.TrimSpace(c.Param("id"))
 	candidateID := strings.TrimSpace(req.CandidateID)
-	if err := s.Repo.QueueCommands(c.Request.Context(), c.Param("id"), "baseline.candidate.promote", []string{candidateID}); err != nil {
+	raw, err := s.Repo.SensorBaseline(c.Request.Context(), sensorID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusConflict, gin.H{"error": "the sensor has not reported behavior-baseline telemetry yet; refresh after the next sensor sync"})
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}
-	s.logAudit(c, identityFromContext(c).Username, "behavior baseline candidate promotion queued", c.Param("id")+":"+candidateID)
-	c.Status(http.StatusAccepted)
+	state := parseBaselinePromotionCandidate(raw, candidateID)
+	if state.Promoted {
+		c.JSON(http.StatusOK, gin.H{"status": "promoted", "sensor_id": sensorID, "candidate_id": candidateID})
+		return
+	}
+	if !state.Found {
+		c.JSON(http.StatusConflict, gin.H{"error": "candidate is no longer present in the sensor shadow baseline; refresh Behavior findings", "candidate_id": candidateID})
+		return
+	}
+	if !state.Eligible {
+		reason := state.Reason
+		if reason == "" {
+			reason = "candidate is excluded by behavior-baseline policy"
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": reason, "candidate_id": candidateID})
+		return
+	}
+	if !state.Ready {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":         fmt.Sprintf("candidate is still collecting evidence (%d observations across %d distinct days)", state.Observations, state.DistinctDays),
+			"candidate_id":  candidateID,
+			"observations":  state.Observations,
+			"distinct_days": state.DistinctDays,
+		})
+		return
+	}
+	queued, err := s.Repo.QueueCommandIfMissing(c.Request.Context(), sensorID, "baseline.candidate.promote", candidateID)
+	if err != nil {
+		respondInternalError(c, err)
+		return
+	}
+	status := "already_queued"
+	if queued {
+		status = "queued"
+		s.logAudit(c, identityFromContext(c).Username, "behavior baseline candidate promotion queued", sensorID+":"+candidateID)
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": status, "sensor_id": sensorID, "candidate_id": candidateID})
 }
 
 func (s *Server) completeSensorLearning(c *gin.Context) {

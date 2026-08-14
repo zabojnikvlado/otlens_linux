@@ -359,7 +359,8 @@ main {
 }
 .secondary-btn:last-child { margin-right: 0; }
 .secondary-btn:hover { background: var(--panel); border-color: var(--ot-dim); }
-.secondary-btn:disabled { opacity: .5; cursor: default; }
+.secondary-btn:disabled { opacity: .5; cursor: default; pointer-events: none; box-shadow: none; }
+.secondary-btn:disabled:hover, .secondary-btn:disabled:focus { border-color: var(--border); box-shadow: none; outline: none; }
 .settings-panel{padding:20px 24px}
 .settings-panel+.settings-panel{margin-top:var(--ui-section-gap)}
 
@@ -1406,3 +1407,21 @@ select:focus,input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.35);o
 @media(max-width:1050px){.analytics-kpis{grid-template-columns:repeat(2,minmax(180px,1fr))}}
 @media(max-width:900px){.analytics-grid{grid-template-columns:1fr}.analytics-chart-head{flex-direction:column}.analytics-break-row{grid-template-columns:1fr}.analytics-heading{flex-direction:column}}
 @media(max-width:760px){.analytics-kpis{grid-template-columns:1fr}.analytics-filters{grid-template-columns:1fr;padding:14px}.analytics-chart-panel,.analytics-grid>.panel,.analytics-view>.panel{padding:14px}.analytics-chart{height:260px}}
+
+/* ---- Schedule-aware Analytics baseline comparison ---- */
+.analytics-baseline-panel{padding:18px}
+.analytics-baseline-panel[hidden]{display:none}
+.analytics-baseline-kpis{margin-top:12px}
+.analytics-baseline-details{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.analytics-baseline-details h3{margin:0 0 8px;font-family:var(--font-display);font-size:13px;color:var(--text)}
+.analytics-baseline-maturity{display:inline-flex;align-items:center;min-height:24px;padding:3px 9px;border:1px solid var(--line);border-radius:999px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim);background:var(--panel-raised)}
+.analytics-baseline-maturity.mature{color:var(--ok);border-color:rgba(77,201,143,.35);background:rgba(77,201,143,.08)}
+.analytics-baseline-maturity.established{color:var(--ot);border-color:rgba(63,191,176,.35);background:rgba(63,191,176,.08)}
+.analytics-baseline-maturity.limited,.analytics-baseline-maturity.learning{color:var(--warn);border-color:rgba(232,163,61,.35);background:rgba(232,163,61,.08)}
+.analytics-baseline-maturity.stale{color:var(--crit);border-color:rgba(239,98,98,.35);background:rgba(239,98,98,.08)}
+.analytics-chip-list{display:flex;flex-wrap:wrap;gap:7px;min-height:26px}
+.analytics-chip{display:inline-flex;align-items:center;max-width:100%;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:var(--panel-raised);color:var(--text);font-family:var(--font-mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.analytics-chip-list .rules-help{align-self:center}
+.analytics-legend .analytics-baseline-line-key:before{height:2px;background:var(--text-dim);opacity:.9}
+.analytics-legend .analytics-baseline-range-key:before{height:8px;background:var(--text-dim);opacity:.22;border:1px solid var(--text-dim)}
+@media(max-width:760px){.analytics-baseline-panel{padding:14px}}

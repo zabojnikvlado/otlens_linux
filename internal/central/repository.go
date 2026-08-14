@@ -1600,6 +1600,54 @@ func learningCompletionConfirmed(raw json.RawMessage) bool {
 	return anyEnabled && legacyComplete && behaviorComplete
 }
 
+func promotedBaselineCandidates(raw json.RawMessage) []string {
+	var status struct {
+		Behavior struct {
+			PromotedCandidates []string `json:"promoted_candidates"`
+		} `json:"behavior"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &status) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(status.Behavior.PromotedCandidates))
+	seen := make(map[string]struct{}, len(status.Behavior.PromotedCandidates))
+	for _, id := range status.Behavior.PromotedCandidates {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func failedBaselineCandidates(raw json.RawMessage) map[string]string {
+	var status struct {
+		Behavior struct {
+			PromotionFailures []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"promotion_failures"`
+		} `json:"behavior"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &status) != nil {
+		return nil
+	}
+	out := make(map[string]string, len(status.Behavior.PromotionFailures))
+	for _, failure := range status.Behavior.PromotionFailures {
+		id := strings.TrimSpace(failure.ID)
+		if id == "" {
+			continue
+		}
+		out[id] = strings.TrimSpace(failure.Error)
+	}
+	return out
+}
+
 type TelemetrySequenceConflictError struct {
 	SensorID         string
 	IncomingSequence int64
@@ -1665,6 +1713,20 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()) ON CONF
 	if learningCompletionConfirmed(x.Baseline) {
 		if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='sensor.learning.complete' AND delivered_at IS NULL`, x.SensorID); err != nil {
 			return nil, fmt.Errorf("acknowledge learning completion command: %w", err)
+		}
+	}
+	if promoted := promotedBaselineCandidates(x.Baseline); len(promoted) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='baseline.candidate.promote' AND delivered_at IS NULL AND target=ANY($2::text[])`, x.SensorID, promoted); err != nil {
+			return nil, fmt.Errorf("acknowledge baseline candidate promotion commands: %w", err)
+		}
+	}
+	if failed := failedBaselineCandidates(x.Baseline); len(failed) > 0 {
+		ids := make([]string, 0, len(failed))
+		for id := range failed {
+			ids = append(ids, id)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE sensor_commands SET delivered_at=NOW() WHERE sensor_id=$1 AND command_type='baseline.candidate.promote' AND delivered_at IS NULL AND target=ANY($2::text[])`, x.SensorID, ids); err != nil {
+			return nil, fmt.Errorf("acknowledge failed baseline candidate promotion commands: %w", err)
 		}
 	}
 	var alerts []map[string]interface{}
@@ -1884,6 +1946,37 @@ func (r *Repository) TelemetryTopology(ctx context.Context) ([]TopologyRow, erro
 	return out, rows.Err()
 }
 
+func (r *Repository) SensorBaseline(ctx context.Context, sensorID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	err := r.db.QueryRowContext(ctx, `SELECT baseline FROM sensor_telemetry WHERE sensor_id=$1`, strings.TrimSpace(sensorID)).Scan(&raw)
+	return raw, err
+}
+
+// QueueCommandIfMissing queues one state-confirmed command only when the same
+// target is not already pending.  Baseline promotion is intentionally replayed
+// by PopCommands until telemetry confirms the desired state, so duplicate UI
+// clicks must not create an ever-growing set of identical pending commands.
+func (r *Repository) QueueCommandIfMissing(ctx context.Context, sensorID, typ, target string) (bool, error) {
+	sensorID = strings.TrimSpace(sensorID)
+	typ = strings.TrimSpace(typ)
+	target = strings.TrimSpace(target)
+	if sensorID == "" || typ == "" || target == "" {
+		return false, nil
+	}
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO sensor_commands(sensor_id,command_type,target)
+		SELECT $1,$2,$3
+		WHERE NOT EXISTS (
+			SELECT 1 FROM sensor_commands
+			WHERE sensor_id=$1 AND command_type=$2 AND target=$3 AND delivered_at IS NULL
+		)`, sensorID, typ, target)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
+}
+
 func (r *Repository) QueueCommands(ctx context.Context, sensorID, typ string, targets []string) error {
 	clean := make([]string, 0, len(targets))
 	for _, t := range targets {
@@ -1935,6 +2028,26 @@ func (r *Repository) PendingCommandSensors(ctx context.Context, commandType stri
 	return out, rows.Err()
 }
 
+func (r *Repository) PendingCommandTargetsBySensor(ctx context.Context, commandType string) (map[string]map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT sensor_id,target FROM sensor_commands WHERE command_type=$1 AND delivered_at IS NULL ORDER BY id`, commandType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]map[string]bool)
+	for rows.Next() {
+		var sensorID, target string
+		if err := rows.Scan(&sensorID, &target); err != nil {
+			return nil, err
+		}
+		if out[sensorID] == nil {
+			out[sensorID] = make(map[string]bool)
+		}
+		out[sensorID][target] = true
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]management.Command, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1957,10 +2070,10 @@ func (r *Repository) PopCommands(ctx context.Context, sensorID string) ([]manage
 		// State-changing commands whose success is visible in telemetry are not
 		// acknowledged merely because the sensor downloaded them. They are
 		// idempotently replayed until a later telemetry snapshot proves the desired
-		// state. This closes the pull/apply/network-crash window for learning and
-		// asset confirm/delete operations.
+		// state. This closes the pull/apply/network-crash window for learning,
+		// behavior-baseline promotion and asset confirm/delete operations.
 		switch c.Type {
-		case "sensor.learning.complete", "asset.confirm", "asset.delete":
+		case "sensor.learning.complete", "baseline.candidate.promote", "asset.confirm", "asset.delete":
 		default:
 			ids = append(ids, c.ID)
 		}

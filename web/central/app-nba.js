@@ -146,7 +146,9 @@ function learningCandidateRows(){
   const rows=[];
   (baselines||[]).forEach(b=>{
     const sensor=b.SensorID||b.sensor_id||'—',behavior=b.behavior||{};
-    (behavior.candidates||[]).forEach(c=>rows.push({sensor,c}));
+    const pending=b.pending_candidate_promotions||{};
+    const failures=new Map((behavior.promotion_failures||[]).map(item=>[String(item?.id||''),item]));
+    (behavior.candidates||[]).forEach(c=>rows.push({sensor,c,pending:Boolean(c?.id&&pending[c.id]),failure:failures.get(String(c?.id||''))||null}));
   });
   return rows.sort((a,b)=>Number(b.c.observations||0)-Number(a.c.observations||0));
 }
@@ -261,6 +263,30 @@ function renderLearningControls(){
     await run(row,true);
   };
 }
+let learningCandidateActionStatus='';
+function setLearningCandidateActionStatus(message){
+  learningCandidateActionStatus=String(message||'').trim();
+  const note=document.getElementById('learning-candidate-note');
+  if(note&&learningCandidateActionStatus)note.textContent=learningCandidateActionStatus;
+}
+async function waitForCandidatePromotion(sensorID,candidateID,timeoutMs=45000){
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    const latest=await api('/baseline');
+    if(Array.isArray(latest))baselines=latest;
+    const row=(baselines||[]).find(item=>String(item.SensorID||item.sensor_id||'')===String(sensorID));
+    if(!row)continue;
+    const behavior=row.behavior||{};
+    if((behavior.promoted_candidates||[]).some(id=>String(id)===String(candidateID)))return 'promoted';
+    const pending=row.pending_candidate_promotions||{};
+    const candidate=(behavior.candidates||[]).find(item=>String(item?.id||'')===String(candidateID));
+    if(!candidate&&!pending[candidateID])return 'completed';
+    if(candidate&&!pending[candidateID])return 'not_queued';
+  }
+  return 'pending';
+}
+
 function renderLearningQuality(){
   const o=behaviorOverview||{},set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value};
   const readiness=Number(o.learning_readiness||0),coverage=Number(o.time_coverage||0),rate=Number(o.new_pattern_rate||0);
@@ -281,24 +307,53 @@ function renderLearningQuality(){
   renderLearningControls();
 
   const rows=learningCandidateRows(),body=document.querySelector('#table-learning-candidates tbody');
-  set('learning-candidate-note',`${rows.length.toLocaleString()} candidate${rows.length===1?'':'s'} shown from current sensor telemetry`);
+  const pendingCount=rows.filter(row=>row.pending).length;
+  const defaultNote=`${rows.length.toLocaleString()} candidate${rows.length===1?'':'s'} shown from current sensor telemetry${pendingCount?` · ${pendingCount.toLocaleString()} promotion${pendingCount===1?'':'s'} queued`:''}`;
+  set('learning-candidate-note',learningCandidateActionStatus||defaultNote);
   if(!body)return;
-  body.innerHTML=rows.map(({sensor,c})=>{
-    const k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false;
-    const shortStatus=!eligible?'excluded':ready?'ready for review':'collecting';
+  body.innerHTML=rows.map(({sensor,c,pending,failure},index)=>{
+    const k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false,allowed=can('alert_confirm_approve');
+    const failed=Boolean(failure&&!pending),failureMessage=String(failure?.error||'').trim();
+    const shortStatus=pending?'promotion queued':failed?'promotion failed':!eligible?'excluded':ready?'ready for review':'collecting evidence';
     const service=[k.protocol||k.transport||'unknown',k.service_port||''].filter(Boolean).join('/');
-    const disabled=!ready||!can('alert_confirm_approve');
+    const disabled=pending||!ready||!eligible||!allowed;
     const evidence=`${Number(c.observations||0).toLocaleString()} obs · ${Number(c.distinct_days||0)} day${Number(c.distinct_days||0)===1?'':'s'}`;
-    return `<tr class="clickable-row learning-candidate-row"><td>${esc(sensor)}</td><td>${esc(k.src_ip||'—')} → ${esc(k.dst_ip||'—')}</td><td>${esc(service||'—')}</td><td>${esc(evidence)}</td><td>${esc(shortStatus)}</td><td class="behavior-row-actions"><button class="secondary-btn learning-candidate-details" type="button">Details</button><button class="secondary-btn learning-promote" type="button" ${disabled?'disabled':''}>Promote</button></td></tr>`;
+    const label=pending?'Queued…':failed?'Retry':!eligible?'Excluded':!ready?'Collecting…':!allowed?'No access':'Promote';
+    const title=pending?'Waiting for the sensor to apply and confirm this promotion':failed?`Previous promotion failed: ${failureMessage||'sensor rejected the promotion'}. Click Retry to queue it again.`:!eligible?(c.reason||'This candidate is excluded by behavior-baseline policy'):!ready?`Promotion becomes available after the configured evidence threshold. Current evidence: ${evidence}.`:!allowed?'Your role cannot approve/promote behavior baseline candidates':'Promote this reviewed relationship into the trusted baseline';
+    return `<tr class="clickable-row learning-candidate-row" data-candidate-index="${index}"><td>${esc(sensor)}</td><td>${esc(k.src_ip||'—')} → ${esc(k.dst_ip||'—')}</td><td>${esc(service||'—')}</td><td>${esc(evidence)}</td><td>${esc(shortStatus)}</td><td class="behavior-row-actions"><button class="secondary-btn learning-candidate-details" type="button">Details</button><button class="secondary-btn learning-promote" type="button" title="${esc(title)}" ${disabled?'disabled':''}>${esc(label)}</button></td></tr>`;
   }).join('')||'<tr><td colspan="6">No shadow-baseline candidates.</td></tr>';
-  body.querySelectorAll('.learning-candidate-row').forEach((row,index)=>row.onclick=e=>{if(e.target.closest('button'))return;showLearningCandidate(rows[index])});
-  body.querySelectorAll('.learning-candidate-details').forEach((button,index)=>button.onclick=e=>{e.stopPropagation();showLearningCandidate(rows[index])});
-  body.querySelectorAll('.learning-promote').forEach((button,index)=>button.onclick=async e=>{
+  body.querySelectorAll('.learning-candidate-row').forEach(row=>row.onclick=e=>{if(e.target.closest('button'))return;const index=Number(row.dataset.candidateIndex);showLearningCandidate(rows[index])});
+  body.querySelectorAll('.learning-candidate-details').forEach(button=>button.onclick=e=>{e.stopPropagation();const index=Number(button.closest('.learning-candidate-row')?.dataset.candidateIndex);showLearningCandidate(rows[index])});
+  body.querySelectorAll('.learning-promote').forEach(button=>button.onclick=async e=>{
     e.stopPropagation();
-    const row=rows[index];if(!row?.c?.id)return;
+    const index=Number(button.closest('.learning-candidate-row')?.dataset.candidateIndex),row=rows[index];
+    if(!row?.c?.id||row.pending||!row.c.ready_for_promotion||row.c.eligible===false)return;
     if(!confirm('Promote this reviewed relationship into the trusted behavior baseline?'))return;
-    button.disabled=true;
-    try{await api(`/sensors/${encodeURIComponent(row.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:row.c.id})});button.textContent='Queued';setTimeout(()=>refreshView('nba',true),1500)}catch(error){alert(error.parsed?.error||error.message);button.disabled=false}
+    button.disabled=true;button.textContent='Queuing…';button.blur();
+    setLearningCandidateActionStatus(`Queuing promotion on ${row.sensor}…`);
+    try{
+      const response=await api(`/sensors/${encodeURIComponent(row.sensor)}/baseline/candidates/promote`,{method:'POST',body:JSON.stringify({candidate_id:row.c.id})});
+      if(response?.status==='promoted'){
+        setLearningCandidateActionStatus(`Promoted on ${row.sensor}.`);
+        await refreshView('nba',true);return;
+      }
+      button.textContent='Queued…';
+      setLearningCandidateActionStatus(`Promotion queued on ${row.sensor}; waiting for sensor confirmation…`);
+      const result=await waitForCandidatePromotion(row.sensor,row.c.id);
+      if(result==='promoted'||result==='completed'){
+        setLearningCandidateActionStatus(`Candidate promoted successfully on ${row.sensor}.`);
+      }else if(result==='pending'){
+        setLearningCandidateActionStatus(`Promotion is still queued on ${row.sensor}. Verify the sensor is connected; Central will retry automatically.`);
+      }else{
+        setLearningCandidateActionStatus(`Promotion was not confirmed by ${row.sensor}. Refresh and review the candidate state.`);
+      }
+      await refreshView('nba',true);
+    }catch(error){
+      const message=error.parsed?.error||error.message||'Promotion failed';
+      setLearningCandidateActionStatus(`Promotion failed: ${message}`);
+      alert(message);
+      await refreshView('nba',true);
+    }
   });
   window.OTDataTables?.refresh('table-learning-candidates');
 }
@@ -306,10 +361,11 @@ function renderLearningQuality(){
 
 function showLearningCandidate(row){
   if(!row?.c)return;
-  const sensor=row.sensor||'—',c=row.c,k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false;
+  const sensor=row.sensor||'—',c=row.c,k=c.key||{},ready=Boolean(c.ready_for_promotion),eligible=c.eligible!==false,pending=row.pending===true,failure=row.failure||null;
   const service=[k.protocol||k.transport||'unknown',k.service_port||''].filter(Boolean).join('/');
-  const status=!eligible?'Excluded from promotion':ready?'Ready for review':'Collecting evidence';
-  const reason=c.reason||(!eligible?'Security or policy evidence prevents promotion':ready?'Candidate meets the configured evidence thresholds':'Candidate has not yet met the configured promotion thresholds');
+  const failed=Boolean(failure&&!pending),failureMessage=String(failure?.error||'').trim();
+  const status=pending?'Promotion queued':failed?'Promotion failed':!eligible?'Excluded from promotion':ready?'Ready for review':'Collecting evidence';
+  const reason=pending?'Waiting for the sensor to apply and confirm the trusted-baseline promotion in telemetry.':failed?(failureMessage||'The sensor rejected the previous promotion attempt.'):c.reason||(!eligible?'Security or policy evidence prevents promotion':ready?'Candidate meets the configured evidence thresholds':'Candidate has not yet met the configured promotion thresholds');
   const days=Array.isArray(c.observation_days)&&c.observation_days.length?c.observation_days.join(', '):'—';
   const body=document.getElementById('candidate-detail-body');if(!body)return;
   body.innerHTML=`

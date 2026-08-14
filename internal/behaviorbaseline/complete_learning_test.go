@@ -22,7 +22,7 @@ func TestCompleteLearningRequiresMinimumUnlessForcedAndPersists(t *testing.T) {
 	}
 
 	snapshot := engine.Snapshot(now)
-	if snapshot.Mode != ModeMonitoring || snapshot.Version != 5 {
+	if snapshot.Mode != ModeMonitoring || snapshot.Version != 6 {
 		t.Fatalf("unexpected snapshot after completion: mode=%q version=%d", snapshot.Mode, snapshot.Version)
 	}
 

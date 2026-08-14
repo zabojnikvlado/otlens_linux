@@ -222,6 +222,17 @@ type CandidateProfileSnapshot struct {
 	DstAsset string  `json:"dst_asset,omitempty"`
 }
 
+type PromotedCandidate struct {
+	ID         string    `json:"id"`
+	PromotedAt time.Time `json:"promoted_at"`
+}
+
+type PromotionFailure struct {
+	ID       string    `json:"id"`
+	Error    string    `json:"error"`
+	FailedAt time.Time `json:"failed_at"`
+}
+
 type AssetMaturity struct {
 	AssetID       string    `json:"asset_id"`
 	FirstSeen     time.Time `json:"first_seen"`
@@ -243,6 +254,8 @@ type Snapshot struct {
 	AssetProfiles      []AssetBehaviorProfile      `json:"asset_profiles,omitempty"`
 	Candidates         []Candidate                 `json:"candidates,omitempty"`
 	CandidateProfiles  []CandidateProfileSnapshot  `json:"candidate_profiles,omitempty"`
+	PromotedCandidates []PromotedCandidate         `json:"promoted_candidates,omitempty"`
+	PromotionFailures  []PromotionFailure          `json:"promotion_failures,omitempty"`
 	LearningExclusions []LearningExclusionSnapshot `json:"learning_exclusions,omitempty"`
 	MinStatSamples     int                         `json:"min_stat_samples,omitempty"`
 	BucketsPerDay      int                         `json:"buckets_per_day,omitempty"`
@@ -253,27 +266,29 @@ type Snapshot struct {
 }
 
 type Status struct {
-	Enabled                   bool            `json:"enabled"`
-	ManualCompletionSupported bool            `json:"manual_completion_supported"`
-	Mode                      Mode            `json:"mode"`
-	LearningStarted           time.Time       `json:"learning_started"`
-	LearningEndsAt            time.Time       `json:"learning_ends_at"`
-	MinimumDuration           time.Duration   `json:"minimum_duration"`
-	Readiness                 float64         `json:"readiness"`
-	Ready                     bool            `json:"ready"`
-	ReadinessReason           string          `json:"readiness_reason,omitempty"`
-	Profiles                  uint64          `json:"profiles"`
-	AssetProfiles             uint64          `json:"asset_profiles"`
-	MatureAssets              int             `json:"mature_assets"`
-	LearningAssets            int             `json:"learning_assets"`
-	CandidatePatterns         int             `json:"candidate_patterns"`
-	CandidateAssets           int             `json:"candidate_assets"`
-	Candidates                []Candidate     `json:"candidates,omitempty"`
-	AssetMaturity             []AssetMaturity `json:"asset_maturity,omitempty"`
-	NewPatternRate            float64         `json:"new_pattern_rate"`
-	TimeCoverage              float64         `json:"time_coverage"`
-	Observed                  uint64          `json:"observed"`
-	Dropped                   uint64          `json:"dropped"`
-	Excluded                  uint64          `json:"excluded"`
-	Evicted                   uint64          `json:"evicted"`
+	Enabled                   bool               `json:"enabled"`
+	ManualCompletionSupported bool               `json:"manual_completion_supported"`
+	Mode                      Mode               `json:"mode"`
+	LearningStarted           time.Time          `json:"learning_started"`
+	LearningEndsAt            time.Time          `json:"learning_ends_at"`
+	MinimumDuration           time.Duration      `json:"minimum_duration"`
+	Readiness                 float64            `json:"readiness"`
+	Ready                     bool               `json:"ready"`
+	ReadinessReason           string             `json:"readiness_reason,omitempty"`
+	Profiles                  uint64             `json:"profiles"`
+	AssetProfiles             uint64             `json:"asset_profiles"`
+	MatureAssets              int                `json:"mature_assets"`
+	LearningAssets            int                `json:"learning_assets"`
+	CandidatePatterns         int                `json:"candidate_patterns"`
+	CandidateAssets           int                `json:"candidate_assets"`
+	Candidates                []Candidate        `json:"candidates,omitempty"`
+	PromotedCandidates        []string           `json:"promoted_candidates,omitempty"`
+	PromotionFailures         []PromotionFailure `json:"promotion_failures,omitempty"`
+	AssetMaturity             []AssetMaturity    `json:"asset_maturity,omitempty"`
+	NewPatternRate            float64            `json:"new_pattern_rate"`
+	TimeCoverage              float64            `json:"time_coverage"`
+	Observed                  uint64             `json:"observed"`
+	Dropped                   uint64             `json:"dropped"`
+	Excluded                  uint64             `json:"excluded"`
+	Evicted                   uint64             `json:"evicted"`
 }

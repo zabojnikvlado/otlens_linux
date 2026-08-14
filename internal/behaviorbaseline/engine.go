@@ -89,8 +89,10 @@ type Engine struct {
 	learningStarted  time.Time
 	learningComplete bool
 
-	candidateMu sync.RWMutex
-	candidates  map[string]*candidateState
+	candidateMu       sync.RWMutex
+	candidates        map[string]*candidateState
+	promoted          map[string]time.Time
+	promotionFailures map[string]PromotionFailure
 
 	exclusionMu sync.RWMutex
 	exclusions  map[string]time.Time
@@ -167,19 +169,72 @@ func New(bus *core.EventBus, config Config) *Engine {
 	}
 
 	e := &Engine{
-		bus:          bus,
-		config:       config,
-		stop:         make(chan struct{}),
-		identityByIP: make(map[string]string),
-		candidates:   make(map[string]*candidateState),
-		exclusions:   make(map[string]time.Time),
-		maintenance:  parseMaintenanceWindows(config.MaintenanceWindows),
+		bus:               bus,
+		config:            config,
+		stop:              make(chan struct{}),
+		identityByIP:      make(map[string]string),
+		candidates:        make(map[string]*candidateState),
+		promoted:          make(map[string]time.Time),
+		promotionFailures: make(map[string]PromotionFailure),
+		exclusions:        make(map[string]time.Time),
+		maintenance:       parseMaintenanceWindows(config.MaintenanceWindows),
 	}
 	for i := range e.shards {
 		e.shards[i].profiles = make(map[Key]*Profile)
 		e.assetShards[i].profiles = make(map[AssetKey]*AssetBehaviorProfile)
 	}
 	return e
+}
+
+const promotedCandidateRetention = 7 * 24 * time.Hour
+
+func (e *Engine) promotedCandidateIDs(now time.Time) []string {
+	cutoff := now.Add(-promotedCandidateRetention)
+	e.candidateMu.Lock()
+	out := make([]string, 0, len(e.promoted))
+	for id, at := range e.promoted {
+		if at.Before(cutoff) {
+			delete(e.promoted, id)
+			continue
+		}
+		out = append(out, id)
+	}
+	e.candidateMu.Unlock()
+	sort.Strings(out)
+	return out
+}
+
+func (e *Engine) promotionFailureList(now time.Time) []PromotionFailure {
+	cutoff := now.Add(-promotedCandidateRetention)
+	e.candidateMu.Lock()
+	out := make([]PromotionFailure, 0, len(e.promotionFailures))
+	for id, failure := range e.promotionFailures {
+		if failure.FailedAt.Before(cutoff) {
+			delete(e.promotionFailures, id)
+			continue
+		}
+		out = append(out, failure)
+	}
+	e.candidateMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].FailedAt.After(out[j].FailedAt) })
+	return out
+}
+
+// RecordPromotionFailure makes a command-side promotion failure visible in
+// subsequent telemetry instead of leaving Central stuck in a permanent queued
+// state with no explanation. A later successful retry clears the failure.
+func (e *Engine) RecordPromotionFailure(id string, err error) {
+	id = strings.TrimSpace(id)
+	if id == "" || err == nil {
+		return
+	}
+	e.candidateMu.Lock()
+	if e.promotionFailures == nil {
+		e.promotionFailures = make(map[string]PromotionFailure)
+	}
+	e.promotionFailures[id] = PromotionFailure{ID: id, Error: err.Error(), FailedAt: time.Now().UTC()}
+	e.candidateMu.Unlock()
+	e.revision.Add(1)
 }
 
 func (e *Engine) Start() {
@@ -573,6 +628,10 @@ func (e *Engine) PromoteCandidate(id string) error {
 	e.candidateMu.Lock()
 	candidate := e.candidates[id]
 	if candidate == nil {
+		if _, ok := e.promoted[id]; ok {
+			e.candidateMu.Unlock()
+			return nil
+		}
 		e.candidateMu.Unlock()
 		return fmt.Errorf("candidate %q not found", id)
 	}
@@ -588,6 +647,8 @@ func (e *Engine) PromoteCandidate(id string) error {
 	}
 	copyState := *candidate
 	delete(e.candidates, id)
+	e.promoted[id] = time.Now().UTC()
+	delete(e.promotionFailures, id)
 	e.candidateMu.Unlock()
 
 	value := sample{key: copyState.Key, srcAsset: copyState.srcAsset, dstAsset: copyState.dstAsset, at: copyState.LastSeen}
@@ -1062,7 +1123,7 @@ func (e *Engine) Status(now time.Time) Status {
 		LearningEndsAt: started.Add(e.config.LearningDuration), MinimumDuration: e.config.LearningDuration,
 		Readiness: readiness, Ready: ready, ReadinessReason: reason,
 		Profiles: e.profiles.Load(), AssetProfiles: e.assetProfiles.Load(), MatureAssets: mature, LearningAssets: learning,
-		CandidatePatterns: candidateCount, CandidateAssets: candidateAssets, Candidates: candidates, AssetMaturity: maturity,
+		CandidatePatterns: candidateCount, CandidateAssets: candidateAssets, Candidates: candidates, PromotedCandidates: e.promotedCandidateIDs(now), PromotionFailures: e.promotionFailureList(now), AssetMaturity: maturity,
 		NewPatternRate: e.newPatternRate(now), TimeCoverage: e.timeCoverage(), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Excluded: e.excluded.Load(), Evicted: e.evicted.Load(),
 	}
 }
@@ -1216,6 +1277,8 @@ func (e *Engine) Reset() {
 	e.identityMu.Unlock()
 	e.candidateMu.Lock()
 	e.candidates = make(map[string]*candidateState)
+	e.promoted = make(map[string]time.Time)
+	e.promotionFailures = make(map[string]PromotionFailure)
 	e.candidateMu.Unlock()
 	e.exclusionMu.Lock()
 	e.exclusions = make(map[string]time.Time)
@@ -1238,7 +1301,7 @@ func (e *Engine) Reset() {
 
 func (e *Engine) Snapshot(now time.Time) Snapshot {
 	mode, started := e.mode(now)
-	result := Snapshot{Version: 5, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), CapturedAt: now, Profiles: make([]Profile, 0, e.profiles.Load()), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Excluded: e.excluded.Load(), Evicted: e.evicted.Load(), Candidates: e.Candidates(0), MinStatSamples: e.config.MinStatSamples, BucketsPerDay: e.bucketsPerDay()}
+	result := Snapshot{Version: 6, Mode: mode, LearningStarted: started, LearningEndsAt: started.Add(e.config.LearningDuration), CapturedAt: now, Profiles: make([]Profile, 0, e.profiles.Load()), Observed: e.observed.Load(), Dropped: e.dropped.Load(), Excluded: e.excluded.Load(), Evicted: e.evicted.Load(), Candidates: e.Candidates(0), MinStatSamples: e.config.MinStatSamples, BucketsPerDay: e.bucketsPerDay()}
 	for i := range e.shards {
 		e.shards[i].mu.RLock()
 		for _, profile := range e.shards[i].profiles {
@@ -1261,6 +1324,19 @@ func (e *Engine) Snapshot(now time.Time) Snapshot {
 			profile.Operations[operation] = count
 		}
 		result.CandidateProfiles = append(result.CandidateProfiles, CandidateProfileSnapshot{ID: id, Profile: profile, SrcAsset: candidate.srcAsset, DstAsset: candidate.dstAsset})
+	}
+	result.PromotedCandidates = make([]PromotedCandidate, 0, len(e.promoted))
+	result.PromotionFailures = make([]PromotionFailure, 0, len(e.promotionFailures))
+	cutoff := now.Add(-promotedCandidateRetention)
+	for id, at := range e.promoted {
+		if !at.Before(cutoff) {
+			result.PromotedCandidates = append(result.PromotedCandidates, PromotedCandidate{ID: id, PromotedAt: at})
+		}
+	}
+	for _, failure := range e.promotionFailures {
+		if !failure.FailedAt.Before(cutoff) {
+			result.PromotionFailures = append(result.PromotionFailures, failure)
+		}
 	}
 	e.candidateMu.RUnlock()
 	e.exclusionMu.RLock()
@@ -1302,7 +1378,7 @@ func (e *Engine) AssetProfile(key AssetKey) (AssetBehaviorProfile, bool) {
 }
 
 func (e *Engine) Restore(snapshot Snapshot) error {
-	if snapshot.Version > 5 {
+	if snapshot.Version > 6 {
 		return fmt.Errorf("unsupported behavior baseline snapshot version %d", snapshot.Version)
 	}
 	e.Reset()
@@ -1353,6 +1429,21 @@ func (e *Engine) Restore(snapshot Snapshot) error {
 		}
 		state := &candidateState{Candidate: candidate, profile: profile, srcAsset: srcAsset, dstAsset: dstAsset, days: days}
 		e.candidates[candidate.ID] = state
+	}
+	if e.promoted == nil {
+		e.promoted = make(map[string]time.Time)
+		e.promotionFailures = make(map[string]PromotionFailure)
+	}
+	cutoff := time.Now().UTC().Add(-promotedCandidateRetention)
+	for _, promoted := range snapshot.PromotedCandidates {
+		if strings.TrimSpace(promoted.ID) != "" && !promoted.PromotedAt.Before(cutoff) {
+			e.promoted[promoted.ID] = promoted.PromotedAt
+		}
+	}
+	for _, failure := range snapshot.PromotionFailures {
+		if strings.TrimSpace(failure.ID) != "" && !failure.FailedAt.Before(cutoff) {
+			e.promotionFailures[failure.ID] = failure
+		}
 	}
 	e.candidateMu.Unlock()
 	e.exclusionMu.Lock()
